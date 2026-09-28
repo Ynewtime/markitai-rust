@@ -33,7 +33,8 @@ recall is diagnostic, never a substitute for the exact-content checks.
 - [Second recovery](formats-recovery-r4.md): 15/24 exact passes, with all remaining differences listed.
 - [MSG/HTML recovery](formats-recovery-r5.md): 17/24 exact passes; four differences and three expected image-only rejections.
 - [Final round-three format check](formats-recovery-r6.md): the same 24 case outcomes after the CSS visibility fix.
-- [Full HTML corpus](html-corpus.md): 24/209 exact local API passes; remaining body differences and errors stay in the denominator.
+- [Round-four format check](formats-recovery-r7.md): 17/24 exact passes; PPTX text recovered, image differences retained.
+- [Full HTML corpus](html-corpus.md): 27/209 exact local API passes, 182 differences and zero conversion errors.
 
 Each record identifies a frozen artifact; later fixes do not retroactively change
 its measurements. Full JSON reports retain the complete fixture denominator.
@@ -67,3 +68,13 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
 - [Repeated API measurement method](api-benchmark-method.md) and
   [results](performance-api-round3.md). The native C ABI uses a pre-encoded
   request; these are not measurements of the new Python binding's full call cost.
+
+## Round-four evidence
+
+- [Source, rebuilt artifacts and performance](performance-round4.md): 189 Rust
+  test executions, installed host packages, exact-output CLI/C-ABI measurements
+  and explicit boundaries; source `5280fd3`.
+- [Artifact identities](artifacts-round4.json), [CLI samples](cli-round4.json)
+  and [C-ABI samples](api-round4.json) are unchanged copies of the local records.
+- Persistent document caching is tested with local request counters. Fetch
+  caching remains a [planned implementation](../decisions/0003-persistent-fetch-cache.md).

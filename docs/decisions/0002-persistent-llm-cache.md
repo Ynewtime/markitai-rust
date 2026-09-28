@@ -29,8 +29,8 @@ process-memory and fetch caches require their own contracts.
 Use a native cache-version namespace to avoid reading incompatible legacy
 structured responses as Markdown. Bundled SQLite is the selected storage engine:
 WAL and transactional admission/eviction provide a bounded shared cache while
-keeping the CLI independent of a system SQLite installation. Measure and record
-its binary-size cost with release validation. A single oversized result
+keeping the CLI independent of a system SQLite installation. Record total binary growth with release validation; isolating SQLite
+from other added code requires a separate controlled build comparison. A single oversized result
 must be rejected without evicting existing useful entries.
 
 The reference processor currently omits some public enabled/size wiring, and its
