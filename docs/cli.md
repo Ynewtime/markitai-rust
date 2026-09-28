@@ -13,6 +13,8 @@ markitai urls.urls -o output/ --resume
 markitai https://example.com/article -s static -o output/
 markitai -c isolated.json --config-json '{"output":{"on_conflict":"skip"}}' note.txt -o output/
 markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
+markitai serve --host 127.0.0.1 --port 3600 --no-open
+markitai mcp
 ```
 
 ## 已实现的命令行为
@@ -20,6 +22,7 @@ markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 - 单文件和 URL 未给 `-o` 时输出 Markdown 到 stdout；`--pure` 去除 frontmatter；提供 `-o chosen.md` 可选择准确文件名。
 - `--json -o` 输出 version 1.0 envelope，字段名与参考接口一致。运行失败仍有机器可读条目；参数错误只输出 stderr 并退出 2。
 - 目录递归转换保留相对路径，支持重复 `--glob`、`!` 排除和 `--max-depth`，使用受限线程并发；目录中的 `.urls` 也会发现。同批任务预留独立名称，即使冲突策略为 overwrite/skip，也不会让两个新结果互相覆盖；大小写匹配按输出文件系统探测。URL 列表支持文本和 JSON 两种格式。
+- `--llm-concurrency` 限制整个运行中的在途模型请求，目录中的文件与 URL 共用该上限；重试等待和缓存命中不占请求槽。文件与 URL 的转换并发仍分别由 `-j` 和 `--url-concurrency` 控制。
 - 目录/URL 列表普通转换项失败退出 10；单项失败退出 1，成功退出 0；状态存储致命错误退出 1，中断退出 130/143。`--quiet` 仍显示错误。
 - 四种输入模式支持持久 JSON 报告。`output.report` 为 null 或省略时，目录/URL 列表默认启用，单文件/URL 默认关闭；true/false 显式覆盖。报告写入输出目录的 `.markitai/reports/`，各模式的字段和计数差异见 [reports.md](reports.md)。
 - 报告发布失败保留已完成文件及 stdout JSON 条目，并退出非零；报告不替代 stdout envelope。stdout 转换、dry run、无可恢复状态的空目录和失败/跳过的单项不生成报告；批量部分失败仍可生成报告。报告的 skip 冲突策略保留已有报告。
@@ -29,6 +32,8 @@ markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 - `config list/get/path/validate/set` 可用；list 支持 JSON/YAML/table；默认隐藏凭据。set 原子更新配置，不写入临时 `--config-json` 内容。
 - `init --yes [--local|-o path]` 创建最小配置；已有文件不覆盖。
 - `doctor [--json]` 报告当前开发版原生能力；诊断 JSON 暂为 Rust 新 schema，尚未与旧 doctor 逐字段对齐。
+- `serve` 启动原生 REST 服务，支持提交文件/URL、任务快照与 SSE、结果/资产/ZIP 下载及持久历史。沿用 host、port、no-open、no-auth、allowed-host 参数；完整工作区界面和其他未迁移接口见 [REST 服务](serve.md)。
+- `mcp` 通过标准输入/输出提供 `convert_document`、`convert_url`、`batch_convert`、`job_status` 四个工具。配置与文件输出沿用同一核心，批处理任务保存在当前 MCP 进程内；协议和结果边界见 [MCP 服务](mcp.md)。
 - `--dry-run` 仅枚举输入和目标，不调用转换器、不创建输出目录。
 - `--compress/--no-compress` 映射共享图片处理配置；未启用 LLM/OCR 的独立图片返回 `image_only` 跳过状态，不写空文档。
 - 非 pure 本地文档的 LLM 结果可跨进程复用；`--no-cache` 跳过读取但仍写入成功结果，`--cache` 清除此绕过设置，不强制启用已禁用的缓存。`--no-cache-for` 接受逗号分隔的 glob，JSON 条目的 `cache_hit/llm_cache_hit` 反映实际命中。
@@ -37,7 +42,7 @@ markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 
 ## 明确的迁移缺口
 
-URL 抓取的其他策略、图片/URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、交互配置、订阅登录、serve、MCP、文件日志仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取的其他策略、图片/URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、交互配置、订阅登录、serve 完整工作区、文件日志仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片和 SVG 可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
 
 持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 

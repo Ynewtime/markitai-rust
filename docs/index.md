@@ -5,7 +5,7 @@
 - [Compatibility](compatibility.md): contracts against the reference release.
 - [Development](development.md): build, test isolation, and recovery.
 - [Formats](formats.md): native readers and fidelity gaps.
-- [Images](images.md): raster inputs, shared compression and resource boundaries.
+- [Images](images.md): raster/SVG inputs, shared compression and resource boundaries.
 - [HTML](html.md) and [MSG](msg.md): extraction semantics and known gaps.
 - [LLM](llm.md): model routing, prompts, retries and provider requests.
 - [Persistent cache](cache.md): document reuse, bypass semantics, storage and CLI management.
@@ -17,6 +17,8 @@
 - [Output ownership](output-ownership.md): member leases, prepared receipts and safe retries.
 - [Recovery storage](state-storage.md): checkpoint codec, journal, replay and durability boundaries.
 - [History](history.md): optional independent output/asset archives and metadata.
+- [REST service](serve.md): native jobs, event streams, results and persistent history.
+- [MCP service](mcp.md): stdio tools, conversion results and in-memory batch jobs.
 - [CLI](cli.md) and [bindings](bindings.md): current user interfaces.
 - [Validation](validation/README.md): differential checks and measured evidence.
 - [Performance plan](performance-plan.md): profile tradeoffs, binding costs and long-lived memory checks.

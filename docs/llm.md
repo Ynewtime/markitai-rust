@@ -119,9 +119,33 @@ so an exhausted budget does not wait needlessly.
 requests, transport retries and fallback groups. Zero disables this budget.
 The current text or standalone-image enhancement performs one logical operation
 per document. A future multi-stage OCR/metadata pipeline must share this budget
-across its operations rather than resetting it per call. Batch concurrency is
-currently managed by the caller; there is no process-wide `llm.concurrency`
-scheduler shared between independent conversions.
+across its operations rather than resetting it per call.
+
+`LlmRuntime` supplies the request capacity for one caller-controlled run. A CLI
+run shares one instance across its file and URL workers, using `llm.concurrency`
+(default 10); `--llm-concurrency` changes this cap independently of batch worker
+concurrency. Text and image requests use the same capacity. Native callers can
+pass a borrowed runtime through `ConvertContext.llm_runtime`; cloning a runtime
+shares its capacity. A supplied runtime's constructor limit is authoritative,
+even if individual conversions have different configuration values. Separately
+constructed runtimes are independent. Calls without a supplied runtime create
+a local instance for their enhancement; independent binding calls therefore do
+not acquire a process-wide or cross-process limit automatically.
+
+Waiting requests enter in arrival order. A permit covers the HTTP attempt,
+including reading and interpreting its full response, and is released on success
+or error. Retries reacquire capacity; backoff sleep holds no permit. Persistent
+cache hits return without acquiring one. Queue waiting is separate from the
+configured HTTP timeout, which applies after admission to a request. This
+blocking limiter introduces no async runtime dependency and does not cancel
+already queued conversions. Hosts with an async event loop should dispatch the
+blocking conversion outside that loop. CLI interruption continues to use the
+batch scheduler's drain behavior.
+
+The reference also scopes its shared runtime to a batch or service job; its
+independent processors may own separate semaphores. This implementation does
+not add provider-specific concurrency, rate-per-minute accounting, adaptive
+routing metrics or a budget shared across unrelated documents.
 
 Public usage retains the existing four fields per model: `requests`,
 `input_tokens`, `output_tokens` and `cost_usd`. `usage.requests` counts parsed
@@ -183,6 +207,11 @@ precedence, literal document braces and token-limit parameter mapping. Cache
 checks additionally cover credential-independent hits, zero new usage, bypass
 refresh, prompt/content/model invalidation, disabled/pure/URL exclusions, corrupt
 or unwritable state, and rejecting token-truncated or blank cache candidates.
+Shared-runtime tests hold partial HTTP response bodies to check that concurrent
+text and image requests stay within the same cap. They also exercise requests
+during another request's backoff, terminal and budget failures, and a cache hit
+while every permit is occupied. `llm_runtime.rs` tests cloning, independent runs,
+waiting callers, invalid zero capacity and permit release during unwinding.
 
 HTTP tests bind loopback listeners, capture request headers and JSON, return
 scripted responses, and use bounded socket timeouts. Retry sleeps are injected

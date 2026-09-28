@@ -1,9 +1,10 @@
-# Raster images and shared assets
+# Images and shared assets
 
 Raster preparation lives in the Rust core, so CLI and language adapters use the
 same decoding, resize and asset rules. No Python process, image editor or remote
 image fetch is involved. The enabled codecs are JPEG, PNG, GIF, BMP, TIFF and
-WebP; SVG rendering and HEIF/AVIF decoding remain unfinished.
+WebP. Static SVG inputs are rendered natively with resvg. HEIF/AVIF decoding
+remains unfinished.
 
 ## Standalone inputs
 
@@ -25,8 +26,34 @@ reference Python API. Missing files still report a missing-file error.
 
 `ocr=True` with LLM enabled selects image vision. `MARKITAI_NO_VLM_OCR` prevents
 that upload; the current build reports that the local backend is unavailable.
-Local OCR, PDF page OCR, SVG/HEIF/AVIF conversion, screenshots, alt-text and
+Local OCR, PDF page OCR, HEIF/AVIF conversion, screenshots, alt-text and
 image-description enrichment still have explicit unsupported paths.
+
+## SVG inputs
+
+A standalone SVG retains its original bytes as the document's SVG asset. The
+vision request receives a separate PNG rendered in process; no Python, browser,
+external executable or network fetch is involved. Actual raster magic takes
+precedence over an incorrect `.svg` suffix, and SVG XML under a supported image
+suffix is recognized as SVG. UTF-8 XML, viewBox sizing, static shapes, gradients,
+clipping, masks, text and embedded base64 PNG/JPEG/GIF/WebP images use resvg's
+static renderer. The PNG preserves transparency and renders at 2048 pixels wide with proportional
+height, matching the reference's default vision width even for small vector
+viewBoxes. Raster compression and maximum-width settings do not lower this
+vector preview resolution. An output exceeding 32 million pixels is rejected
+before allocating the canvas. Renderer and font differences remain possible.
+
+System fonts are loaded lazily once when text is present. Their files are the
+only ambient rendering resources read. SVG-specified file paths and network
+resources are never loaded. Font selection therefore depends on installed fonts;
+missing required fonts or glyphs are explicit errors. Empty or fully transparent
+renderings fail instead of uploading a blank image. Script/event handlers,
+animation, foreignObject, XML processing instructions/DTDs, external image/use
+references and nested SVG data images are rejected. Hyperlinks are preserved
+but never followed. Unsupported SVG features outside resvg's static support are
+not claimed to have browser fidelity. Embedded SVG assets inside other document
+formats retain the existing original-byte/warning path; this slice adds standalone
+SVG vision ingestion, not image enrichment or local SVG OCR.
 
 ## Embedded assets
 
@@ -51,8 +78,10 @@ All relevant attributes are visited once; the first duplicate attribute wins.
 Candidate lists preserve surviving descriptors and URI suffixes. Filtering a
 candidate retains alternatives; filtering media destinations removes the affected
 attribute rather than its container. Audio/video sources alone do not count as
-image references; image candidate lists and video posters do. CSS/style content,
-custom lazy-load attributes, code and comments remain literal.
+image references; image candidate lists and video posters do. Static CSS resource
+positions in actual style attributes/blocks are also relocated, as specified in
+[CSS resources](css-resources.md). Ordinary CSS strings, custom lazy-load
+attributes, code and comments remain literal.
 
 With compression enabled, maximum width/height use proportional Lanczos resize.
 JPEG uses the configured quality and composites alpha onto white. PNG keeps
@@ -82,7 +111,17 @@ while resizing, compositing or encoding because those buffers coexist. This is
 not a peak-RSS guarantee. General local inputs have the reference's 500 MiB
 preflight limit; individual parsers retain their tighter format-specific limits.
 
+SVG XML is limited to 8 MiB, 50,000 nodes and 64 nesting levels before the recursive XML parser or renderer runs.
+The natural SVG canvas and the total decoded embedded raster pixels each have
+a 32-million-pixel limit. SVG render surfaces, font data, geometry, filter
+temporaries and encoding buffers can coexist; these bounds are not a total
+process-memory or execution-time guarantee. PNG/JPEG/GIF/WebP embedded payloads
+also pass the existing raster decoder limits. No SVGZ decompressor is enabled.
+
 The implementation uses the bounded decoder interfaces in
 [image](https://docs.rs/image/0.25.10/image/struct.ImageReader.html) and its
 [resource limits](https://docs.rs/image/0.25.10/image/struct.Limits.html).
 No codec downloads or external executable installation occur during conversion.
+SVG uses [resvg 0.48.1](https://docs.rs/resvg/0.48.1/resvg/) with explicit text,
+system-font and raster-image features. Its binary size contribution has not yet
+been measured in this implementation round.

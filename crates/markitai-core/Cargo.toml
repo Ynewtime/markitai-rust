@@ -9,6 +9,7 @@ license.workspace = true
 base64 = "0.22"
 tiff = "0.11.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff", "webp"] }
+resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 lopdf = { version = "0.45", default-features = false }
 png = "0.18"
 serde.workspace = true

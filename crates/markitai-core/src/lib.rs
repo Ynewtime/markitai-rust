@@ -6,12 +6,14 @@ pub mod formats;
 mod images;
 mod llm;
 pub mod llm_cache;
+mod llm_runtime;
 mod markdown;
 pub mod output;
 mod output_profiles;
 mod types;
 
 pub use images::is_image_extension;
+pub use llm_runtime::LlmRuntime;
 pub use types::*;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,11 +21,16 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Instant;
 
+/// Report local model configuration without contacting a provider or exposing keys.
+pub fn llm_capabilities(config: &Value) -> LlmCapabilities {
+    llm::capabilities(config, &config::environment())
+}
+
 pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput> {
     convert_with_context(source, options, ConvertContext::default())
 }
 
-/// Retains CLI option provenance without adding fields to binding requests.
+/// Shares native run resources without adding fields to binding requests.
 #[doc(hidden)]
 pub fn convert_with_context(
     source: &str,
@@ -253,12 +260,26 @@ pub fn convert_with_publication(
             warnings: Vec::new(),
         };
         let enhanced = if let Some(image) = &vision {
-            llm::enhance_image_with_source(input, &source_context, image.mime, &image.bytes, &cfg)
-                .map(without_cache)
+            llm::enhance_image_with_source_and_runtime(
+                input,
+                &source_context,
+                image.mime,
+                &image.bytes,
+                &cfg,
+                context.llm_runtime,
+            )
+            .map(without_cache)
         } else if !pure && !is_url {
-            llm::enhance_with_cache(input, &source_context, source, &cfg)
+            llm::enhance_with_cache_and_runtime(
+                input,
+                &source_context,
+                source,
+                &cfg,
+                context.llm_runtime,
+            )
         } else {
-            llm::enhance_with_source(input, &source_context, &cfg).map(without_cache)
+            llm::enhance_with_source_and_runtime(input, &source_context, &cfg, context.llm_runtime)
+                .map(without_cache)
         };
         match enhanced {
             Ok(enhancement) => {

@@ -47,6 +47,14 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Debug, Serialize)]
+pub struct LlmCapabilities {
+    pub configured: bool,
+    pub routable: bool,
+    pub effective: bool,
+    pub models: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConvertOptions {
@@ -60,11 +68,12 @@ pub struct ConvertOptions {
     pub profile: Option<String>,
 }
 
-/// CLI-only provenance that is not part of the host JSON protocol.
+/// Native run context that is not part of the host JSON protocol.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConvertContext<'a> {
     pub explicit_fetch_strategy: Option<&'a str>,
+    pub llm_runtime: Option<&'a crate::LlmRuntime>,
 }
 
 #[derive(Debug, Deserialize)]

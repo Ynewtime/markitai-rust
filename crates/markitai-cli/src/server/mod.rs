@@ -1,0 +1,167 @@
+//! Native job service. Blocking conversion work is drained before shutdown returns.
+mod files;
+mod http;
+mod jobs;
+mod security;
+mod store;
+mod types;
+
+use axum::{
+    Router, middleware,
+    routing::{get, post},
+};
+use serde_json::Value;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tokio::sync::{Semaphore, watch};
+
+pub struct ServeOptions {
+    pub host: String,
+    pub port: u16,
+    pub no_open: bool,
+    pub no_auth: bool,
+    pub allowed_host: Vec<String>,
+}
+
+struct State {
+    cfg: Value,
+    root: PathBuf,
+    jobs: Mutex<HashMap<String, Arc<jobs::Job>>>,
+    file_slots: Arc<Semaphore>,
+    url_slots: Arc<Semaphore>,
+    closing: AtomicBool,
+    persistence_failed: AtomicBool,
+    shutdown: watch::Sender<bool>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    token: Option<String>,
+    allowed_hosts: HashSet<String>,
+}
+
+pub fn run(cfg: Value, options: ServeOptions) -> Result<(), String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?
+        .block_on(serve(cfg, options))
+}
+
+async fn serve(cfg: Value, options: ServeOptions) -> Result<(), String> {
+    let root = markitai_core::config::home().join("serve/jobs");
+    store::private_dir(&root).map_err(|e| e.to_string())?;
+    let (shutdown, _) = watch::channel(false);
+    let token = if options.no_auth {
+        None
+    } else {
+        Some(
+            std::env::var("MARKITAI_SERVE_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}{}",
+                        uuid::Uuid::new_v4().simple(),
+                        uuid::Uuid::new_v4().simple()
+                    )
+                }),
+        )
+    };
+    let allowed_hosts = options
+        .allowed_host
+        .iter()
+        .map(|s| security::allowed_host(s).map_err(|e| e.detail))
+        .collect::<Result<HashSet<_>, _>>()?;
+    let file_count = cfg["batch"]["concurrency"].as_u64().unwrap_or(4).max(1) as usize;
+    let url_count = cfg["batch"]["url_concurrency"].as_u64().unwrap_or(4).max(1) as usize;
+    let state = Arc::new(State {
+        cfg,
+        root,
+        jobs: Mutex::new(HashMap::new()),
+        file_slots: Arc::new(Semaphore::new(file_count)),
+        url_slots: Arc::new(Semaphore::new(url_count)),
+        closing: AtomicBool::new(false),
+        persistence_failed: AtomicBool::new(false),
+        shutdown,
+        tasks: Mutex::new(Vec::new()),
+        token,
+        allowed_hosts,
+    });
+    store::rehydrate(&state.root, &state.jobs).map_err(|e| e.to_string())?;
+    let router = Router::new()
+        .route("/", get(http::index))
+        .route("/api/capabilities", get(http::capabilities))
+        .route("/api/jobs", post(http::create))
+        .route("/api/jobs/{job_id}", get(http::snapshot))
+        .route("/api/jobs/{job_id}/events", get(http::events))
+        .route(
+            "/api/jobs/{job_id}/items/{item_id}/result",
+            get(files::result),
+        )
+        .route("/api/jobs/{job_id}/files/{*relpath}", get(files::download))
+        .route("/api/jobs/{job_id}/archive", get(files::job_archive))
+        .route("/api/history", get(http::history))
+        .route("/api/history/archive", get(files::history_archive))
+        .route("/api/history/{job_id}", axum::routing::delete(http::delete))
+        .fallback(http::missing)
+        .method_not_allowed_fallback(http::method_not_allowed)
+        .layer(axum::extract::DefaultBodyLimit::max(types::MAX_REQUEST))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security::guard,
+        ))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind((options.host.as_str(), options.port))
+        .await
+        .map_err(|e| e.to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    eprintln!("Markitai server listening on http://{address}");
+    if let Some(token) = &state.token {
+        eprintln!("Remote access token: {token}");
+    }
+    if !options.no_open {
+        eprintln!(
+            "The native service exposes its REST API at this address; an interactive web UI is not bundled."
+        );
+    }
+    let shutdown_state = state.clone();
+    let outcome = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        #[cfg(unix)]
+        {
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("install SIGTERM handler");
+            tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{} }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        shutdown_state.closing.store(true, Ordering::SeqCst);
+        shutdown_state.shutdown.send_replace(true);
+        eprintln!("Server stopping: draining active conversions and saving history.");
+    })
+    .await;
+    state.closing.store(true, Ordering::SeqCst);
+    state.shutdown.send_replace(true);
+    let tasks = std::mem::take(&mut *state.tasks.lock().unwrap());
+    for task in tasks {
+        if let Err(error) = task.await {
+            eprintln!("Serve task failed: {error}");
+            state.persistence_failed.store(true, Ordering::SeqCst);
+        }
+    }
+    outcome.map_err(|e| e.to_string())?;
+    if state.persistence_failed.load(Ordering::SeqCst) {
+        return Err("one or more jobs could not be saved to history".into());
+    }
+    Ok(())
+}

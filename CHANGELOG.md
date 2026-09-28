@@ -21,6 +21,10 @@
 - Unix directory/URL-list resume with durable dispatch, separate file/URL concurrency limits, restored reports and controlled interruption.
 - Per-member CLI publication locks and prepared ownership receipts for safe failed-item retries across process restarts.
 - Optional CLI history archives with compatible job metadata, bounded private copies, Unicode conflict handling and relocated asset references.
+- Native bounded SVG rendering for model vision while preserving original vector assets.
+- Shared per-run LLM request limits across file and URL workers, with retry waits and cache hits outside the limit.
+- Native REST job submission, snapshots and event streams, result/asset/ZIP downloads, and persistent history access.
+- Native stdio MCP with four compatible conversion tools, structured results and bounded in-memory batch jobs.
 
 ### Fixed
 

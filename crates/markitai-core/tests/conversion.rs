@@ -523,6 +523,7 @@ fn cached_url_reuses_extracted_content_without_changing_binding_json() {
         },
         markitai_core::ConvertContext {
             explicit_fetch_strategy: Some("static"),
+            ..Default::default()
         },
     );
     assert!(

@@ -1,4 +1,6 @@
-//! Bounded raster decoding and shared asset preparation.
+//! Bounded image decoding and shared asset preparation.
+
+mod svg;
 
 use crate::{Asset, Document, Error, Result, config, output_profiles};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Rgb, RgbImage};
@@ -236,8 +238,21 @@ pub(crate) fn extract(path: &Path, cfg: &Value) -> Result<(Document, VisionImage
         .unwrap_or("")
         .to_ascii_lowercase();
     let detected = image::guess_format(&bytes).ok();
+    if detected.is_none() && (extension == "svg" || svg::is_svg(&bytes)) {
+        let image = svg::render(&bytes)?;
+        let (vision_bytes, _, mime) = encode(&image, cfg, true)?;
+        let mut doc = image_document(path, "image.svg", bytes);
+        doc.metadata.insert("format".into(), "SVG".into());
+        return Ok((
+            doc,
+            VisionImage {
+                mime,
+                bytes: vision_bytes,
+            },
+        ));
+    }
     if detected == Some(ImageFormat::Avif)
-        || detected.is_none() && matches!(extension.as_str(), "svg" | "heic" | "heif" | "avif")
+        || detected.is_none() && matches!(extension.as_str(), "heic" | "heif" | "avif")
     {
         let extension = if detected == Some(ImageFormat::Avif) {
             "avif"
@@ -276,24 +291,7 @@ pub(crate) fn extract(path: &Path, cfg: &Value) -> Result<(Document, VisionImage
     };
     // An internal content name avoids interpreting source filename punctuation as Markdown.
     let asset_name = format!("image.{vision_extension}");
-    let title = path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .replace(['\r', '\n'], " ");
-    let alt = title
-        .replace('\\', "\\\\")
-        .replace('[', "\\[")
-        .replace(']', "\\]");
-    let mut doc = Document {
-        markdown: format!("# {title}\n\n![{alt}](.markitai/assets/{asset_name})\n"),
-        assets: vec![Asset {
-            name: asset_name,
-            bytes: vision_bytes.clone(),
-        }],
-        ..Default::default()
-    };
-    doc.metadata.insert("title".into(), title.into());
+    let mut doc = image_document(path, &asset_name, vision_bytes.clone());
     if cfg["image"]["format"] == "webp" && config::enabled(cfg, "/image/compress") {
         notice(
             &mut doc,
@@ -307,6 +305,28 @@ pub(crate) fn extract(path: &Path, cfg: &Value) -> Result<(Document, VisionImage
             bytes: vision_bytes,
         },
     ))
+}
+
+fn image_document(path: &Path, asset_name: &str, bytes: Vec<u8>) -> Document {
+    let title = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .replace(['\r', '\n'], " ");
+    let alt = title
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    let mut doc = Document {
+        markdown: format!("# {title}\n\n![{alt}](.markitai/assets/{asset_name})\n"),
+        assets: vec![Asset {
+            name: asset_name.into(),
+            bytes,
+        }],
+        ..Default::default()
+    };
+    doc.metadata.insert("title".into(), title.into());
+    doc
 }
 
 #[cfg(test)]
@@ -571,5 +591,108 @@ mod tests {
             message.contains("32 million") || message.contains("limit"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn svg_conversion_sends_2048_pixel_png_and_publishes_original_vector_asset() {
+        use base64::Engine;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("vector.svg");
+        let source = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect width="100" height="50" fill="red"/></svg>"#;
+        std::fs::write(&input, source).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("SVG vision request not received: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let request = loop {
+                let mut buffer = [0; 4096];
+                let count = stream.read(&mut buffer).unwrap();
+                assert_ne!(count, 0);
+                bytes.extend_from_slice(&buffer[..count]);
+                assert!(bytes.len() < 2 * 1024 * 1024);
+                if let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    assert!(headers.starts_with("POST /v1/chat/completions "));
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        break serde_json::from_slice::<Value>(&bytes[end + 4..end + 4 + length])
+                            .unwrap();
+                    }
+                }
+            };
+            let response =
+                r##"{"choices":[{"message":{"content":"# Read vector\n\nA red rectangle."}}]}"##;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            request
+        });
+        let converted = crate::convert(
+            input.to_str().unwrap(),
+            crate::ConvertOptions {
+                output_dir: Some(directory.path().join("out")),
+                config: Some(json!({
+                    "cache":{"enabled":false},"history":{"record":false},
+                    "prompts":{"dir":directory.path().join("prompts")},"log":{"dir":null},
+                    "ocr":{"enabled":false},"screenshot":{"enabled":false},
+                    "image":{"compress":false,"max_width":25,"alt_enabled":false,"desc_enabled":false},
+                    "llm":{"enabled":true,"keep_base":true,"failure_policy":"fail","router_settings":{"num_retries":0},
+                        "model_list":[{"model_name":"local-svg-vision","litellm_params":{"model":"openai/test-svg","api_base":base,"api_key":"local-fixture-only"},"model_info":{"supports_vision":true}}]}
+                })),
+                ..Default::default()
+            },
+        );
+        let request = server.join().unwrap();
+        let output = converted.unwrap();
+        let data_url = request["messages"][1]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|block| block["image_url"]["url"].as_str())
+            .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_url.strip_prefix("data:image/png;base64,").unwrap())
+            .unwrap();
+        let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(pixels.dimensions(), (2048, 1024));
+        assert_eq!(pixels.get_pixel(1024, 512).0, [255, 0, 0, 255]);
+        assert_eq!(output.usage.requests, 1);
+        assert_eq!(output.assets.len(), 1);
+        assert_eq!(output.assets[0].extension().unwrap(), "svg");
+        assert_eq!(std::fs::read(&output.assets[0]).unwrap(), source);
+        assert_eq!(std::fs::read(&input).unwrap(), source);
+        assert!(output.markdown.contains(".svg)"));
+        assert!(output.llm_markdown.unwrap().contains("A red rectangle."));
+        assert!(output.output_path.unwrap().is_file());
     }
 }

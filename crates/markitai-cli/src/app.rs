@@ -150,12 +150,20 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Web service (not yet implemented).
+    /// Run the native REST conversion service.
     Serve {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 3600)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+        #[arg(long)]
+        no_auth: bool,
+        #[arg(long, action = ArgAction::Append, value_name = "HOSTNAME")]
+        allowed_host: Vec<String>,
     },
-    /// MCP service (not yet implemented).
+    /// Run the native MCP service over standard input/output.
     Mcp,
 }
 
@@ -534,11 +542,23 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     } else {
         None
     };
+    let llm_runtime = if config::enabled(&cfg, "/llm/enabled") {
+        Some(
+            markitai_core::LlmRuntime::new(
+                usize::try_from(cfg["llm"]["concurrency"].as_u64().unwrap_or(1))
+                    .map_err(runtime)?,
+            )
+            .map_err(runtime)?,
+        )
+    } else {
+        None
+    };
     let context = ConvertContext {
         explicit_fetch_strategy: cli
             .strategy
             .as_deref()
             .filter(|strategy| *strategy != "auto"),
+        llm_runtime: llm_runtime.as_ref(),
     };
     if !batch {
         let mut task = tasks.remove(0);
@@ -1278,7 +1298,7 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 ));
             }
             config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
-            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":false,"screenshots":false,"browser":false,"cache":true,"serve":false,"mcp":false},"status":"development"});
+            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":false,"screenshots":false,"browser":false,"cache":true,"serve":true,"mcp":true},"status":"development"});
             if *as_json {
                 println!(
                     "{}",
@@ -1286,7 +1306,7 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 );
             } else {
                 println!(
-                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache\nNot available: OCR, screenshots, browser, serve, MCP",
+                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache, REST conversion service, stdio MCP\nNot available: OCR, screenshots, browser",
                     markitai_core::VERSION
                 );
             }
@@ -1296,8 +1316,27 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
             return cache_command(command, &cfg);
         }
         Command::Auth { .. } => return Err(unsupported("Provider authentication commands")),
-        Command::Serve { .. } => return Err(unsupported("Web server")),
-        Command::Mcp => return Err(unsupported("MCP server")),
+        Command::Serve {
+            host,
+            port,
+            no_open,
+            no_auth,
+            allowed_host,
+        } => {
+            let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
+            crate::server::run(
+                cfg,
+                crate::server::ServeOptions {
+                    host: host.clone(),
+                    port: *port,
+                    no_open: *no_open,
+                    no_auth: *no_auth,
+                    allowed_host: allowed_host.clone(),
+                },
+            )
+            .map_err(runtime)?;
+        }
+        Command::Mcp => crate::mcp::run(cli.config.clone(), overrides).map_err(runtime)?,
     }
     Ok(0)
 }

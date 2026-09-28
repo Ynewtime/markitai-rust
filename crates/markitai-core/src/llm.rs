@@ -1,5 +1,5 @@
 //! Native text and image requests with a bounded routing and retry policy.
-use crate::{ConversionUsage, Error, Result, config, llm_cache};
+use crate::{ConversionUsage, Error, LlmRuntime, Result, config, llm_cache};
 use base64::Engine;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -79,21 +79,23 @@ impl Failure {
     }
 }
 
-pub fn enhance_with_source(
+pub(crate) fn enhance_with_source_and_runtime(
     markdown: &str,
     source: &str,
     cfg: &Value,
+    runtime: Option<&LlmRuntime>,
 ) -> Result<(String, ConversionUsage)> {
-    let enhanced = enhance_with_cache(markdown, source, source, cfg)?;
+    let enhanced = enhance_with_cache_and_runtime(markdown, source, source, cfg, runtime)?;
     Ok((enhanced.markdown, enhanced.usage))
 }
 
 /// Source labels enter prompts; the original context only matches bypass globs.
-pub(crate) fn enhance_with_cache(
+pub(crate) fn enhance_with_cache_and_runtime(
     markdown: &str,
     source_label: &str,
     cache_context: &str,
     cfg: &Value,
+    runtime: Option<&LlmRuntime>,
 ) -> Result<Enhancement> {
     enhance_cached(
         markdown,
@@ -102,6 +104,7 @@ pub(crate) fn enhance_with_cache(
         cfg,
         None,
         &mut std::thread::sleep,
+        runtime,
     )
 }
 
@@ -112,6 +115,7 @@ fn enhance_cached(
     cfg: &Value,
     supplied_env: Option<&HashMap<String, String>>,
     sleep: &mut dyn FnMut(Duration),
+    runtime: Option<&LlmRuntime>,
 ) -> Result<Enhancement> {
     let prompts = prompts(markdown, source_label, cfg, None)?;
     let remote = |source: &str| source.starts_with("http://") || source.starts_with("https://");
@@ -167,7 +171,7 @@ fn enhance_cached(
             Err(_) => warnings.push("Persistent LLM cache is unavailable; enhancement continued without a cached answer.".into()),
         }
     }
-    let (markdown, usage) = run(&prompts, cfg, environment(), sleep)?;
+    let (markdown, usage) = run_with_runtime(&prompts, cfg, environment(), sleep, runtime)?;
     // run only returns complete, nonblank answers; failures and token-limit
     // truncation cannot reach cache admission.
     if let (Some(cache), Some(key), Some(scope)) = (&cache, &cache_key, &scope)
@@ -185,12 +189,13 @@ fn enhance_cached(
     })
 }
 
-pub fn enhance_image_with_source(
+pub(crate) fn enhance_image_with_source_and_runtime(
     markdown: &str,
     source: &str,
     mime: &str,
     bytes: &[u8],
     cfg: &Value,
+    runtime: Option<&LlmRuntime>,
 ) -> Result<(String, ConversionUsage)> {
     if !matches!(
         mime,
@@ -210,11 +215,12 @@ pub fn enhance_image_with_source(
         base64::engine::general_purpose::STANDARD.encode(bytes),
     ));
     let prompts = prompts(markdown, source, cfg, image)?;
-    run(
+    run_with_runtime(
         &prompts,
         cfg,
         &config::environment(),
         &mut std::thread::sleep,
+        runtime,
     )
 }
 
@@ -308,6 +314,41 @@ fn automatic_entries(env: &HashMap<String, String>) -> Vec<Value> {
             .filter(|(key, _)| env.get(*key).is_some_and(|value| !value.is_empty()))
             .map(|(_, model)| json!({"model_name":"default","litellm_params":{"model":model}}))
             .collect()
+    }
+}
+
+pub(crate) fn capabilities(cfg: &Value, env: &HashMap<String, String>) -> crate::LlmCapabilities {
+    let configured = cfg
+        .pointer("/llm/model_list")
+        .and_then(Value::as_array)
+        .filter(|v| !v.is_empty());
+    let automatic;
+    let entries = if let Some(entries) = configured {
+        entries
+    } else {
+        automatic = automatic_entries(env);
+        &automatic
+    };
+    let models = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .pointer("/litellm_params/model")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    let routable = deployments(cfg, env).is_ok_and(|entries| {
+        entries.iter().any(|entry| {
+            matches!(entry.provider.as_str(), "ollama" | "ollama_chat")
+                || entry.key.as_ref().is_some_and(|key| !key.is_empty())
+        })
+    });
+    crate::LlmCapabilities {
+        configured: configured.is_some(),
+        routable,
+        effective: routable,
+        models,
     }
 }
 
@@ -643,11 +684,22 @@ fn random_ticket() -> u128 {
     (u128::from(high) << 64) | u128::from(hash.finish())
 }
 
+#[cfg(test)]
 fn run(
     prompts: &Prompts,
     cfg: &Value,
     env: &HashMap<String, String>,
     sleep: &mut dyn FnMut(Duration),
+) -> Result<(String, ConversionUsage)> {
+    run_with_runtime(prompts, cfg, env, sleep, None)
+}
+
+fn run_with_runtime(
+    prompts: &Prompts,
+    cfg: &Value,
+    env: &HashMap<String, String>,
+    sleep: &mut dyn FnMut(Duration),
+    runtime: Option<&LlmRuntime>,
 ) -> Result<(String, ConversionUsage)> {
     let strategy = cfg
         .pointer("/llm/router_settings/routing_strategy")
@@ -672,6 +724,20 @@ fn run(
         .pointer("/llm/max_requests_per_document")
         .and_then(Value::as_u64)
         .unwrap_or(50);
+    let local_runtime;
+    let runtime = match runtime {
+        Some(runtime) => runtime,
+        None => {
+            let concurrency = cfg
+                .pointer("/llm/concurrency")
+                .and_then(Value::as_u64)
+                .unwrap_or(10);
+            let concurrency = usize::try_from(concurrency)
+                .map_err(|_| Error::InvalidInput("LLM concurrency is too large".into()))?;
+            local_runtime = LlmRuntime::new(concurrency)?;
+            &local_runtime
+        }
+    };
     let client = Client::builder()
         .timeout(Duration::from_secs(timeout))
         .connect_timeout(Duration::from_secs(timeout.min(15)))
@@ -715,8 +781,12 @@ fn run(
                 },
                 random_ticket(),
             );
-            attempts = attempts.saturating_add(1);
-            match request(&client, &entries[selected], prompts, &mut usage) {
+            let result = {
+                let _permit = runtime.acquire();
+                attempts = attempts.saturating_add(1);
+                request(&client, &entries[selected], prompts, &mut usage)
+            };
+            match result {
                 Ok(text) => return Ok((text, usage)),
                 Err(failure) => {
                     failed.insert(selected);
@@ -970,10 +1040,48 @@ fn record_usage(usage: &mut ConversionUsage, entry: &Deployment, data: &Value) {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Barrier, Mutex, atomic::AtomicUsize, mpsc};
     use std::thread;
     use std::time::Instant;
+
+    fn read_request(stream: &mut TcpStream) -> (String, Value) {
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            bytes.extend_from_slice(&buffer[..read]);
+            assert!(bytes.len() < 1024 * 1024);
+            if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                line.split_once(':')
+                    .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse().unwrap())
+            })
+            .unwrap();
+        assert!(length < 1024 * 1024);
+        while bytes.len() < header_end + length {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        let payload = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+        (headers, payload)
+    }
 
     struct Mock {
         base: String,
@@ -1002,37 +1110,7 @@ mod tests {
                             other => panic!("mock LLM did not receive expected request: {other:?}"),
                         }
                     };
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(3)))
-                        .unwrap();
-                    let mut bytes = Vec::new();
-                    let mut buffer = [0u8; 4096];
-                    let header_end = loop {
-                        let read = stream.read(&mut buffer).unwrap();
-                        assert!(read > 0);
-                        bytes.extend_from_slice(&buffer[..read]);
-                        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
-                        {
-                            break end + 4;
-                        }
-                    };
-                    let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.split_once(':')
-                                .filter(|(key, _)| key.eq_ignore_ascii_case("content-length"))
-                                .map(|(_, value)| value.trim().parse().unwrap())
-                        })
-                        .unwrap();
-                    while bytes.len() < header_end + length {
-                        let read = stream.read(&mut buffer).unwrap();
-                        assert!(read > 0);
-                        bytes.extend_from_slice(&buffer[..read]);
-                    }
-                    let payload =
-                        serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
-                    captured.lock().unwrap().push((headers, payload));
+                    captured.lock().unwrap().push(read_request(&mut stream));
                     let body = body.to_string();
                     write!(stream, "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 }
@@ -1087,7 +1165,186 @@ mod tests {
             cfg,
             Some(&HashMap::new()),
             &mut |_| {},
+            None,
         )
+    }
+
+    #[test]
+    fn shared_runtime_caps_text_and_image_requests_until_response_bodies_finish() {
+        const REQUESTS: usize = 6;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let server_active = active.clone();
+        let server_peak = peak.clone();
+        let (arrived, received) = mpsc::channel();
+        let server = thread::spawn(move || {
+            thread::scope(|scope| {
+                for _ in 0..REQUESTS {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::WouldBlock
+                                    && Instant::now() < deadline =>
+                            {
+                                thread::sleep(Duration::from_millis(2))
+                            }
+                            other => panic!("gated LLM did not receive request: {other:?}"),
+                        }
+                    };
+                    let arrived = arrived.clone();
+                    let active = server_active.clone();
+                    let peak = server_peak.clone();
+                    scope.spawn(move || {
+                        let (_, payload) = read_request(&mut stream);
+                        let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(count, Ordering::SeqCst);
+                        let body = success("complete answer").to_string();
+                        let split = body.len() / 2;
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), &body[..split]).unwrap();
+                        stream.flush().unwrap();
+                        let (release, wait) = mpsc::channel();
+                        arrived.send((payload, release)).unwrap();
+                        wait.recv_timeout(Duration::from_secs(3)).unwrap();
+                        // The response becomes available only after this slot
+                        // leaves the server's measured in-flight interval.
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        stream.write_all(&body.as_bytes()[split..]).unwrap();
+                    });
+                }
+            });
+        });
+        let runtime = LlmRuntime::new(2).unwrap();
+        let start = Arc::new(Barrier::new(REQUESTS + 1));
+        let mut workers = Vec::new();
+        for index in 0..REQUESTS {
+            let runtime = runtime.clone();
+            let start = start.clone();
+            let mut cfg = cfg("openai/test", &base);
+            // Supplied run capacity remains authoritative over caller config.
+            cfg["llm"]["concurrency"] = json!(1);
+            cfg["llm"]["router_settings"]["num_retries"] = json!(0);
+            workers.push(thread::spawn(move || {
+                let mut prompts = plain();
+                if index % 2 == 1 {
+                    prompts.image = Some(("image/png".into(), "cG5n".into()));
+                }
+                start.wait();
+                run_with_runtime(
+                    &prompts,
+                    &cfg,
+                    &HashMap::new(),
+                    &mut |_| panic!("unexpected retry"),
+                    Some(&runtime),
+                )
+                .unwrap()
+            }));
+        }
+        start.wait();
+        let mut payloads = Vec::new();
+        let first = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        let second = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(received.recv_timeout(Duration::from_millis(75)).is_err());
+        first.1.send(()).unwrap();
+        payloads.push(first.0);
+        // A completed response frees capacity even while a different body waits.
+        let third = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        second.1.send(()).unwrap();
+        third.1.send(()).unwrap();
+        payloads.extend([second.0, third.0]);
+        for _ in 3..REQUESTS {
+            let (payload, release) = received.recv_timeout(Duration::from_secs(3)).unwrap();
+            payloads.push(payload);
+            release.send(()).unwrap();
+        }
+        for worker in workers {
+            let (text, usage) = worker.join().unwrap();
+            assert_eq!(text, "complete answer");
+            assert_eq!(usage.requests, 1);
+        }
+        server.join().unwrap();
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|request| request["messages"][1]["content"].is_array())
+                .count(),
+            3
+        );
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|request| request["messages"][1]["content"].is_string())
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn shared_runtime_releases_during_backoff_and_after_terminal_errors() {
+        let runtime = LlmRuntime::new(1).unwrap();
+        let retrying = Mock::new(vec![
+            (503, json!({"error":{"message":"busy"}})),
+            (200, success("retry complete")),
+        ]);
+        let sibling = Mock::new(vec![(200, success("during backoff"))]);
+        let mut sleeps = 0;
+        let answer = run_with_runtime(
+            &plain(),
+            &cfg("openai/test", &retrying.base),
+            &HashMap::new(),
+            &mut |_| {
+                sleeps += 1;
+                let sibling_answer = run_with_runtime(
+                    &plain(),
+                    &cfg("openai/test", &sibling.base),
+                    &HashMap::new(),
+                    &mut |_| panic!("unexpected nested retry"),
+                    Some(&runtime),
+                )
+                .unwrap();
+                assert_eq!(sibling_answer.0, "during backoff");
+            },
+            Some(&runtime),
+        )
+        .unwrap();
+        assert_eq!(sleeps, 1);
+        assert_eq!(answer.0, "retry complete");
+        assert_eq!(retrying.finish().len(), 2);
+        assert_eq!(sibling.finish().len(), 1);
+
+        for status in [401, 503] {
+            let failed = Mock::new(vec![(status, json!({"error":{"message":"failure"}}))]);
+            let mut limited = cfg("openai/test", &failed.base);
+            limited["llm"]["max_requests_per_document"] = json!(1);
+            assert!(
+                run_with_runtime(
+                    &plain(),
+                    &limited,
+                    &HashMap::new(),
+                    &mut |_| panic!("budget must prevent sleep"),
+                    Some(&runtime)
+                )
+                .is_err()
+            );
+            assert_eq!(failed.finish().len(), 1);
+            let next = Mock::new(vec![(200, success("after failure"))]);
+            let answer = run_with_runtime(
+                &plain(),
+                &cfg("openai/test", &next.base),
+                &HashMap::new(),
+                &mut |_| panic!("unexpected retry"),
+                Some(&runtime),
+            )
+            .unwrap();
+            assert_eq!(answer.0, "after failure");
+            assert_eq!(next.finish().len(), 1);
+        }
     }
 
     #[test]
@@ -1106,8 +1363,16 @@ mod tests {
             json!("env:ABSENT_CACHE_TEST_ENDPOINT");
         // Configured models hit without loading dotenv or resolving either env
         // reference, and changing an ordinary filename leaves the key alone.
-        let hit =
-            enhance_with_cache("# original", "renamed.md", "/elsewhere/renamed.md", &cfg).unwrap();
+        let runtime = LlmRuntime::new(1).unwrap();
+        let _occupied = runtime.acquire();
+        let hit = enhance_with_cache_and_runtime(
+            "# original",
+            "renamed.md",
+            "/elsewhere/renamed.md",
+            &cfg,
+            Some(&runtime),
+        )
+        .unwrap();
         assert!(hit.cache_hit);
         assert_eq!(hit.markdown, first.markdown);
         assert_eq!(hit.usage.requests, 0);
@@ -1279,6 +1544,33 @@ mod tests {
             assert!(!root.path().join("cache/cache.db").exists());
             assert_eq!(server.finish().len(), 1);
         }
+    }
+
+    #[test]
+    fn capability_projection_uses_environment_and_never_exposes_credentials() {
+        let env = HashMap::from([
+            ("MODEL".into(), "openai/local-capability-test".into()),
+            ("OPENAI_API_KEY".into(), "private-capability-key".into()),
+        ]);
+        let automatic = capabilities(&config::defaults(), &env);
+        assert!(!automatic.configured);
+        assert!(automatic.routable && automatic.effective);
+        assert_eq!(automatic.models, ["openai/local-capability-test"]);
+        assert!(
+            !serde_json::to_string(&automatic)
+                .unwrap()
+                .contains("private-capability-key")
+        );
+        let missing = config::normalize(&json!({"llm":{"model_list":[{"model_name":"default","litellm_params":{"model":"openai/explicit","api_key":"env:ABSENT_CAPABILITY_KEY"}}]}})).unwrap();
+        let explicit = capabilities(&missing, &env);
+        assert!(explicit.configured);
+        assert!(!explicit.routable);
+        assert_eq!(explicit.models, ["openai/explicit"]);
+        let local = config::normalize(&json!({"llm":{"model_list":[{"model_name":"default","litellm_params":{"model":"ollama/local"}}]}})).unwrap();
+        assert!(capabilities(&local, &HashMap::new()).routable);
+        let mut disabled = local;
+        disabled["llm"]["model_list"][0]["litellm_params"]["weight"] = json!(0);
+        assert!(!capabilities(&disabled, &HashMap::new()).routable);
     }
 
     #[test]
