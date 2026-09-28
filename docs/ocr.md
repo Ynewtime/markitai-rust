@@ -64,6 +64,14 @@ alpha is composited over white. A bounded PNG buffer of at most 128 MiB transfer
 the normalized pixels to Vision in memory. Source paths, user configuration
 files and provider keys are not passed to the engine.
 
+An internal renderer entry point also accepts upright RGB pixels already
+composited on white. It rechecks nonzero dimensions, the same 32-million-pixel
+limit and an exact three-byte-per-pixel buffer before bounded PNG encoding.
+It does not rotate, resize or recolor those pixels. Language selection, Vision
+recognition and reading-order assembly are shared with encoded-image OCR;
+the encoded-image path still applies its original format, orientation and alpha
+rules. This entry point alone does not establish PDF routing or rendering support.
+
 The request uses accurate recognition with language correction. At most 10,000
 observations and 8 MiB of recognized text are accepted. Text and line rectangles
 are checked for finite, valid confidence and geometry. Internal rectangles use
@@ -91,6 +99,12 @@ a white image, undecodable input and an unavailable language. Pure tests cover
 language aliases, bounds, alpha handling, row/paragraph assembly and malformed
 geometry. These are focused checks, not an OCR accuracy corpus or a claim that
 results match RapidOCR on arbitrary documents.
+
+Renderer-entry tests compare the same fixture's normalized PNG bytes and Vision
+observations with the encoded-image path. Additional checks reject zero-sized,
+oversized and excess-storage RGB layouts without allocating a maximum-sized
+image, and verify that ordinary RGB rows and colors remain unchanged. These
+new checks await the coordinated round-seventeen test run.
 
 The [frozen release check](validation/native-backends-round16.md) observes a
 25.897-second first image OCR call and much shorter subsequent calls. OS caches

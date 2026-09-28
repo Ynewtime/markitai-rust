@@ -7,6 +7,9 @@ mod geometry;
 #[path = "pdf/layout.rs"]
 mod layout;
 #[cfg(test)]
+#[path = "pdf/page_tests.rs"]
+mod page_tests;
+#[cfg(test)]
 #[path = "pdf/policy_tests.rs"]
 mod policy_tests;
 
@@ -420,9 +423,130 @@ fn inspect_page(pdf: &lopdf::Document, id: ObjectId) -> (PageInspection, Option<
     (out, content)
 }
 
-fn page_markdown(page: &pdf_inspector::PageMarkdown, warnings: &mut Vec<String>) -> String {
-    let number = page.page + 1;
+/// A page's native body and reliability verdict, before generated output wrappers.
+#[derive(Debug)]
+pub(crate) struct PdfPage {
+    pub number: usize,
+    pub markdown: String,
+    pub needs_ocr: bool,
+    pub ocr_reason: Option<String>,
+    pub asset_names: Vec<String>,
+    pub asset_ocr: BTreeMap<String, String>,
+    pub screenshot_name: Option<String>,
+    pub visibility_suspect: bool,
+    pub ocr_completed: bool,
+    // Deferred missing-text diagnostics retain their original position among
+    // inspection/image warnings. Callers may append warnings before finishing.
+    warning_index: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct PdfPages {
+    pub pages: Vec<PdfPage>,
+    pub document: Document,
+}
+
+impl PdfPages {
+    /// Assemble the default reader output and reject a document with no content.
+    pub(crate) fn finish(self) -> Result<Document> {
+        self.assemble(false)
+    }
+
+    /// The caller has rendered pages or completed OCR, including blank results.
+    pub(crate) fn finish_with_media(self) -> Result<Document> {
+        self.assemble(true)
+    }
+
+    fn assemble(self, allow_empty: bool) -> Result<Document> {
+        let Self {
+            pages,
+            mut document,
+        } = self;
+        let mut sections = Vec::with_capacity(pages.len());
+        let mut readable_pages = 0;
+        let mut deferred = Vec::new();
+        for page in pages {
+            readable_pages += usize::from(!page.needs_ocr && !page.markdown.trim().is_empty());
+            let mut warning = Vec::new();
+            let mut section = page_markdown(&page, &mut warning);
+            if let Some(warning) = warning.pop() {
+                deferred.push((page.warning_index, warning));
+            }
+            for name in page.asset_names {
+                section.push_str(&format!(
+                    "\n\n![Image on page {}](.markitai/assets/{name})",
+                    page.number
+                ));
+                if let Some(text) = page
+                    .asset_ocr
+                    .get(&name)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    section.push_str("\n\n");
+                    section.push_str(text.trim());
+                }
+            }
+            if let Some(name) = page.screenshot_name {
+                section.push_str("\n\n");
+                section.push_str(&screenshot_reference(page.number, &name));
+            }
+            sections.push(section);
+        }
+        // Stable ordering also handles multiple page diagnostics sharing an
+        // offset. The merge moves strings once instead of repeated Vec inserts.
+        deferred.sort_by_key(|(index, _)| *index);
+        let mut deferred = deferred.into_iter().peekable();
+        let mut warnings = Vec::with_capacity(document.warnings.len() + deferred.len());
+        for (index, warning) in document.warnings.into_iter().enumerate() {
+            while deferred.peek().is_some_and(|(offset, _)| *offset <= index) {
+                warnings.push(deferred.next().expect("peeked diagnostic").1);
+            }
+            warnings.push(warning);
+        }
+        warnings.extend(deferred.map(|(_, warning)| warning));
+        document.warnings = warnings;
+        if !allow_empty && readable_pages == 0 && document.assets.is_empty() {
+            return Err(conversion(format!(
+                "no reliable native text or extractable images; {}",
+                document.warnings.join(" ")
+            )));
+        }
+        document.markdown = sections.join("\n\n");
+        document.warnings.push("PDF images are appended to their source page; exact placement, page screenshots, vector graphics and local OCR are not implemented.".into());
+        Ok(document)
+    }
+}
+
+pub(crate) fn screenshot_reference(page: usize, name: &str) -> String {
+    format!(
+        "<!-- ![Page {page}](.markitai/screenshots/{}) -->",
+        screenshot_destination(name)
+    )
+}
+
+// Screenshot names are filesystem basenames, not pre-escaped URLs. Encode the
+// raw UTF-8 bytes once, including URI delimiters and HTML comment terminators.
+fn screenshot_destination(name: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            output.push(byte as char);
+        } else {
+            output.push('%');
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 15) as usize] as char);
+        }
+    }
+    output
+}
+
+fn page_markdown(page: &PdfPage, warnings: &mut Vec<String>) -> String {
+    let number = page.number;
     let marker = format!("<!-- Page number: {number} -->");
+    if page.ocr_completed && page.markdown.trim().is_empty() {
+        return marker;
+    }
     if page.needs_ocr || page.markdown.trim().is_empty() {
         let reason = page
             .ocr_reason
@@ -499,10 +623,28 @@ fn recover_plain_text(
 }
 
 pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
+    extract_pages(bytes)?.finish()
+}
+
+pub(crate) fn extract_pages(bytes: &[u8]) -> Result<PdfPages> {
+    extract_pages_inner(bytes, None)
+}
+
+/// Bound page processing before invoking the native text/layout reader.
+pub(crate) fn extract_pages_bounded(bytes: &[u8], max_pages: usize) -> Result<PdfPages> {
+    extract_pages_inner(bytes, Some(max_pages))
+}
+
+fn extract_pages_inner(bytes: &[u8], max_pages: Option<usize>) -> Result<PdfPages> {
     let pdf = lopdf::Document::load_mem(bytes).map_err(conversion)?;
     let page_ids = pdf.get_pages();
     if page_ids.is_empty() {
         return Err(conversion("document contains no pages"));
+    }
+    if let Some(limit) = max_pages.filter(|&limit| page_ids.len() > limit) {
+        return Err(Error::InvalidInput(format!(
+            "PDF page count exceeds the {limit}-page limit"
+        )));
     }
     let mut document = Document::default();
     let extracted = match pdf_inspector::extract_pages_markdown_mem(bytes, None) {
@@ -566,8 +708,7 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
     };
     let mut image_names = BTreeMap::<ObjectId, Option<String>>::new();
     let mut total_asset_bytes = 0;
-    let mut sections = Vec::new();
-    let mut readable_pages = 0;
+    let mut extracted_pages = Vec::with_capacity(page_ids.len());
     for &number in page_ids.keys() {
         let mut page = pages
             .remove(&number)
@@ -587,8 +728,9 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
         {
             page.markdown = refined;
         }
-        readable_pages += usize::from(!page.needs_ocr && !page.markdown.trim().is_empty());
-        let mut section = page_markdown(&page, &mut document.warnings);
+        let warning_index = document.warnings.len();
+        let visibility_suspect = !inspection.signals.is_empty();
+        let mut asset_names = Vec::new();
         for warning in inspection.warnings {
             document
                 .warnings
@@ -633,20 +775,22 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
                 }
             });
             if let Some(name) = name {
-                section.push_str(&format!(
-                    "\n\n![Image on page {number}](.markitai/assets/{name})"
-                ));
+                asset_names.push(name.clone());
             }
         }
-        sections.push(section);
+        extracted_pages.push(PdfPage {
+            number: number as usize,
+            markdown: page.markdown,
+            needs_ocr: page.needs_ocr,
+            ocr_reason: page.ocr_reason,
+            asset_names,
+            asset_ocr: BTreeMap::new(),
+            screenshot_name: None,
+            visibility_suspect,
+            ocr_completed: false,
+            warning_index,
+        });
     }
-    if readable_pages == 0 && document.assets.is_empty() {
-        return Err(conversion(format!(
-            "no reliable native text or extractable images; {}",
-            document.warnings.join(" ")
-        )));
-    }
-    document.markdown = sections.join("\n\n");
     document
         .metadata
         .insert("converter".into(), "pdf-inspector".into());
@@ -662,8 +806,10 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
             .metadata
             .insert("title".into(), title.trim().into());
     }
-    document.warnings.push("PDF images are appended to their source page; exact placement, page screenshots, vector graphics and local OCR are not implemented.".into());
-    Ok(document)
+    Ok(PdfPages {
+        pages: extracted_pages,
+        document,
+    })
 }
 
 #[cfg(test)]
@@ -922,20 +1068,32 @@ mod tests {
     fn partial_text_keeps_page_markers_and_precise_ocr_warning() {
         let mut warnings = Vec::new();
         let good = page_markdown(
-            &pdf_inspector::PageMarkdown {
-                page: 0,
+            &PdfPage {
+                number: 1,
                 markdown: "Readable text".into(),
                 needs_ocr: false,
                 ocr_reason: None,
+                asset_names: Vec::new(),
+                asset_ocr: BTreeMap::new(),
+                screenshot_name: None,
+                visibility_suspect: false,
+                ocr_completed: false,
+                warning_index: 0,
             },
             &mut warnings,
         );
         let missing = page_markdown(
-            &pdf_inspector::PageMarkdown {
-                page: 2,
+            &PdfPage {
+                number: 3,
                 markdown: "unreliable".into(),
                 needs_ocr: true,
                 ocr_reason: Some("image-only".into()),
+                asset_names: Vec::new(),
+                asset_ocr: BTreeMap::new(),
+                screenshot_name: None,
+                visibility_suspect: false,
+                ocr_completed: false,
+                warning_index: 0,
             },
             &mut warnings,
         );

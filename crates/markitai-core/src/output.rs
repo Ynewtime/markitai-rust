@@ -400,7 +400,20 @@ pub fn write_with_publication(
     cfg: &Value,
     publication: Option<&dyn Publication>,
 ) -> Result<()> {
-    write_document(dir, name, result, assets, &[], cfg, publication)
+    write_document(
+        dir,
+        name,
+        result,
+        assets,
+        Screenshots::New(&[]),
+        cfg,
+        publication,
+    )
+}
+
+pub(crate) enum Screenshots<'a> {
+    New(&'a [Asset]),
+    Published(&'a [Asset]),
 }
 
 pub(crate) fn write_document(
@@ -408,7 +421,7 @@ pub(crate) fn write_document(
     name: &str,
     result: &mut ConversionOutput,
     assets: &[Asset],
-    screenshots: &[Asset],
+    screenshots: Screenshots<'_>,
     cfg: &Value,
     publication: Option<&dyn Publication>,
 ) -> Result<()> {
@@ -492,8 +505,21 @@ pub(crate) fn write_document(
             *md = rewrite_asset_references(md, &replacements);
         }
     }
+    let (screenshots, published) = match screenshots {
+        Screenshots::New(shots) => (shots, false),
+        Screenshots::Published(shots) => (shots, true),
+    };
     for screenshot in screenshots {
-        let path = publish_screenshot(dir, screenshot, allow_symlinks)?;
+        let path = if published {
+            let path = dir.join(".markitai/screenshots").join(&screenshot.name);
+            check_path(&path, allow_symlinks)?;
+            if screenshot_matches(&path, &screenshot.bytes)? != Some(true) {
+                return Err(Error::Conversion("A published PDF screenshot changed during conversion; document publication stopped to preserve its references".into()));
+            }
+            path
+        } else {
+            publish_screenshot(dir, screenshot, allow_symlinks)?
+        };
         if !result.screenshots.contains(&path) {
             result.screenshots.push(path);
         }
@@ -524,6 +550,27 @@ pub(crate) fn write_document(
             atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
         }
         result.llm_output_path = Some(path);
+    }
+    Ok(())
+}
+
+pub(crate) fn publish_page_screenshots(
+    dir: &Path,
+    screenshots: &mut [Asset],
+    cfg: &Value,
+) -> Result<()> {
+    let _guard = OUTPUT_LOCK
+        .lock()
+        .map_err(|_| Error::Conversion("Output publication lock poisoned".into()))?;
+    let allow_symlinks = config::enabled(cfg, "/output/allow_symlinks");
+    check_path(dir, allow_symlinks)?;
+    for screenshot in screenshots {
+        let path = publish_screenshot(dir, screenshot, allow_symlinks)?;
+        screenshot.name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::Conversion("Screenshot filename is not UTF-8".into()))?
+            .to_owned();
     }
     Ok(())
 }
@@ -636,6 +683,44 @@ mod tests {
     }
 
     #[test]
+    fn published_pdf_screenshots_fail_if_changed_before_document_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config::normalize(&json!({"llm":{"enabled":false}})).unwrap();
+        let mut shots = [Asset {
+            name: "report.page0001.jpg".into(),
+            bytes: b"original capture".to_vec(),
+        }];
+        publish_page_screenshots(dir.path(), &mut shots, &cfg).unwrap();
+        let capture = dir
+            .path()
+            .join(".markitai/screenshots")
+            .join(&shots[0].name);
+        std::fs::write(&capture, b"concurrent changed capture").unwrap();
+        let mut result = ConversionOutput {
+            source: "report.pdf".into(),
+            markdown: "PDF body".into(),
+            ..Default::default()
+        };
+        let error = write_document(
+            dir.path(),
+            "report.pdf",
+            &mut result,
+            &[],
+            Screenshots::Published(&shots),
+            &cfg,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed during conversion"));
+        assert!(!dir.path().join("report.pdf.md").exists());
+        assert!(!capture.with_file_name("report.page0001.v2.jpg").exists());
+        assert_eq!(
+            std::fs::read(&capture).unwrap(),
+            b"concurrent changed capture"
+        );
+    }
+
+    #[test]
     fn screenshot_only_publishes_all_tiles_and_preserves_previous_captures() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config::normalize(
@@ -656,7 +741,16 @@ mod tests {
                 bytes: b"capture one".to_vec(),
             },
         ];
-        write_document(dir.path(), "page", &mut result, &[], &shots, &cfg, None).unwrap();
+        write_document(
+            dir.path(),
+            "page",
+            &mut result,
+            &[],
+            Screenshots::New(&shots),
+            &cfg,
+            None,
+        )
+        .unwrap();
         assert!(result.output_path.is_none() && result.llm_output_path.is_none());
         assert!(!dir.path().join("page.md").exists());
         assert_eq!(result.screenshots.len(), 2);
@@ -672,7 +766,16 @@ mod tests {
             name: shots[0].name.clone(),
             bytes: b"updated capture".to_vec(),
         }];
-        write_document(dir.path(), "page", &mut second, &[], &changed, &cfg, None).unwrap();
+        write_document(
+            dir.path(),
+            "page",
+            &mut second,
+            &[],
+            Screenshots::New(&changed),
+            &cfg,
+            None,
+        )
+        .unwrap();
         assert_eq!(second.screenshots.len(), 1);
         assert_ne!(second.screenshots[0], original);
         assert_eq!(std::fs::read(original).unwrap(), shots[0].bytes);

@@ -12,6 +12,8 @@ mod markdown;
 mod ocr;
 pub mod output;
 mod output_profiles;
+mod pdf_media;
+mod pdf_raster;
 mod types;
 
 pub use images::is_image_extension;
@@ -24,6 +26,10 @@ pub fn browser_available() -> bool {
 
 pub fn local_ocr_available() -> bool {
     ocr::available()
+}
+
+pub fn pdf_raster_available() -> bool {
+    pdf_raster::available()
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -112,6 +118,12 @@ pub fn convert_with_publication(
             .and_then(|s| s.to_str())
             .is_some_and(is_image_extension);
     let output_dir = options.output_dir.map(|path| config::expand_home(&path));
+    let pdf_input = !is_url
+        && input_path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+    let pdf_media_requested = pdf_input
+        && (config::enabled(&cfg, "/ocr/enabled") || config::enabled(&cfg, "/screenshot/enabled"));
     if !is_url {
         let path = &input_path;
         output::check_path(path, config::enabled(&cfg, "/output/allow_symlinks"))?;
@@ -180,12 +192,13 @@ pub fn convert_with_publication(
     let mut vision = None;
     let mut screenshots = Vec::new();
     let mut fetch_cache_hit = false;
+    let mut pdf_has_reliable_text = true;
+    let vlm_disabled = config::environment()
+        .get("MARKITAI_NO_VLM_OCR")
+        .is_some_and(|value| vlm_ocr_disabled(value));
     let local_ocr = image_input
         && config::enabled(&cfg, "/ocr/enabled")
-        && (!config::enabled(&cfg, "/llm/enabled")
-            || config::environment()
-                .get("MARKITAI_NO_VLM_OCR")
-                .is_some_and(|value| vlm_ocr_disabled(value)));
+        && (!config::enabled(&cfg, "/llm/enabled") || vlm_disabled);
     let mut doc = if image_input {
         let (mut doc, image) = images::extract(&input_path, &cfg)?;
         if local_ocr {
@@ -224,6 +237,33 @@ pub fn convert_with_publication(
         fetch_cache_hit = fetched.cache_hit;
         screenshots = fetched.screenshots;
         fetched.document
+    } else if pdf_media_requested {
+        if cfg["security"]["pdf_sanitize"] == "remove" {
+            return Err(Error::Unsupported(
+                "PDF hidden-text removal is not implemented in this development build".into(),
+            ));
+        }
+        let prefix = cfg
+            .pointer("/output/filename")
+            .and_then(Value::as_str)
+            .map(|name| name.strip_suffix(".md").unwrap_or(name))
+            .or_else(|| cfg.pointer("/output/reserved_stem").and_then(Value::as_str))
+            .unwrap_or(&name);
+        let mut prepared =
+            pdf_media::prepare(&std::fs::read(&input_path)?, prefix, &cfg, vlm_disabled)?;
+        pdf_has_reliable_text = prepared.has_reliable_text;
+        // Publish before assembling references so they use actual capture names.
+        if let Some(dir) = &output_dir {
+            output::publish_page_screenshots(dir, &mut prepared.screenshots, &cfg)?;
+        }
+        let (mut document, captured) = prepared.finish()?;
+        screenshots = captured;
+        document.metadata.insert(
+            "source".into(),
+            input_path.to_string_lossy().as_ref().into(),
+        );
+        document.metadata.insert("format".into(), "PDF".into());
+        document
     } else {
         formats::extract(&input_path)?
     };
@@ -238,13 +278,14 @@ pub fn convert_with_publication(
                 "PDF hidden-text removal is not implemented in this development build".into(),
             ));
         }
-        if config::enabled(&cfg, "/ocr/enabled") {
+        if config::enabled(&cfg, "/ocr/enabled") && !pdf_media_requested {
             return Err(Error::Unsupported(
                 "PDF OCR is not implemented in this development build".into(),
             ));
         }
     }
-    if matches!(format, "PDF" | "PPTX" | "PPT" | "PPTM" | "PPSX" | "PPSM")
+    if (format == "PDF" && !pdf_media_requested
+        || matches!(format, "PPTX" | "PPT" | "PPTM" | "PPSX" | "PPSM"))
         && config::enabled(&cfg, "/screenshot/enabled")
     {
         return Err(Error::Unsupported(
@@ -299,7 +340,13 @@ pub fn convert_with_publication(
         };
         result.base_frontmatter = Some(result.frontmatter.clone());
         let pure = config::enabled(&cfg, "/llm/pure");
-        let input = if pure {
+        let pdf_screenshot_only = pdf_input
+            && !screenshots.is_empty()
+            && config::enabled(&cfg, "/screenshot/screenshot_only");
+        let send_pdf_images = pdf_input && (!pure || pdf_screenshot_only);
+        let input = if pdf_screenshot_only {
+            ""
+        } else if pure {
             &doc.markdown
         } else {
             &result.markdown
@@ -310,11 +357,11 @@ pub fn convert_with_publication(
             cache_hit: false,
             warnings: Vec::new(),
         };
-        let enhanced = if is_url && !pure && !screenshots.is_empty() {
+        let enhanced = if (is_url && !pure || send_pdf_images) && !screenshots.is_empty() {
             let image_refs: Vec<_> = screenshots
                 .iter()
-                .map(|shot| ("image/jpeg", shot.bytes.as_slice()))
-                .collect();
+                .map(|shot| screenshot_mime(&shot.bytes).map(|mime| (mime, shot.bytes.as_slice())))
+                .collect::<Result<_>>()?;
             llm::enhance_images_with_source_and_runtime(
                 input,
                 &source_context,
@@ -368,6 +415,19 @@ pub fn convert_with_publication(
                 } else {
                     crate::markdown::normalize(body)
                 });
+                if send_pdf_images && !screenshots.is_empty() {
+                    let enhanced = result.llm_markdown.as_mut().expect("enhanced body is set");
+                    enhanced.push_str("\n\n<!-- Page images for reference -->\n");
+                    for (index, screenshot) in screenshots.iter().enumerate() {
+                        if index > 0 {
+                            enhanced.push('\n');
+                        }
+                        enhanced.push_str(&formats::pdf_screenshot_reference(
+                            index + 1,
+                            &screenshot.name,
+                        ));
+                    }
+                }
                 result.usage = enhancement.usage;
                 if !result.llm_cache_hit {
                     result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
@@ -377,7 +437,9 @@ pub fn convert_with_publication(
                 if matches!(error, Error::NoModelConfigured | Error::Unsupported(_)) {
                     return Err(error);
                 }
-                if screenshot_only && output_dir.is_none() {
+                if output_dir.is_none()
+                    && (screenshot_only || pdf_media_requested && !pdf_has_reliable_text)
+                {
                     // A failed visual-only memory request has no base text or
                     // persistent screenshots that could make fallback useful.
                     return Err(error);
@@ -390,7 +452,11 @@ pub fn convert_with_publication(
                             &name,
                             &mut result,
                             &doc.assets,
-                            &screenshots,
+                            if pdf_media_requested {
+                                output::Screenshots::Published(&screenshots)
+                            } else {
+                                output::Screenshots::New(&screenshots)
+                            },
                             &cfg,
                             publication,
                         )?;
@@ -412,7 +478,11 @@ pub fn convert_with_publication(
             &name,
             &mut result,
             &doc.assets,
-            &screenshots,
+            if pdf_media_requested {
+                output::Screenshots::Published(&screenshots)
+            } else {
+                output::Screenshots::New(&screenshots)
+            },
             &cfg,
             publication,
         )?;
@@ -447,6 +517,17 @@ fn vlm_ocr_disabled(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "" | "0" | "false" | "no"
     )
+}
+
+fn screenshot_mime(bytes: &[u8]) -> Result<&'static str> {
+    match image::guess_format(bytes) {
+        Ok(image::ImageFormat::Jpeg) => Ok("image/jpeg"),
+        Ok(image::ImageFormat::Png) => Ok("image/png"),
+        Ok(image::ImageFormat::WebP) => Ok("image/webp"),
+        _ => Err(Error::Conversion(
+            "Captured page has an unsupported image encoding".into(),
+        )),
+    }
 }
 
 #[cfg(test)]

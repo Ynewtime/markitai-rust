@@ -12,6 +12,7 @@
 - [HTML code blocks](html-code.md) and [article boundaries](html-article.md): code fidelity and structural content selection.
 - [Streamed HTML](html-stream.md): React transport and script-stripped article snapshots.
 - [PDF layout](pdf.md): positioned text, paragraphs, headings and ruled tables.
+- [PDF rendering](pdf-rendering.md) and [page OCR](pdf-ocr.md): native page pixels, recognition, screenshots and model routing.
 - [LLM](llm.md): model routing, prompts, retries and provider requests.
 - [Persistent cache](cache.md): document reuse, bypass semantics, storage and CLI management.
 - [URL fetching](fetch.md): static page caching, validators and response boundaries.

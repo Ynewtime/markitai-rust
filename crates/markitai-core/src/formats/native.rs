@@ -7,7 +7,7 @@ mod office;
 #[path = "office_meta.rs"]
 mod office_meta;
 #[path = "pdf.rs"]
-mod pdf;
+pub(super) mod pdf;
 
 fn conversion_error(error: anydoc::ConvertError) -> Error {
     Error::Conversion(format!("Native document conversion failed: {error}"))

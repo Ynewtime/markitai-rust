@@ -39,6 +39,41 @@ blending, soft masks, occlusion, arbitrary clipping and mixed-visibility
 `ActualText` spans still need broader interpretation. Pages with visibility
 signals retain an explicit warning and do not enter layout refinement.
 
+## Typed pages and final assembly
+
+The reader separates extraction from document assembly. `extract_pages` returns
+one `PdfPage` per source page in source order, with a one-based page number, the
+native Markdown body, the reader's OCR verdict and reason, and the names of
+successfully extracted assets. The body has neither generated page markers nor
+appended image references. `visibility_suspect` comes directly from graphics-state
+inspection; orchestration does not recover that decision by parsing warnings.
+Embedded objects shared between pages still produce a single asset, with each
+page retaining its own reference.
+
+The ordinary `extract` entrypoint calls `finish`, which preserves page markers,
+image-reference order, metadata, inspection diagnostics and the final empty-content
+error. An unreadable or blank page is available to a media/OCR caller before that
+final check. Missing-text warnings are deferred until assembly, so replacing a
+page with successfully recognized text also removes its stale OCR-required
+warning. `ocr_completed` distinguishes a successfully recognized blank page from
+one still awaiting OCR. The caller records the blank result explicitly; it does
+not manufacture text.
+
+`finish_with_media` permits an empty native body only for the orchestration path
+that has actually rendered pages or completed OCR. It is not the default reader
+entrypoint. Per-asset OCR text is appended after its matching page image reference;
+an unrelated asset name cannot inject text into another page. Optional screenshots
+use the final published basename in a trailing `Page N` image comment. Basenames
+are encoded as raw UTF-8 URI path data, preserving literal percent signs, query
+and fragment characters while preventing a filename from closing the comment.
+
+Inspection and recovery warnings remain independent of OCR success. Callers may
+append warnings and metadata before assembly; they replace any reader-only
+limitation message after assembly when a separate backend supplies that feature.
+The typed extraction itself adds no renderer, OCR runtime or new public JSON
+fields. Validation of the media backend is recorded separately from these reader
+and assembly tests.
+
 ## Layout reconstruction
 
 Reliable pages receive one additional positioned-text pass. Font sizes are

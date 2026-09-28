@@ -76,7 +76,32 @@ pub(super) fn prepare(bytes: &[u8]) -> Result<Prepared> {
     } else {
         image.into_rgb8()
     };
+    prepare_rgb(rgb)
+}
+
+fn validate_rgb_layout(width: u32, height: u32, bytes: usize) -> Result<()> {
+    let pixels = u64::from(width) * u64::from(height);
+    if width == 0 || height == 0 || pixels > MAX_PIXELS {
+        return Err(failure("decoded image exceeds 32 million pixels"));
+    }
+    let expected = pixels
+        .checked_mul(3)
+        .and_then(|length| usize::try_from(length).ok())
+        .ok_or_else(|| failure("RGB image byte length overflow"))?;
+    if bytes != expected {
+        return Err(failure(
+            "RGB image byte length does not match its dimensions",
+        ));
+    }
+    Ok(())
+}
+
+/// Accept upright RGB pixels already composited on white by the renderer.
+pub(super) fn prepare_rgb(rgb: RgbImage) -> Result<Prepared> {
     let (width, height) = rgb.dimensions();
+    // ImageBuffer permits backing storage longer than the declared dimensions.
+    // Check it explicitly instead of relying on an encoder assertion or slicing.
+    validate_rgb_layout(width, height, rgb.as_raw().len())?;
     let mut png = Bounded(Vec::new());
     image::codecs::png::PngEncoder::new_with_quality(
         &mut png,
@@ -134,5 +159,50 @@ mod tests {
         header[26..28].copy_from_slice(&1u16.to_le_bytes());
         header[28..30].copy_from_slice(&24u16.to_le_bytes());
         assert!(prepare(&header).is_err());
+    }
+
+    #[test]
+    fn rgb_layout_rechecks_dimensions_and_exact_backing_length() {
+        assert!(validate_rgb_layout(8_000, 4_000, 96_000_000).is_ok());
+        for (width, height, length) in [
+            (0, 1, 0),
+            (1, 0, 0),
+            (8_000, 4_001, 96_024_000),
+            (u32::MAX, u32::MAX, 0),
+            (1, 1, 2),
+            (1, 1, 4),
+        ] {
+            assert!(validate_rgb_layout(width, height, length).is_err());
+        }
+        assert!(prepare_rgb(RgbImage::new(0, 1)).is_err());
+        let extra_storage = RgbImage::from_raw(1, 1, vec![255; 4]).unwrap();
+        assert!(prepare_rgb(extra_storage).is_err());
+    }
+
+    #[test]
+    fn rendered_rgb_and_encoded_fixture_deliver_identical_normalized_pixels() {
+        let fixture = include_bytes!("fixtures/english.png");
+        let rgb = image::load_from_memory(fixture).unwrap().into_rgb8();
+        let expected = rgb.clone();
+        let encoded = prepare(fixture).unwrap();
+        let rendered = prepare_rgb(rgb).unwrap();
+        assert_eq!((rendered.width, rendered.height), (819, 301));
+        assert_eq!(rendered.png, encoded.png);
+        assert_eq!(
+            image::load_from_memory(&rendered.png).unwrap().into_rgb8(),
+            expected
+        );
+    }
+
+    #[test]
+    fn rendered_rgb_preserves_upright_rows_and_colors_without_rescaling() {
+        let rgb = RgbImage::from_fn(2, 3, |x, y| Rgb([x as u8 * 100, y as u8 * 80, 255]));
+        let expected = rgb.clone();
+        let rendered = prepare_rgb(rgb).unwrap();
+        assert_eq!((rendered.width, rendered.height), (2, 3));
+        assert_eq!(
+            image::load_from_memory(&rendered.png).unwrap().into_rgb8(),
+            expected
+        );
     }
 }

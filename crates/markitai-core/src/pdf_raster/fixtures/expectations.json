@@ -1,0 +1,600 @@
+{
+  "schema": 1,
+  "status": "authored fixtures and independent expectations; native raster/OCR acceptance has not run",
+  "generator": {
+    "path": "/Users/example-user/work/markitai-rust/.local/pdf-native-round17/generate_fixtures.py",
+    "sha256": "68fd5cb66a22ba853c4bcc7d26bf092e396242ce7df85d5a422b1c2f14ac9ccc"
+  },
+  "dependencies": "Python standard library only; no Cargo, converter, OCR, renderer, network, or image editing tool invoked",
+  "zlib_version": "1.2.12",
+  "source_image": {
+    "path": "/Users/example-user/work/markitai-rust/crates/markitai-core/src/ocr/fixtures/english.png",
+    "sha256": "a9f547051baeaaa96c9299363a3c79b1fb3842c2c7192c0bde0663f86081b94d",
+    "bytes": 1224,
+    "idat_payload_sha256": "6cf2c1589ab2dd0b6839cff0abfdb06acae58e65d0426ea3cef782265def25d4",
+    "encoding": "unchanged grayscale PNG IDAT as FlateDecode + PNG Predictor 15"
+  },
+  "transcript": {
+    "path": "/Users/example-user/work/markitai-rust/crates/markitai-core/src/ocr/fixtures/english.txt",
+    "sha256": "c94111d92ca53357ee6c7cb7fd65d5f62b2d2679b258c3fe0e98fadf8d84f2e1"
+  },
+  "fixtures": [
+    {
+      "name": "mixed-native-scanned-blank.pdf",
+      "bytes": 2788,
+      "sha256": "96bb71b4c0e3c5856f4bd88dc4912ccf5936eb1b6562fbdaff50aa56a496de6d",
+      "pages": [
+        {
+          "page": 1,
+          "kind": "native",
+          "expected_text_contains": [
+            "NATIVE PAGE ONE",
+            "Native page retains its structured text.",
+            "Only the scanned page needs local recognition.",
+            "Every paragraph remains in its original page order.",
+            "A blank page retains its marker and an explicit OCR outcome."
+          ],
+          "per_page_routing": "retain current native Markdown exactly; no OCR call",
+          "display_points": [
+            612,
+            792
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1275,
+            1650
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        },
+        {
+          "page": 2,
+          "kind": "scanned",
+          "expected_native_text": "",
+          "expected_ocr_whitespace_tokens": [
+            "MARKITAI",
+            "OCR",
+            "LOCAL",
+            "TEXT",
+            "ONLY",
+            "2026"
+          ],
+          "per_page_routing": "render and OCR this page",
+          "display_points": [
+            612,
+            792
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1275,
+            1650
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        },
+        {
+          "page": 3,
+          "kind": "blank",
+          "expected_native_text": "",
+          "expected_ocr_text": "",
+          "per_page_routing": "empty native page may enter OCR; empty recognized output is explicitly recorded, with no invented text",
+          "display_points": [
+            612,
+            792
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1275,
+            1650
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        }
+      ],
+      "document": {
+        "page_count": 3,
+        "markers": [
+          "<!-- Page number: 1 -->",
+          "<!-- Page number: 2 -->",
+          "<!-- Page number: 3 -->"
+        ],
+        "screenshot_pages_when_enabled": [
+          1,
+          2,
+          3
+        ],
+        "expected_ocr_attempt_pages": [
+          2,
+          3
+        ],
+        "expected_nonempty_ocr_pages": [
+          2
+        ],
+        "requires_native_page_output_comparison_to_same_source_without_ocr": true
+      }
+    },
+    {
+      "name": "rotate-crop-0.pdf",
+      "bytes": 2252,
+      "sha256": "ccb119bfdd78f0f2a3962d2999111166b6f56c6263192d00dcbf19324d2d273f",
+      "pages": [
+        {
+          "page": 1,
+          "kind": "rotation_crop",
+          "media_box": [
+            0,
+            0,
+            700,
+            900
+          ],
+          "crop_box": [
+            40,
+            60,
+            640,
+            860
+          ],
+          "rotate": 0,
+          "content_counter_rotation_matrix": [
+            1,
+            0,
+            0,
+            1,
+            40,
+            60
+          ],
+          "expected_ocr_text_contains": [
+            "ROTATION 0 CROP CHECK",
+            "MARKITAI OCR",
+            "LOCAL TEXT ONLY",
+            "2026"
+          ],
+          "expected_ocr_text_absent": [
+            "OUTSIDE CROP MUST NOT BE RASTERIZED"
+          ],
+          "corner_pixel_checks": [
+            {
+              "corner": "top_left",
+              "center_display_points_top_left": [
+                35,
+                35
+              ],
+              "expected_rgb": [
+                255,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "top_right",
+              "center_display_points_top_left": [
+                565,
+                35
+              ],
+              "expected_rgb": [
+                0,
+                255,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_left",
+              "center_display_points_top_left": [
+                35,
+                765
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                255
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_right",
+              "center_display_points_top_left": [
+                565,
+                765
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            }
+          ],
+          "routing_expectation": "geometry fixture; no native reliability verdict prescribed. Force OCR for the independent raster/OCR test.",
+          "display_points": [
+            600,
+            800
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1250,
+            1667
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        }
+      ]
+    },
+    {
+      "name": "rotate-crop-90.pdf",
+      "bytes": 2258,
+      "sha256": "e0c75c210f25e1535354bbc781d275d29f384f900f1d95b0715e3d064171be16",
+      "pages": [
+        {
+          "page": 1,
+          "kind": "rotation_crop",
+          "media_box": [
+            0,
+            0,
+            700,
+            900
+          ],
+          "crop_box": [
+            40,
+            60,
+            640,
+            860
+          ],
+          "rotate": 90,
+          "content_counter_rotation_matrix": [
+            0,
+            1,
+            -1,
+            0,
+            640,
+            60
+          ],
+          "expected_ocr_text_contains": [
+            "ROTATION 90 CROP CHECK",
+            "MARKITAI OCR",
+            "LOCAL TEXT ONLY",
+            "2026"
+          ],
+          "expected_ocr_text_absent": [
+            "OUTSIDE CROP MUST NOT BE RASTERIZED"
+          ],
+          "corner_pixel_checks": [
+            {
+              "corner": "top_left",
+              "center_display_points_top_left": [
+                35,
+                35
+              ],
+              "expected_rgb": [
+                255,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "top_right",
+              "center_display_points_top_left": [
+                765,
+                35
+              ],
+              "expected_rgb": [
+                0,
+                255,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_left",
+              "center_display_points_top_left": [
+                35,
+                565
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                255
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_right",
+              "center_display_points_top_left": [
+                765,
+                565
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            }
+          ],
+          "routing_expectation": "geometry fixture; no native reliability verdict prescribed. Force OCR for the independent raster/OCR test.",
+          "display_points": [
+            800,
+            600
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1667,
+            1250
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        }
+      ]
+    },
+    {
+      "name": "rotate-crop-180.pdf",
+      "bytes": 2258,
+      "sha256": "f865eaed347a0947600c13b376da09eccdde55148228f10031a43526af44d408",
+      "pages": [
+        {
+          "page": 1,
+          "kind": "rotation_crop",
+          "media_box": [
+            0,
+            0,
+            700,
+            900
+          ],
+          "crop_box": [
+            40,
+            60,
+            640,
+            860
+          ],
+          "rotate": 180,
+          "content_counter_rotation_matrix": [
+            -1,
+            0,
+            0,
+            -1,
+            640,
+            860
+          ],
+          "expected_ocr_text_contains": [
+            "ROTATION 180 CROP CHECK",
+            "MARKITAI OCR",
+            "LOCAL TEXT ONLY",
+            "2026"
+          ],
+          "expected_ocr_text_absent": [
+            "OUTSIDE CROP MUST NOT BE RASTERIZED"
+          ],
+          "corner_pixel_checks": [
+            {
+              "corner": "top_left",
+              "center_display_points_top_left": [
+                35,
+                35
+              ],
+              "expected_rgb": [
+                255,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "top_right",
+              "center_display_points_top_left": [
+                565,
+                35
+              ],
+              "expected_rgb": [
+                0,
+                255,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_left",
+              "center_display_points_top_left": [
+                35,
+                765
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                255
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_right",
+              "center_display_points_top_left": [
+                565,
+                765
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            }
+          ],
+          "routing_expectation": "geometry fixture; no native reliability verdict prescribed. Force OCR for the independent raster/OCR test.",
+          "display_points": [
+            600,
+            800
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1250,
+            1667
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        }
+      ]
+    },
+    {
+      "name": "rotate-crop-270.pdf",
+      "bytes": 2261,
+      "sha256": "e8da4bc8a68e0e0c20fc59734a5d016524a0486904def137d20307e7976d9de8",
+      "pages": [
+        {
+          "page": 1,
+          "kind": "rotation_crop",
+          "media_box": [
+            0,
+            0,
+            700,
+            900
+          ],
+          "crop_box": [
+            40,
+            60,
+            640,
+            860
+          ],
+          "rotate": 270,
+          "content_counter_rotation_matrix": [
+            0,
+            -1,
+            1,
+            0,
+            40,
+            860
+          ],
+          "expected_ocr_text_contains": [
+            "ROTATION 270 CROP CHECK",
+            "MARKITAI OCR",
+            "LOCAL TEXT ONLY",
+            "2026"
+          ],
+          "expected_ocr_text_absent": [
+            "OUTSIDE CROP MUST NOT BE RASTERIZED"
+          ],
+          "corner_pixel_checks": [
+            {
+              "corner": "top_left",
+              "center_display_points_top_left": [
+                35,
+                35
+              ],
+              "expected_rgb": [
+                255,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "top_right",
+              "center_display_points_top_left": [
+                765,
+                35
+              ],
+              "expected_rgb": [
+                0,
+                255,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_left",
+              "center_display_points_top_left": [
+                35,
+                565
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                255
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "corner": "bottom_right",
+              "center_display_points_top_left": [
+                765,
+                565
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                0
+              ],
+              "channel_tolerance": 4
+            }
+          ],
+          "routing_expectation": "geometry fixture; no native reliability verdict prescribed. Force OCR for the independent raster/OCR test.",
+          "display_points": [
+            800,
+            600
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1667,
+            1250
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        }
+      ]
+    },
+    {
+      "name": "nested-form-vector-alpha.pdf",
+      "bytes": 1345,
+      "sha256": "1df34893e43819d81e772c84362ef9bd5f42a58a94de0d7980aa7b1a5e5d5d5f",
+      "pages": [
+        {
+          "page": 1,
+          "kind": "nested_form_vector_alpha",
+          "expected_ocr_text_contains": [
+            "FORM VISIBLE TEXT"
+          ],
+          "expected_ocr_text_absent": [
+            "ALPHA HIDDEN SENTINEL"
+          ],
+          "pixel_checks": [
+            {
+              "center_display_points_top_left": [
+                125,
+                225
+              ],
+              "expected_rgb": [
+                0,
+                179,
+                0
+              ],
+              "channel_tolerance": 4
+            },
+            {
+              "center_display_points_top_left": [
+                230,
+                220
+              ],
+              "expected_rgb": [
+                0,
+                0,
+                255
+              ],
+              "channel_tolerance": 4
+            }
+          ],
+          "scope": "nested Form transforms, vector fills and zero alpha. This fixture does not claim to exercise a soft/stencil image mask.",
+          "display_points": [
+            500,
+            400
+          ],
+          "dpi": 150,
+          "pixel_size_ceil": [
+            1042,
+            834
+          ],
+          "pixel_origin": "top-left",
+          "pixel_background": "opaque white"
+        }
+      ]
+    }
+  ]
+}

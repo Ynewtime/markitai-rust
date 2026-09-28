@@ -7,6 +7,12 @@ mod native;
 mod text;
 
 pub use html::extract_html;
+#[cfg(test)]
+pub(crate) use native::pdf::extract_pages as extract_pdf_pages;
+pub(crate) use native::pdf::{
+    PdfPages, extract_pages_bounded as extract_pdf_pages_bounded,
+    screenshot_reference as pdf_screenshot_reference,
+};
 
 use crate::{Document, Error, Result};
 use std::path::Path;

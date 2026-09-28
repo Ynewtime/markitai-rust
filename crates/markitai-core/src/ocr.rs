@@ -53,6 +53,30 @@ pub(crate) fn recognize(bytes: &[u8], cfg: &Value) -> Result<OcrResult> {
     }
 }
 
+/// Recognize upright RGB pixels already composited over white by a renderer.
+pub(crate) fn recognize_rgb(image: image::RgbImage, cfg: &Value) -> Result<OcrResult> {
+    if !available() {
+        return Err(Error::Unsupported(
+            "Local OCR requires macOS 11 or later; no local OCR backend is available on this platform"
+                .into(),
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let language = language(cfg)?;
+        let image = pixels::prepare_rgb(image)?;
+        let lines = vision::recognize(&image, &language)?;
+        assemble(lines, image.width, image.height)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (image, cfg);
+        Err(Error::Unsupported(
+            "Local OCR backend is unavailable".into(),
+        ))
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 const MAX_LINES: usize = 10_000;
 #[cfg(any(target_os = "macos", test))]
@@ -314,6 +338,13 @@ mod tests {
         );
         assert!(result.confidence > 0.3 && result.confidence <= 1.0);
         assert!(result.boxes.len() >= 3);
+        let rgb = image::load_from_memory(include_bytes!("ocr/fixtures/english.png"))
+            .unwrap()
+            .into_rgb8();
+        let rendered = recognize_rgb(rgb, &config).unwrap();
+        assert_eq!(rendered.text, result.text);
+        assert_eq!(rendered.boxes, result.boxes);
+        assert_eq!(rendered.confidence, result.confidence);
         let blank = pixels::encode_test_image(image::DynamicImage::ImageRgb8(
             image::RgbImage::from_pixel(400, 200, image::Rgb([255; 3])),
         ));

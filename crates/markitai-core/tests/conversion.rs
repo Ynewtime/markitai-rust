@@ -3,6 +3,10 @@ use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+#[cfg(target_os = "macos")]
+#[path = "conversion/pdf_media.rs"]
+mod pdf_media;
+
 fn options() -> ConvertOptions {
     ConvertOptions {
         config: Some(json!({})),

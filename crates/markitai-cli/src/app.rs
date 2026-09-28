@@ -1313,7 +1313,8 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
             config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
             let browser = markitai_core::browser_available();
             let ocr = markitai_core::local_ocr_available();
-            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":ocr,"screenshots":browser,"browser":browser,"cache":true,"serve":true,"mcp":true},"status":"development"});
+            let pdf = markitai_core::pdf_raster_available();
+            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":ocr,"screenshots":browser || pdf,"browser":browser,"cache":true,"serve":true,"mcp":true},"status":"development"});
             if *as_json {
                 println!(
                     "{}",
@@ -1321,10 +1322,16 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 );
             } else {
                 println!(
-                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache, REST conversion service, stdio MCP\nLocal image OCR: {}\nInstalled browser and URL screenshots: {}\nPDF/Office screenshots and PDF OCR: unavailable",
+                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache, REST conversion service, stdio MCP\nLocal image OCR: {}\nInstalled browser and URL screenshots: {}\nPDF page screenshots: {}\nPDF page OCR: {}\nOffice screenshots: unavailable",
                     markitai_core::VERSION,
                     if ocr { "available" } else { "unavailable" },
-                    if browser { "available" } else { "unavailable" }
+                    if browser { "available" } else { "unavailable" },
+                    if pdf { "available" } else { "unavailable" },
+                    if pdf && ocr {
+                        "available"
+                    } else {
+                        "unavailable"
+                    }
                 );
             }
         }
