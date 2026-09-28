@@ -1,4 +1,5 @@
 mod asset_store;
+mod browser;
 pub mod config;
 mod fetch;
 pub mod fetch_cache;
@@ -8,6 +9,7 @@ mod llm;
 pub mod llm_cache;
 mod llm_runtime;
 mod markdown;
+mod ocr;
 pub mod output;
 mod output_profiles;
 mod types;
@@ -15,6 +17,15 @@ mod types;
 pub use images::is_image_extension;
 pub use llm_runtime::LlmRuntime;
 pub use types::*;
+/// Available optional local capabilities; probing never launches a backend.
+pub fn browser_available() -> bool {
+    browser::available()
+}
+
+pub fn local_ocr_available() -> bool {
+    ocr::available()
+}
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use serde_json::{Value, json};
@@ -126,14 +137,9 @@ pub fn convert_with_publication(
         }
     }
     if image_input
-        && config::enabled(&cfg, "/ocr/enabled")
         && !config::enabled(&cfg, "/llm/enabled")
+        && !config::enabled(&cfg, "/ocr/enabled")
     {
-        return Err(Error::Unsupported(
-            "Local OCR is not implemented in this development build".into(),
-        ));
-    }
-    if image_input && !config::enabled(&cfg, "/llm/enabled") {
         return Err(Error::ImageOnly(format!(
             "{} is an image file with no text to extract. Enable LLM (llm=True) or OCR (ocr=True) for content extraction.",
             input_path.file_name().unwrap_or_default().to_string_lossy()
@@ -161,29 +167,62 @@ pub fn convert_with_publication(
             ..Default::default()
         });
     }
-    if is_url && config::enabled(&cfg, "/screenshot/enabled") {
-        return Err(Error::Unsupported(
-            "Browser screenshots are not implemented in this development build".into(),
+    if is_url
+        && config::enabled(&cfg, "/screenshot/screenshot_only")
+        && !config::enabled(&cfg, "/llm/enabled")
+        && output_dir.is_none()
+    {
+        return Err(Error::InvalidInput(
+            "Screenshot-only conversion without LLM requires output_dir to retain captured images"
+                .into(),
         ));
     }
     let mut vision = None;
+    let mut screenshots = Vec::new();
     let mut fetch_cache_hit = false;
-    let mut doc = if image_input {
-        if config::enabled(&cfg, "/ocr/enabled")
-            && config::environment()
+    let local_ocr = image_input
+        && config::enabled(&cfg, "/ocr/enabled")
+        && (!config::enabled(&cfg, "/llm/enabled")
+            || config::environment()
                 .get("MARKITAI_NO_VLM_OCR")
-                .is_some_and(|value| {
-                    ["1", "true", "yes", "on"].contains(&value.to_ascii_lowercase().as_str())
-                })
-        {
-            return Err(Error::Unsupported("VLM OCR is disabled by MARKITAI_NO_VLM_OCR; the local OCR backend is not implemented yet".into()));
+                .is_some_and(|value| vlm_ocr_disabled(value)));
+    let mut doc = if image_input {
+        let (mut doc, image) = images::extract(&input_path, &cfg)?;
+        if local_ocr {
+            // OCR reads the original pixels, independently of preview compression.
+            let source_bytes = std::fs::read(&input_path)?;
+            let bytes = if doc.metadata.get("format").and_then(Value::as_str) == Some("SVG") {
+                image.bytes.as_slice()
+            } else {
+                source_bytes.as_slice()
+            };
+            let recognized = ocr::recognize(bytes, &cfg)?;
+            if recognized.text.trim().is_empty() {
+                doc.warnings.push(
+                    "Local OCR found no readable text; the output retains the image reference."
+                        .into(),
+                );
+            } else {
+                doc.markdown.push('\n');
+                doc.markdown.push_str(&recognized.text);
+                if !doc.markdown.ends_with('\n') {
+                    doc.markdown.push('\n');
+                }
+            }
+            doc.metadata.insert("ocr_used".into(), true.into());
+            doc.metadata
+                .insert("ocr_path".into(), ocr::backend().into());
+            if config::enabled(&cfg, "/llm/enabled") {
+                doc.warnings.push("VLM OCR is disabled; only locally recognized text is sent for LLM enhancement.".into());
+            }
+        } else {
+            vision = Some(image);
         }
-        let (doc, image) = images::extract(&input_path, &cfg)?;
-        vision = Some(image);
         doc
     } else if is_url {
         let fetched = fetch::fetch_with_context(source, &cfg, context.explicit_fetch_strategy)?;
         fetch_cache_hit = fetched.cache_hit;
+        screenshots = fetched.screenshots;
         fetched.document
     } else {
         formats::extract(&input_path)?
@@ -237,6 +276,18 @@ pub fn convert_with_publication(
     } else {
         None
     };
+    let screenshot_only = is_url
+        && config::enabled(&cfg, "/screenshot/screenshot_only")
+        && !(config::enabled(&cfg, "/llm/enabled") && config::enabled(&cfg, "/llm/pure"));
+    if screenshot_only && screenshots.is_empty() {
+        return Err(Error::Fetch(
+            "Screenshot-only conversion captured no screenshots".into(),
+        ));
+    }
+    if screenshot_only {
+        doc.markdown.clear();
+        doc.assets.clear();
+    }
     let mut result = output::prepare(source, &name, &mut doc, &cfg);
     result.fetch_cache_hit = fetch_cache_hit;
     result.fetch_strategy = fetch_strategy;
@@ -259,7 +310,20 @@ pub fn convert_with_publication(
             cache_hit: false,
             warnings: Vec::new(),
         };
-        let enhanced = if let Some(image) = &vision {
+        let enhanced = if is_url && !pure && !screenshots.is_empty() {
+            let image_refs: Vec<_> = screenshots
+                .iter()
+                .map(|shot| ("image/jpeg", shot.bytes.as_slice()))
+                .collect();
+            llm::enhance_images_with_source_and_runtime(
+                input,
+                &source_context,
+                &image_refs,
+                &cfg,
+                context.llm_runtime,
+            )
+            .map(without_cache)
+        } else if let Some(image) = &vision {
             llm::enhance_image_with_source_and_runtime(
                 input,
                 &source_context,
@@ -313,29 +377,45 @@ pub fn convert_with_publication(
                 if matches!(error, Error::NoModelConfigured | Error::Unsupported(_)) {
                     return Err(error);
                 }
+                if screenshot_only && output_dir.is_none() {
+                    // A failed visual-only memory request has no base text or
+                    // persistent screenshots that could make fallback useful.
+                    return Err(error);
+                }
                 if cfg["llm"]["on_failure"] == "fail" {
                     output::apply_profiles(&mut result, &cfg);
                     if let Some(dir) = &output_dir {
-                        output::write_with_publication(
+                        output::write_document(
                             dir,
                             &name,
                             &mut result,
                             &doc.assets,
+                            &screenshots,
                             &cfg,
                             publication,
                         )?;
                     }
                     return Err(error);
                 }
-                result.warnings.push(format!(
-                    "LLM enhancement failed; base Markdown retained: {error}"
-                ));
+                result.warnings.push(if screenshot_only {
+                    format!("LLM enhancement failed; captured screenshots retained: {error}")
+                } else {
+                    format!("LLM enhancement failed; base Markdown retained: {error}")
+                });
             }
         }
     }
     output::apply_profiles(&mut result, &cfg);
     if let Some(dir) = output_dir {
-        output::write_with_publication(&dir, &name, &mut result, &doc.assets, &cfg, publication)?;
+        output::write_document(
+            &dir,
+            &name,
+            &mut result,
+            &doc.assets,
+            &screenshots,
+            &cfg,
+            publication,
+        )?;
     }
     result.duration = start.elapsed().as_secs_f64();
     Ok(result)
@@ -359,5 +439,25 @@ pub fn convert_json(request: &str) -> String {
         Ok(result) => json!({"ok":true,"result":result}).to_string(),
         Err(error) => json!({"ok":false,"error":{"code":error.code(),"message":error.to_string()}})
             .to_string(),
+    }
+}
+
+fn vlm_ocr_disabled(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no"
+    )
+}
+
+#[cfg(test)]
+mod routing_tests {
+    #[test]
+    fn vlm_ocr_optout_honors_whitespace_and_all_nonfalse_values() {
+        for value in ["1", " 1 ", "true", "enabled", "yes", "off", "arbitrary"] {
+            assert!(super::vlm_ocr_disabled(value), "{value}");
+        }
+        for value in ["", " ", "0", " false ", "No"] {
+            assert!(!super::vlm_ocr_disabled(value), "{value}");
+        }
     }
 }

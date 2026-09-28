@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["vendor/pdf-inspector"]
 default-members = ["crates/markitai-core", "crates/markitai-cli", "crates/markitai-ffi"]
 resolver = "2"
 
@@ -25,3 +26,6 @@ strip = true
 inherits = "release"
 opt-level = "z"
 lto = "fat"
+
+[patch.crates-io]
+pdf-inspector = { path = "vendor/pdf-inspector" }

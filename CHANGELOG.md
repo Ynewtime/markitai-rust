@@ -29,7 +29,13 @@
 - Native PDF layout refinement with document-wide heading levels, paragraph boundaries, continuous styling and complete ruled tables.
 - Static React streamed-content recovery and a bounded compatibility heuristic for script-stripped article snapshots.
 
+- Native macOS Vision image OCR and optional isolated Chromium fetching/screenshots through Rust CDP.
+- URL screenshot-only output, persistent screenshot tiles and multi-image model requests with complete request-budget validation.
+
 ### Fixed
+
+- PDF page-number cleanup preserves substantive Page N paragraphs; nonpainting text modes persist across text blocks and nested Forms without changing glyph positions.
+- VLM OCR opt-out selects local recognition and text-only enhancement without sending image bytes.
 
 - HTML code targets share membership and language indexes; documents without note references skip footnote indexing, and PDF inspection and table geometry reuse each page's decoded operations.
 - Markdown cleanup preserves fenced code bytes, including blank lines, trailing spaces and literal image/link examples.

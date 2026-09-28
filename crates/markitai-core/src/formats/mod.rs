@@ -45,7 +45,7 @@ pub fn extract(path: &Path) -> Result<Document> {
         .to_ascii_lowercase();
     if !supports_extension(&extension) {
         return Err(Error::Unsupported(format!(
-            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, EML/MSG email, PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Org, RST and TeX. Local OCR and Numbers readers are not implemented yet.",
+            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, EML/MSG email, PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Org, RST and TeX. Image OCR is available through the conversion API on supported platforms; the Numbers reader is not implemented yet.",
             extension
         )));
     }

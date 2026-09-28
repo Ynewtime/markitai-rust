@@ -5,6 +5,8 @@
 - [Compatibility](compatibility.md): contracts against the reference release.
 - [Development](development.md): build, test isolation, and recovery.
 - [Formats](formats.md): native readers and fidelity gaps.
+- [Local image OCR](ocr.md): native macOS recognition, language selection and limits.
+- [Browser fetching and screenshots](browser.md): isolated optional Chromium and CDP.
 - [Images](images.md): raster/SVG inputs, shared compression and resource boundaries.
 - [HTML](html.md) and [MSG](msg.md): extraction semantics and known gaps.
 - [HTML code blocks](html-code.md) and [article boundaries](html-article.md): code fidelity and structural content selection.

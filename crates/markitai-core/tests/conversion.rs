@@ -531,3 +531,72 @@ fn cached_url_reuses_extracted_content_without_changing_binding_json() {
         "an explicit strategy must not share the configured/default scope"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn local_image_ocr_reads_original_pixels_and_blank_images_are_explicit() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("recognition.png");
+    std::fs::write(&image, include_bytes!("../src/ocr/fixtures/english.png")).unwrap();
+    let cfg = json!({"cache":{"enabled":false},"ocr":{"enabled":true,"lang":"en"},
+        "image":{"compress":true,"max_width":10,"max_height":10},"llm":{"enabled":false}});
+    let recognized = convert(
+        image.to_str().unwrap(),
+        ConvertOptions {
+            config: Some(cfg.clone()),
+            output_dir: Some(dir.path().join("out")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for line in include_str!("../src/ocr/fixtures/english.txt").lines() {
+        assert!(
+            recognized.markdown.contains(line),
+            "missing {line}: {}",
+            recognized.markdown
+        );
+    }
+    assert!(recognized.llm_markdown.is_none());
+    assert_eq!(recognized.assets.len(), 1);
+    assert_eq!(recognized.usage.requests, 0);
+    let preview = image::open(&recognized.assets[0]).unwrap();
+    assert!(preview.width() <= 10 && preview.height() <= 10);
+    let blank = dir.path().join("blank.png");
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        100,
+        100,
+        image::Rgb([255, 255, 255]),
+    ))
+    .save(&blank)
+    .unwrap();
+    let result = convert(
+        blank.to_str().unwrap(),
+        ConvertOptions {
+            config: Some(cfg),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(result.markdown.contains("![blank]"));
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no readable text"))
+    );
+    assert!(result.output_path.is_none() && result.assets.is_empty());
+}
+
+#[test]
+fn screenshot_only_memory_mode_rejects_unobservable_results_before_fetching() {
+    let error = convert(
+        "http://127.0.0.1:9/canvas",
+        ConvertOptions {
+            config: Some(json!({"llm":{"enabled":false},"screenshot":{"screenshot_only":true}})),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "invalid_input");
+    assert!(error.to_string().contains("output_dir"));
+}

@@ -10,17 +10,34 @@ does not enter refinement. The existing narrowly guarded font-decoded recovery
 for a false scan verdict remains in place. A missing or unreadable page keeps
 its page marker and an explicit warning.
 
-This preserves the visibility gate; it does not repair every visibility issue
-in the underlying reader. An authored page containing visible prose and a
-separate `Tr 3` invisible run currently reproduces that reader's inclusion of
-the invisible run. Refinement leaves that page unchanged and retains the
-explicit warning that complete hidden-text filtering is not established.
+The pinned dependency has a small, tracked policy patch under
+`vendor/pdf-inspector`. Its original license, bundled character-map license and
+per-file upstream hashes are retained. This patch changes extraction policy;
+it does not weaken the layout character-agreement or page reliability gates.
 
-Another reproduced dependency defect removes ordinary paragraphs beginning
-`Page N` as if they were page numbers. The
-[two/40-page reproduction](validation/pdf-page-prefix-round15.json) retains
-original inputs and archived executable outputs. Layout's character-agreement
-guard does not conceal this loss, and local decode reuse does not fix it.
+Page-number cleanup recognizes complete folio expressions such as `Page 3 of 10`
+and retains substantive paragraphs beginning `Page N`, including prose following
+`Page 3 of 10`. Reader-generated headings and emphasis around complete folios
+do not prevent cleanup; code and HTML literal blocks are preserved. Positional
+running-furniture detection remains separate. The
+[historical two/40-page reproduction](validation/pdf-page-prefix-round15.json)
+retains the original inputs and old outputs with 72/1,440 missing paragraphs;
+new authored regressions require every paragraph in source order.
+
+Text rendering mode persists across `BT`/`ET` text objects and nested `q`/`Q`
+graphics states. Normal extraction excludes `Tr 3` invisible text and `Tr 7`
+clipping-only text in pages and Form XObjects. Hidden text still advances the
+text cursor, so following visible glyphs keep their positions. An `ActualText`
+replacement whose glyphs are all nonpainting cannot restore hidden text. The
+dependency's explicit OCR-layer path may still request mode 3; clipping-only
+mode 7 is never treated as an OCR layer. The core does not use that recovery
+path and retains the existing guard against plain-text recovery of suspicious
+pages.
+
+These rules do not establish complete rendered visibility: transparency,
+blending, soft masks, occlusion, arbitrary clipping and mixed-visibility
+`ActualText` spans still need broader interpretation. Pages with visibility
+signals retain an explicit warning and do not enter layout refinement.
 
 ## Layout reconstruction
 

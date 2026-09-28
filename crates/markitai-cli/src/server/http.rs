@@ -46,7 +46,7 @@ pub(super) async fn capabilities(ExtractState(state): ExtractState<Arc<State>>) 
         }
     }
     Json(
-        json!({"version":markitai_core::VERSION,"llm":llm,"presets":["minimal","standard","rich"],"preset_options":presets,"extras":{"browser":false,"svg":true},"limits":{"max_job_items":MAX_ITEMS}}),
+        json!({"version":markitai_core::VERSION,"llm":llm,"presets":["minimal","standard","rich"],"preset_options":presets,"extras":{"browser":markitai_core::browser_available(),"svg":true},"limits":{"max_job_items":MAX_ITEMS}}),
     )
 }
 

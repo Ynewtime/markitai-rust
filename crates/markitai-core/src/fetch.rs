@@ -1,4 +1,4 @@
-use crate::{Document, Error, Result, config, fetch_cache, formats, output};
+use crate::{Asset, Document, Error, Result, browser, config, fetch_cache, formats, output};
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -115,6 +115,7 @@ fn remote_allowed(url: &Url, cfg: &Value) -> Result<()> {
 pub(crate) struct FetchOutcome {
     pub document: Document,
     pub cache_hit: bool,
+    pub screenshots: Vec<Asset>,
 }
 
 #[cfg(test)]
@@ -138,8 +139,30 @@ pub(crate) fn fetch_with_context(
         .pointer("/fetch/strategy")
         .and_then(Value::as_str)
         .unwrap_or("auto");
+    let capture = config::enabled(cfg, "/screenshot/enabled")
+        || config::enabled(cfg, "/screenshot/screenshot_only");
     match strategy {
-        "auto" | "static" => fetch_static(source, &url, cfg, explicit_strategy),
+        "playwright" => fetch_browser(source, cfg, capture),
+        "auto" if capture => fetch_browser(source, cfg, true),
+        "static" if capture => {
+            // Explicit static keeps its chosen text representation, even when
+            // Chromium is additionally needed for a rendered screenshot.
+            let mut outcome = match fetch_static(source, &url, cfg, explicit_strategy) {
+                Err(error) if visual_only(cfg) && browser_quality_failure(&error) => {
+                    return fetch_browser(source, cfg, true);
+                }
+                result => result?,
+            };
+            attach_screenshot(source, cfg, &mut outcome)?;
+            Ok(outcome)
+        }
+        "auto" => match fetch_static(source, &url, cfg, explicit_strategy) {
+            Err(error) if browser_quality_failure(&error) && browser::available() => {
+                fetch_browser(source, cfg, false)
+            }
+            result => result,
+        },
+        "static" => fetch_static(source, &url, cfg, explicit_strategy),
         "defuddle" | "jina" => {
             remote_allowed(&url, cfg)?;
             let client = client(30)?;
@@ -193,15 +216,97 @@ pub(crate) fn fetch_with_context(
             }
             doc.metadata
                 .insert("fetch_strategy".into(), json!(strategy));
-            Ok(FetchOutcome {
+            let mut outcome = FetchOutcome {
                 document: doc,
                 cache_hit: false,
-            })
+                screenshots: Vec::new(),
+            };
+            if capture {
+                attach_screenshot(source, cfg, &mut outcome)?;
+            }
+            Ok(outcome)
         }
         _ => Err(Error::Unsupported(format!(
             "Fetch strategy '{strategy}' is not implemented in this development build"
         ))),
     }
+}
+
+fn visual_only(cfg: &Value) -> bool {
+    config::enabled(cfg, "/screenshot/screenshot_only")
+        && !(config::enabled(cfg, "/llm/enabled") && config::enabled(cfg, "/llm/pure"))
+}
+
+fn browser_quality_failure(error: &Error) -> bool {
+    match error {
+        Error::Fetch(message) => {
+            message.contains("HTML page requires JavaScript")
+                || message.contains("HTML challenge page cannot be extracted")
+                || message == "URL returned no extractable content"
+        }
+        Error::Conversion(message) => message == "HTML contains no extractable content",
+        _ => false,
+    }
+}
+
+fn attach_screenshot(source: &str, cfg: &Value, outcome: &mut FetchOutcome) -> Result<()> {
+    match browser::fetch(source, cfg, true) {
+        Ok(page) => {
+            outcome.screenshots = page.screenshots;
+            outcome.document.warnings.extend(page.warnings);
+        }
+        Err(error) if visual_only(cfg) => return Err(error),
+        Err(_) => outcome
+            .document
+            .warnings
+            .push("Browser screenshot failed; retained the selected text representation.".into()),
+    }
+    Ok(())
+}
+
+fn fetch_browser(source: &str, cfg: &Value, capture: bool) -> Result<FetchOutcome> {
+    browser_outcome(browser::fetch(source, cfg, capture)?, cfg)
+}
+
+fn browser_outcome(page: browser::BrowserPage, cfg: &Value) -> Result<FetchOutcome> {
+    let visual_only = visual_only(cfg);
+    let mut document = match formats::extract_html(&page.html, Some(&page.final_url)) {
+        Err(Error::Conversion(message))
+            if message == "HTML contains no extractable content"
+                && visual_only
+                && !page.screenshots.is_empty() =>
+        {
+            Document::default()
+        }
+        result => result?,
+    };
+    if document.markdown.trim().is_empty() && !(visual_only && !page.screenshots.is_empty()) {
+        return Err(Error::Fetch(
+            "Browser returned no extractable content".into(),
+        ));
+    }
+    if !page.title.is_empty() {
+        document
+            .metadata
+            .entry("title")
+            .or_insert_with(|| json!(page.title));
+    }
+    document
+        .metadata
+        .insert("fetch_strategy".into(), json!("playwright"));
+    document
+        .metadata
+        .insert("renderer".into(), json!("playwright"));
+    document.metadata.insert(
+        "source_url".into(),
+        json!(output::redact_url(&page.final_url)),
+    );
+    document.warnings.extend(page.warnings);
+    Ok(FetchOutcome {
+        document,
+        cache_hit: false,
+        screenshots: page.screenshots,
+    })
 }
 
 const STATIC_ACCEPT: &str = "text/markdown, text/html;q=0.9, */*;q=0.5";
@@ -265,6 +370,7 @@ fn fetch_static(
             return Ok(FetchOutcome {
                 document,
                 cache_hit: true,
+                screenshots: Vec::new(),
             });
         }
         entry => entry,
@@ -292,6 +398,7 @@ fn fetch_static(
                 return Ok(FetchOutcome {
                     document,
                     cache_hit: true,
+                    screenshots: Vec::new(),
                 });
             }
             // A failed status, unreadable body or unusable extracted page takes
@@ -340,6 +447,7 @@ fn fetch_static(
     Ok(FetchOutcome {
         document: page.document,
         cache_hit: false,
+        screenshots: Vec::new(),
     })
 }
 
@@ -557,6 +665,37 @@ mod tests {
         }
     }
     #[test]
+    fn browser_final_url_metadata_is_redacted_without_changing_relative_link_base() {
+        let cfg = config::defaults();
+        let page = browser::BrowserPage {
+            html: "<article><p>Read <a href='next'>next page</a>.</p></article>".into(),
+            final_url: "https://example.test/section/current?token=private-value&view=full".into(),
+            title: "Result".into(),
+            screenshots: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let mut result = browser_outcome(page, &cfg).unwrap();
+        assert!(
+            result
+                .document
+                .markdown
+                .contains("https://example.test/section/next")
+        );
+        let prepared = output::prepare(
+            "https://example.test/start",
+            "start",
+            &mut result.document,
+            &cfg,
+        );
+        let metadata = serde_json::to_string(&prepared.frontmatter).unwrap();
+        assert!(!metadata.contains("private-value"));
+        assert_eq!(
+            prepared.frontmatter["source_url"],
+            "https://example.test/section/current?token=REDACTED&view=full"
+        );
+    }
+
+    #[test]
     fn static_html_runs_against_local_http() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -704,6 +843,9 @@ mod cache_tests {
     fn settings() -> (tempfile::TempDir, Value) {
         let directory = tempfile::tempdir().unwrap();
         let mut cfg = config::defaults();
+        // These fixtures test HTTP validators and store state, without a browser
+        // retry consuming a response intended for the next cache operation.
+        cfg["fetch"]["strategy"] = json!("static");
         cfg["cache"]["global_dir"] = json!(directory.path());
         (directory, cfg)
     }
@@ -880,6 +1022,7 @@ mod cache_tests {
     #[test]
     fn strategy_provenance_uses_distinct_keys_without_bypassing_guards() {
         let (_directory, mut cfg) = settings();
+        cfg["fetch"]["strategy"] = json!("auto");
         let server = Server::new(vec![
             Reply::text("unscoped"),
             Reply::text("explicit static"),
@@ -894,9 +1037,10 @@ mod cache_tests {
         assert!(auto.cache_hit);
         assert_eq!(auto.document.markdown, "unscoped");
         cfg["fetch"]["strategy"] = json!("playwright");
+        cfg["fetch"]["playwright"]["session_mode"] = json!("domain_persistent");
         assert!(matches!(
             fetch_with_context(&server.url("/page"), &cfg, None),
-            Err(Error::Unsupported(_))
+            Err(Error::Unsupported(message)) if message.contains("domain_persistent")
         ));
         cfg["fetch"]["strategy"] = json!("jina");
         assert!(fetch_with_context(&server.url("/page"), &cfg, None).is_err());

@@ -752,10 +752,10 @@ mod tests {
                 )
             );
             if hidden {
-                // The baseline dependency currently retains this isolated
-                // invisible run. This test records that existing limitation:
-                // refinement must not reinterpret it or hide the warning.
-                assert!(original.pages[0].markdown.contains("HIDDEN SECRET"));
+                // Both extraction paths exclude the nonpainting text. The
+                // conservative layout gate still leaves the page unchanged.
+                assert!(!original.pages[0].markdown.contains("HIDDEN SECRET"));
+                assert!(!result.markdown.contains("HIDDEN SECRET"));
                 assert!(
                     result.warnings.iter().any(|warning| warning
                         .contains("invisible text rendering mode")

@@ -437,6 +437,18 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         return Err((2, "--glob and --max-depth require a directory input".into()));
     }
     let mut output = cli.output.clone();
+    if is_url(input)
+        && config::enabled(&cfg, "/screenshot/screenshot_only")
+        && !config::enabled(&cfg, "/llm/enabled")
+        && output.is_none()
+    {
+        output = Some(
+            cfg["output"]["dir"]
+                .as_str()
+                .map(PathBuf::from)
+                .unwrap_or(std::env::current_dir().map_err(runtime)?),
+        );
+    }
     if batch && output.is_none() {
         output = cfg["output"]["dir"].as_str().map(PathBuf::from);
     }
@@ -869,6 +881,7 @@ fn recorded(
                 .llm_output_path
                 .as_ref()
                 .or(output.output_path.as_ref())
+                .or_else(|| output.screenshots.first())
                 .cloned();
             record.warnings = output.warnings.clone();
             record.skip_reason = output.skip_reason.clone();
@@ -1298,7 +1311,9 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 ));
             }
             config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
-            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":false,"screenshots":false,"browser":false,"cache":true,"serve":true,"mcp":true},"status":"development"});
+            let browser = markitai_core::browser_available();
+            let ocr = markitai_core::local_ocr_available();
+            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":ocr,"screenshots":browser,"browser":browser,"cache":true,"serve":true,"mcp":true},"status":"development"});
             if *as_json {
                 println!(
                     "{}",
@@ -1306,8 +1321,10 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 );
             } else {
                 println!(
-                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache, REST conversion service, stdio MCP\nNot available: OCR, screenshots, browser",
-                    markitai_core::VERSION
+                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache, REST conversion service, stdio MCP\nLocal image OCR: {}\nInstalled browser and URL screenshots: {}\nPDF/Office screenshots and PDF OCR: unavailable",
+                    markitai_core::VERSION,
+                    if ocr { "available" } else { "unavailable" },
+                    if browser { "available" } else { "unavailable" }
                 );
             }
         }

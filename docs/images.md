@@ -24,10 +24,12 @@ With both LLM and OCR disabled, CLI image items are skipped with
 returns a conversion error explaining `llm=True` and `ocr=True`, matching the
 reference Python API. Missing files still report a missing-file error.
 
-`ocr=True` with LLM enabled selects image vision. `MARKITAI_NO_VLM_OCR` prevents
-that upload; the current build reports that the local backend is unavailable.
-Local OCR, PDF page OCR, HEIF/AVIF conversion, screenshots, alt-text and
-image-description enrichment still have explicit unsupported paths.
+`ocr=True` without LLM selects [local image OCR](ocr.md) on macOS. With LLM
+enabled, it selects image vision unless `MARKITAI_NO_VLM_OCR` disables that
+upload; then local OCR supplies text for enhancement without image blocks.
+PDF page OCR, HEIF/AVIF conversion, document screenshots, alt-text and
+image-description enrichment remain unfinished. [Browser screenshots](browser.md)
+are available with an installed Chromium executable.
 
 ## SVG inputs
 
@@ -52,8 +54,8 @@ animation, foreignObject, XML processing instructions/DTDs, external image/use
 references and nested SVG data images are rejected. Hyperlinks are preserved
 but never followed. Unsupported SVG features outside resvg's static support are
 not claimed to have browser fidelity. Embedded SVG assets inside other document
-formats retain the existing original-byte/warning path; this slice adds standalone
-SVG vision ingestion, not image enrichment or local SVG OCR.
+formats retain the existing original-byte/warning path. Standalone SVG vision
+and local OCR use the separate bounded PNG; image enrichment remains unfinished.
 
 ## Embedded assets
 

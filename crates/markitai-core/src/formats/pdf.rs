@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 mod geometry;
 #[path = "pdf/layout.rs"]
 mod layout;
+#[cfg(test)]
+#[path = "pdf/policy_tests.rs"]
+mod policy_tests;
 
 const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ASSET_BYTES: usize = 128 * 1024 * 1024;

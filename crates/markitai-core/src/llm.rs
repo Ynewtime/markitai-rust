@@ -50,7 +50,7 @@ struct Deployment {
 struct Prompts {
     system: String,
     user: String,
-    image: Option<(String, String)>,
+    image: Option<Vec<(String, String)>>,
     cache_scope: String,
 }
 
@@ -197,24 +197,57 @@ pub(crate) fn enhance_image_with_source_and_runtime(
     cfg: &Value,
     runtime: Option<&LlmRuntime>,
 ) -> Result<(String, ConversionUsage)> {
-    if !matches!(
-        mime,
-        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
-    ) {
-        return Err(Error::Unsupported(
-            "LLM vision requires JPEG, PNG, WebP or GIF image content".into(),
-        ));
-    }
-    if bytes.is_empty() || bytes.len() as u64 > MAX_RESPONSE {
+    enhance_images_with_source_and_runtime(markdown, source, &[(mime, bytes)], cfg, runtime)
+}
+
+pub(crate) fn enhance_images_with_source_and_runtime(
+    markdown: &str,
+    source: &str,
+    images: &[(&str, &[u8])],
+    cfg: &Value,
+    runtime: Option<&LlmRuntime>,
+) -> Result<(String, ConversionUsage)> {
+    if images.is_empty() {
         return Err(Error::InvalidInput(
-            "LLM image must contain between 1 byte and 100 MiB".into(),
+            "LLM vision requires at least one image".into(),
         ));
     }
-    let image = Some((
-        mime.to_owned(),
-        base64::engine::general_purpose::STANDARD.encode(bytes),
-    ));
-    let prompts = prompts(markdown, source, cfg, image)?;
+    let limit = cfg
+        .pointer("/llm/max_vision_pages_per_document")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if limit > 0 && images.len() as u64 > limit {
+        return Err(Error::InvalidInput(
+            "Captured images exceed llm.max_vision_pages_per_document; no images were sent".into(),
+        ));
+    }
+    let mut total = 0u64;
+    for (mime, bytes) in images {
+        if !matches!(
+            *mime,
+            "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+        ) {
+            return Err(Error::Unsupported(
+                "LLM vision requires JPEG, PNG, WebP or GIF image content".into(),
+            ));
+        }
+        total = total.saturating_add(bytes.len() as u64);
+        if bytes.is_empty() || total > MAX_RESPONSE {
+            return Err(Error::InvalidInput(
+                "LLM images must be nonempty and total at most 100 MiB".into(),
+            ));
+        }
+    }
+    let images = images
+        .iter()
+        .map(|(mime, bytes)| {
+            (
+                mime.to_string(),
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            )
+        })
+        .collect();
+    let prompts = prompts(markdown, source, cfg, Some(images))?;
     run_with_runtime(
         &prompts,
         cfg,
@@ -228,7 +261,7 @@ fn prompts(
     markdown: &str,
     source: &str,
     cfg: &Value,
-    image: Option<(String, String)>,
+    image: Option<Vec<(String, String)>>,
 ) -> Result<Prompts> {
     let pure = config::enabled(cfg, "/llm/pure");
     let kind = if image.is_some() {
@@ -821,12 +854,16 @@ fn run_with_runtime(
 }
 
 fn payload(entry: &Deployment, prompts: &Prompts) -> Value {
-    let content = if let Some((mime, encoded)) = &prompts.image {
-        if entry.protocol == Protocol::Anthropic {
-            json!([{"type":"text","text":prompts.user},{"type":"image","source":{"type":"base64","media_type":mime,"data":encoded}}])
-        } else {
-            json!([{"type":"text","text":prompts.user},{"type":"image_url","image_url":{"url":format!("data:{mime};base64,{encoded}")}}])
-        }
+    let content = if let Some(images) = &prompts.image {
+        let mut content = vec![json!({"type":"text","text":prompts.user})];
+        content.extend(images.iter().map(|(mime, encoded)| {
+            if entry.protocol == Protocol::Anthropic {
+                json!({"type":"image","source":{"type":"base64","media_type":mime,"data":encoded}})
+            } else {
+                json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{encoded}")}})
+            }
+        }));
+        json!(content)
     } else {
         json!(prompts.user)
     };
@@ -1170,6 +1207,42 @@ mod tests {
     }
 
     #[test]
+    fn multiple_vision_images_keep_order_and_validate_the_complete_budget() {
+        for model in ["openai/test", "anthropic/test"] {
+            let cfg = cfg(model, "http://127.0.0.1:9/v1");
+            let entry = deployments(&cfg, &HashMap::new()).unwrap().remove(0);
+            let mut prompt = plain();
+            prompt.image = Some(vec![
+                ("image/jpeg".into(), "Zmlyc3Q=".into()),
+                ("image/png".into(), "c2Vjb25k".into()),
+            ]);
+            let request = payload(&entry, &prompt);
+            let content = request["messages"][0]["content"]
+                .as_array()
+                .or_else(|| request["messages"][1]["content"].as_array())
+                .unwrap();
+            assert_eq!(content.len(), 3);
+            assert!(content[1].to_string().contains("Zmlyc3Q="));
+            assert!(content[2].to_string().contains("c2Vjb25k"));
+        }
+        let cfg = json!({"llm":{"max_vision_pages_per_document":1}});
+        let error = enhance_images_with_source_and_runtime(
+            "",
+            "url",
+            &[("image/png", b"first"), ("image/png", b"second")],
+            &cfg,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no images were sent"));
+        assert!(enhance_images_with_source_and_runtime("", "url", &[], &cfg, None).is_err());
+        assert!(
+            enhance_images_with_source_and_runtime("", "url", &[("image/png", b"")], &cfg, None)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn shared_runtime_caps_text_and_image_requests_until_response_bodies_finish() {
         const REQUESTS: usize = 6;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1231,7 +1304,7 @@ mod tests {
             workers.push(thread::spawn(move || {
                 let mut prompts = plain();
                 if index % 2 == 1 {
-                    prompts.image = Some(("image/png".into(), "cG5n".into()));
+                    prompts.image = Some(vec![("image/png".into(), "cG5n".into())]);
                 }
                 start.wait();
                 run_with_runtime(
@@ -1762,7 +1835,7 @@ mod tests {
             json!({"model":"claude-test","content":[{"type":"text","text":"image text"}],"usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}),
         )]);
         let mut prompts = plain();
-        prompts.image = Some(("image/png".into(), "cG5n".into()));
+        prompts.image = Some(vec![("image/png".into(), "cG5n".into())]);
         let (text, usage) = run(
             &prompts,
             &cfg("anthropic/claude-test", &server.base),
@@ -1832,7 +1905,7 @@ mod tests {
         cfg["llm"]["model_list"][0]["litellm_params"]["max_tokens"] = json!(512);
         let entry = deployments(&cfg, &HashMap::new()).unwrap().remove(0);
         let mut prompts = plain();
-        prompts.image = Some(("image/jpeg".into(), "aW1hZ2U=".into()));
+        prompts.image = Some(vec![("image/jpeg".into(), "aW1hZ2U=".into())]);
         let request = payload(&entry, &prompts);
         assert_eq!(request["max_completion_tokens"], 512);
         assert!(request.get("max_tokens").is_none());

@@ -1,0 +1,384 @@
+use crate::{Error, Result, config};
+use regex::Regex;
+use serde_json::{Map, Value, json};
+use std::collections::HashMap;
+use url::Url;
+
+pub(super) struct Options {
+    pub timeout: u64,
+    pub wait_for: String,
+    pub extra_wait: u64,
+    pub selector: Option<String>,
+    pub skip_scroll: bool,
+    pub cookies: Vec<Value>,
+    pub headers: Map<String, Value>,
+    pub user_agent: Option<String>,
+    pub blocked: Vec<Regex>,
+    pub proxy: Option<String>,
+    pub bypass: String,
+    pub width: u64,
+    pub height: u64,
+    pub quality: u64,
+    pub tile_height: u64,
+    pub max_height: u64,
+}
+
+fn unsigned(value: &Value, key: &str, default: u64, minimum: u64, maximum: u64) -> Result<u64> {
+    let number = value.get(key).and_then(Value::as_u64).unwrap_or(default);
+    if !(minimum..=maximum).contains(&number) {
+        return Err(Error::Config(format!(
+            "Native browser {key} must be between {minimum} and {maximum}"
+        )));
+    }
+    Ok(number)
+}
+
+fn resource_pattern(pattern: &str) -> Result<Regex> {
+    if pattern.len() > 4096 || pattern.contains(['{', '}', '[', ']', '\\']) {
+        return Err(Error::Unsupported("Native browser resource patterns support literal URLs, * and **; braces, brackets and escapes are not supported".into()));
+    }
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '*' {
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                regex.push_str(".*");
+            } else {
+                regex.push_str("[^/]*");
+            }
+        } else {
+            regex.push_str(&regex::escape(&ch.to_string()));
+        }
+    }
+    regex.push('$');
+    Regex::new(&regex).map_err(|_| Error::Config("Invalid browser resource pattern".into()))
+}
+
+fn cookies(value: &Value, url: &Url) -> Result<Vec<Value>> {
+    let mut output = Vec::new();
+    for cookie in value.as_array().into_iter().flatten() {
+        let fields = cookie
+            .as_object()
+            .ok_or_else(|| Error::Config("Browser cookies must be objects".into()))?;
+        if fields.keys().any(|key| {
+            ![
+                "name", "value", "url", "domain", "path", "expires", "httpOnly", "secure",
+                "sameSite",
+            ]
+            .contains(&key.as_str())
+        }) {
+            return Err(Error::Unsupported(
+                "Native browser cookie contains an unsupported field".into(),
+            ));
+        }
+        let mut item = Map::new();
+        for key in ["name", "value"] {
+            let text = fields
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Config(format!("Browser cookie requires {key}")))?;
+            item.insert(key.into(), json!(text));
+        }
+        for key in ["url", "domain", "path", "sameSite"] {
+            if let Some(text) = fields.get(key).and_then(Value::as_str) {
+                item.insert(key.into(), json!(text));
+            }
+        }
+        if !item.contains_key("url") && !item.contains_key("domain") {
+            item.insert("url".into(), json!(url.as_str()));
+        }
+        if item.contains_key("domain") && !item.contains_key("path") {
+            item.insert("path".into(), json!("/"));
+        }
+        if let Some(same_site) = item.get("sameSite").and_then(Value::as_str)
+            && !["Strict", "Lax", "None"].contains(&same_site)
+        {
+            return Err(Error::Config(
+                "Cookie sameSite must be Strict, Lax or None".into(),
+            ));
+        }
+        for key in ["secure", "httpOnly"] {
+            if let Some(value) = fields.get(key) {
+                let flag = match value {
+                    Value::Bool(value) => *value,
+                    Value::String(value) if ["true", "false"].contains(&value.as_str()) => {
+                        value == "true"
+                    }
+                    _ => return Err(Error::Config(format!("Cookie {key} must be true or false"))),
+                };
+                item.insert(key.into(), json!(flag));
+            }
+        }
+        if let Some(value) = fields.get("expires") {
+            let number = value
+                .as_f64()
+                .or_else(|| value.as_str()?.parse::<f64>().ok())
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| {
+                    Error::Config("Cookie expires must be finite seconds since epoch".into())
+                })?;
+            item.insert("expires".into(), json!(number));
+        }
+        output.push(Value::Object(item));
+    }
+    if output.len() > 256 {
+        return Err(Error::Config(
+            "Native browser supports at most 256 initial cookies".into(),
+        ));
+    }
+    Ok(output)
+}
+
+fn proxy(env: &HashMap<String, String>, url: &Url) -> Result<(Option<String>, String)> {
+    let keys: &[&str] = if url.scheme() == "https" {
+        &["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"]
+    } else {
+        &["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"]
+    };
+    let raw = keys
+        .iter()
+        .find_map(|key| env.get(*key).filter(|value| !value.trim().is_empty()));
+    let mut bypass = vec![
+        "localhost".to_owned(),
+        "*.localhost".into(),
+        "127.0.0.0/8".into(),
+        "[::1]".into(),
+    ];
+    if let Some(raw) = env.get("no_proxy").or_else(|| env.get("NO_PROXY")) {
+        for pattern in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            if pattern.chars().any(char::is_whitespace) || pattern.contains(';') {
+                return Err(Error::Config(
+                    "Native browser NO_PROXY contains an unsupported rule".into(),
+                ));
+            }
+            let rule = match pattern.parse::<std::net::Ipv6Addr>() {
+                Ok(ip) => format!("[{ip}]"),
+                Err(_) => pattern.to_owned(),
+            };
+            if !bypass.contains(&rule) {
+                bypass.push(rule);
+            }
+        }
+    }
+    let proxy = raw
+        .map(|raw| {
+            let parsed =
+                Url::parse(raw).map_err(|_| Error::Config("Invalid browser proxy URL".into()))?;
+            if !["http", "https", "socks5"].contains(&parsed.scheme())
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+                || !["", "/"].contains(&parsed.path())
+            {
+                return Err(Error::Unsupported(
+                    "Native browser proxy must be an unauthenticated HTTP(S) or SOCKS5 endpoint"
+                        .into(),
+                ));
+            }
+            Ok(parsed.as_str().trim_end_matches('/').to_owned())
+        })
+        .transpose()?;
+    Ok((proxy, bypass.join(";")))
+}
+
+impl Options {
+    pub fn from_config(cfg: &Value, url: &Url, capture: bool) -> Result<Self> {
+        if !["http", "https"].contains(&url.scheme())
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(Error::InvalidInput(
+                "Native browser requires an HTTP(S) URL without embedded credentials".into(),
+            ));
+        }
+        let mut settings = cfg
+            .pointer("/fetch/playwright")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if settings
+            .get("session_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("isolated")
+            != "isolated"
+        {
+            return Err(Error::Unsupported("Native browser domain_persistent sessions are not implemented; use session_mode=isolated".into()));
+        }
+        if settings
+            .get("http_credentials")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(Error::Unsupported(
+                "Native browser http_credentials are not implemented".into(),
+            ));
+        }
+        let authority = match url.port() {
+            Some(port) => format!("{}:{port}", url.host_str().unwrap()),
+            None => url.host_str().unwrap().to_owned(),
+        };
+        let builtin = match authority.as_str() {
+            "github.com" => {
+                json!({"wait_for_selector":".markdown-body","wait_for":"domcontentloaded","extra_wait_ms":300,"skip_auto_scroll":true})
+            }
+            "x.com" | "twitter.com" => {
+                json!({"wait_for_selector":"article[data-tweet-id], [data-testid=\"tweet\"]","wait_for":"domcontentloaded","extra_wait_ms":500,"skip_auto_scroll":true,"reject_resource_patterns":["**/analytics/**","**/ads/**","**/tracking/**","**/*.mp4"]})
+            }
+            _ => json!({}),
+        };
+        config::merge(&mut settings, builtin);
+        if let Some(profile) = cfg
+            .pointer("/fetch/domain_profiles")
+            .and_then(|profiles| profiles.get(&authority))
+            .and_then(Value::as_object)
+        {
+            for key in [
+                "wait_for",
+                "wait_for_selector",
+                "extra_wait_ms",
+                "skip_auto_scroll",
+                "reject_resource_patterns",
+            ] {
+                if let Some(value) = profile.get(key).filter(|value| !value.is_null()) {
+                    settings[key] = value.clone();
+                }
+            }
+        }
+        let timeout = unsigned(&settings, "timeout", 30_000, 1, 120_000)?;
+        let wait_for = settings
+            .get("wait_for")
+            .and_then(Value::as_str)
+            .unwrap_or("domcontentloaded")
+            .to_owned();
+        if !["load", "domcontentloaded", "networkidle"].contains(&wait_for.as_str()) {
+            return Err(Error::Config("Unknown browser wait_for state".into()));
+        }
+        let mut headers = Map::new();
+        if let Some(values) = settings
+            .get("extra_http_headers")
+            .and_then(Value::as_object)
+        {
+            for (key, value) in values {
+                let value = value
+                    .as_str()
+                    .ok_or_else(|| Error::Config("Browser header values must be strings".into()))?;
+                reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                    .map_err(|_| Error::Config("Invalid browser header name".into()))?;
+                reqwest::header::HeaderValue::from_str(value)
+                    .map_err(|_| Error::Config("Invalid browser header value".into()))?;
+                headers.insert(key.clone(), json!(value));
+            }
+        }
+        let blocked = settings
+            .get("reject_resource_patterns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|value| resource_pattern(value.as_str().unwrap_or("")))
+            .collect::<Result<Vec<_>>>()?;
+        if blocked.len() > 256 {
+            return Err(Error::Config(
+                "Native browser supports at most 256 resource patterns".into(),
+            ));
+        }
+        let screenshot = cfg.get("screenshot").cloned().unwrap_or_else(|| json!({}));
+        let (proxy, bypass) = proxy(&config::environment(), url)?;
+        Ok(Self {
+            timeout,
+            wait_for,
+            extra_wait: unsigned(&settings, "extra_wait_ms", 3000, 0, 30_000)?,
+            selector: settings
+                .get("wait_for_selector")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            skip_scroll: settings
+                .get("skip_auto_scroll")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            cookies: cookies(settings.get("cookies").unwrap_or(&Value::Null), url)?,
+            headers,
+            user_agent: settings
+                .get("user_agent")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            blocked,
+            proxy,
+            bypass,
+            width: if capture {
+                unsigned(&screenshot, "viewport_width", 1920, 1, 8192)?
+            } else {
+                1280
+            },
+            height: if capture {
+                unsigned(&screenshot, "viewport_height", 1080, 1, 8192)?
+            } else {
+                720
+            },
+            quality: unsigned(&screenshot, "quality", 85, 1, 100)?,
+            tile_height: unsigned(&screenshot, "tile_height", 2000, 0, 32_768)?,
+            max_height: unsigned(&screenshot, "max_height", 10_000, 1, 32_768)?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cookies_preserve_scope_and_convert_typed_protocol_fields() {
+        let cookies = cookies(&json!([{"name":"session","value":"private","domain":"localhost","secure":"false","httpOnly":"true","expires":"1800000000"}]), &Url::parse("http://localhost/a").unwrap()).unwrap();
+        assert_eq!(
+            cookies[0],
+            json!({"name":"session","value":"private","domain":"localhost","path":"/","secure":false,"httpOnly":true,"expires":1800000000.0})
+        );
+        assert!(
+            super::cookies(
+                &json!([{"name":"a","value":"b","partitionKey":"unsupported"}]),
+                &Url::parse("http://localhost/").unwrap()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn resource_patterns_respect_path_boundaries_and_literal_query_marks() {
+        assert!(
+            resource_pattern("**/ads/**")
+                .unwrap()
+                .is_match("https://a.test/ads/x.js")
+        );
+        assert!(
+            !resource_pattern("https://a.test/*.js")
+                .unwrap()
+                .is_match("https://a.test/deep/x.js")
+        );
+        assert!(
+            resource_pattern("https://a.test/x?q=1")
+                .unwrap()
+                .is_match("https://a.test/x?q=1")
+        );
+        assert!(resource_pattern("**/*.{js,css}").is_err());
+    }
+    #[test]
+    fn proxy_credentials_are_not_put_in_process_arguments() {
+        let url = Url::parse("https://example.test/").unwrap();
+        let env = HashMap::from([(
+            "HTTPS_PROXY".into(),
+            "http://user:secret@proxy.test:8080".into(),
+        )]);
+        assert!(proxy(&env, &url).is_err());
+        let env = HashMap::from([
+            ("HTTPS_PROXY".into(), "http://proxy.test:8080".into()),
+            ("NO_PROXY".into(), "example.test,::1".into()),
+        ]);
+        let (server, bypass) = proxy(&env, &url).unwrap();
+        assert_eq!(server.as_deref(), Some("http://proxy.test:8080"));
+        assert!(bypass.contains("example.test") && bypass.contains("[::1]"));
+    }
+}

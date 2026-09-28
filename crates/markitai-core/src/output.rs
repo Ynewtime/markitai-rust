@@ -400,6 +400,18 @@ pub fn write_with_publication(
     cfg: &Value,
     publication: Option<&dyn Publication>,
 ) -> Result<()> {
+    write_document(dir, name, result, assets, &[], cfg, publication)
+}
+
+pub(crate) fn write_document(
+    dir: &Path,
+    name: &str,
+    result: &mut ConversionOutput,
+    assets: &[Asset],
+    screenshots: &[Asset],
+    cfg: &Value,
+    publication: Option<&dyn Publication>,
+) -> Result<()> {
     let _guard = OUTPUT_LOCK
         .lock()
         .map_err(|_| Error::Conversion("Output lock poisoned".into()))?;
@@ -480,7 +492,16 @@ pub fn write_with_publication(
             *md = rewrite_asset_references(md, &replacements);
         }
     }
-    if result.llm_markdown.is_none() || config::enabled(cfg, "/llm/keep_base") {
+    for screenshot in screenshots {
+        let path = publish_screenshot(dir, screenshot, allow_symlinks)?;
+        if !result.screenshots.contains(&path) {
+            result.screenshots.push(path);
+        }
+    }
+    let capture_only = crate::is_url(&result.source)
+        && config::enabled(cfg, "/screenshot/screenshot_only")
+        && !(config::enabled(cfg, "/llm/enabled") && config::enabled(cfg, "/llm/pure"));
+    if !capture_only && (result.llm_markdown.is_none() || config::enabled(cfg, "/llm/keep_base")) {
         let path = dir.join(format!("{stem}.md"));
         let content = content(result, cfg, false)?;
         if let Some(publication) = publication {
@@ -507,9 +528,166 @@ pub fn write_with_publication(
     Ok(())
 }
 
+fn publish_screenshot(
+    dir: &Path,
+    screenshot: &Asset,
+    allow_symlinks: bool,
+) -> Result<std::path::PathBuf> {
+    let name = Path::new(&screenshot.name);
+    if name.components().count() != 1
+        || !matches!(name.components().next(), Some(Component::Normal(_)))
+    {
+        return Err(Error::InvalidInput(
+            "Screenshot name must be a filename".into(),
+        ));
+    }
+    let directory = dir.join(".markitai/screenshots");
+    check_path(&directory, allow_symlinks)?;
+    std::fs::create_dir_all(&directory)?;
+    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = name.extension().unwrap_or_default().to_string_lossy();
+    for revision in 1u64.. {
+        let filename = if revision == 1 {
+            screenshot.name.clone()
+        } else {
+            format!("{stem}.v{revision}.{extension}")
+        };
+        let path = directory.join(filename);
+        check_path(&path, allow_symlinks)?;
+        if screenshot_matches(&path, &screenshot.bytes)? == Some(false) {
+            continue;
+        }
+        // Capture names remain recognizable. Changed captures get new names,
+        // preserving images referenced by earlier results and history entries.
+        crate::asset_store::insert_or_verify(&path, &screenshot.bytes)?;
+        return Ok(path);
+    }
+    Err(Error::Conversion(
+        "Screenshot version counter exhausted".into(),
+    ))
+}
+
+fn screenshot_matches(path: &Path, expected: &[u8]) -> Result<Option<bool>> {
+    use std::io::Read;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() {
+        return Err(Error::InvalidInput(
+            "Screenshot destination is not a regular file".into(),
+        ));
+    }
+    if metadata.len() != expected.len() as u64 {
+        return Ok(Some(false));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Do not block if a concurrently changed destination becomes a FIFO.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(Error::InvalidInput(
+            "Screenshot destination changed file type".into(),
+        ));
+    }
+    let mut buffer = [0u8; 32 * 1024];
+    for bytes in expected.chunks(buffer.len()) {
+        match file.read_exact(&mut buffer[..bytes.len()]) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(Some(false));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if &buffer[..bytes.len()] != bytes {
+            return Ok(Some(false));
+        }
+    }
+    Ok(Some(file.read(&mut buffer[..1])? == 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn screenshot_comparison_rejects_special_files_and_large_existing_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let large = root.path().join("large.jpg");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(8 * 1024 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(screenshot_matches(&large, b"small").unwrap(), Some(false));
+        assert!(screenshot_matches(root.path(), b"x").is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let fifo = root.path().join("capture.jpg");
+            let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            assert!(screenshot_matches(&fifo, b"x").is_err());
+        }
+    }
+
+    #[test]
+    fn screenshot_only_publishes_all_tiles_and_preserves_previous_captures() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config::normalize(
+            &json!({"screenshot":{"screenshot_only":true},"llm":{"enabled":false}}),
+        )
+        .unwrap();
+        let mut result = ConversionOutput {
+            source: "https://example.test/page".into(),
+            ..Default::default()
+        };
+        let shots = [
+            Asset {
+                name: "example.test_page.full.jpg".into(),
+                bytes: b"capture zero".to_vec(),
+            },
+            Asset {
+                name: "example.test_page.full--1.jpg".into(),
+                bytes: b"capture one".to_vec(),
+            },
+        ];
+        write_document(dir.path(), "page", &mut result, &[], &shots, &cfg, None).unwrap();
+        assert!(result.output_path.is_none() && result.llm_output_path.is_none());
+        assert!(!dir.path().join("page.md").exists());
+        assert_eq!(result.screenshots.len(), 2);
+        for (path, shot) in result.screenshots.iter().zip(&shots) {
+            assert_eq!(std::fs::read(path).unwrap(), shot.bytes);
+        }
+        let original = result.screenshots[0].clone();
+        let mut second = ConversionOutput {
+            source: result.source.clone(),
+            ..Default::default()
+        };
+        let changed = [Asset {
+            name: shots[0].name.clone(),
+            bytes: b"updated capture".to_vec(),
+        }];
+        write_document(dir.path(), "page", &mut second, &[], &changed, &cfg, None).unwrap();
+        assert_eq!(second.screenshots.len(), 1);
+        assert_ne!(second.screenshots[0], original);
+        assert_eq!(std::fs::read(original).unwrap(), shots[0].bytes);
+        assert_eq!(
+            std::fs::read(&second.screenshots[0]).unwrap(),
+            changed[0].bytes
+        );
+        let invalid = Asset {
+            name: "../escape.jpg".into(),
+            bytes: vec![1],
+        };
+        assert!(publish_screenshot(dir.path(), &invalid, false).is_err());
+        assert!(!dir.path().join("escape.jpg").exists());
+    }
+
     #[test]
     fn css_resources_publish_exact_assets_in_both_outputs_and_visible_profiles() {
         let first = b"first css resource".to_vec();

@@ -305,7 +305,10 @@ fn multipart_jobs_preserve_member_identity_sse_results_and_restart_history() {
     let server = Server::start(temp.path());
     let caps = server.json("/api/capabilities");
     assert_eq!(caps["limits"]["max_job_items"], 1000);
-    assert_eq!(caps["extras"]["browser"], false);
+    assert_eq!(
+        caps["extras"]["browser"],
+        markitai_core::browser_available()
+    );
     let origin = Origin::start();
     let created = server.submit(
         &[
