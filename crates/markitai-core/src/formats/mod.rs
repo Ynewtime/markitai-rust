@@ -17,6 +17,10 @@ pub(crate) use native::pdf::{
 use crate::{Document, Error, Result};
 use std::path::Path;
 
+pub(crate) fn extract_pdf(bytes: &[u8]) -> Result<Document> {
+    native::extract(bytes, "pdf")
+}
+
 /// Extensions with an implemented local reader (leading dots are accepted).
 pub fn supports_extension(extension: &str) -> bool {
     let extension = extension.trim_start_matches('.').to_ascii_lowercase();

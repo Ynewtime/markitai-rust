@@ -118,11 +118,11 @@ pub fn convert_with_publication(
             .and_then(|s| s.to_str())
             .is_some_and(is_image_extension);
     let output_dir = options.output_dir.map(|path| config::expand_home(&path));
-    let pdf_input = !is_url
+    let mut pdf_input = !is_url
         && input_path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
-    let pdf_media_requested = pdf_input
+    let mut pdf_media_requested = pdf_input
         && (config::enabled(&cfg, "/ocr/enabled") || config::enabled(&cfg, "/screenshot/enabled"));
     if !is_url {
         let path = &input_path;
@@ -179,16 +179,6 @@ pub fn convert_with_publication(
             ..Default::default()
         });
     }
-    if is_url
-        && config::enabled(&cfg, "/screenshot/screenshot_only")
-        && !config::enabled(&cfg, "/llm/enabled")
-        && output_dir.is_none()
-    {
-        return Err(Error::InvalidInput(
-            "Screenshot-only conversion without LLM requires output_dir to retain captured images"
-                .into(),
-        ));
-    }
     let mut vision = None;
     let mut screenshots = Vec::new();
     let mut fetch_cache_hit = false;
@@ -233,30 +223,64 @@ pub fn convert_with_publication(
         }
         doc
     } else if is_url {
-        let fetched = fetch::fetch_with_context(source, &cfg, context.explicit_fetch_strategy)?;
+        let fetched = fetch::fetch_with_context(
+            source,
+            &cfg,
+            context.explicit_fetch_strategy,
+            output_dir.is_some(),
+        )?;
         fetch_cache_hit = fetched.cache_hit;
         screenshots = fetched.screenshots;
-        fetched.document
+        match fetched.content {
+            fetch::FetchContent::Document(document) => document,
+            fetch::FetchContent::Pdf(downloaded) => {
+                pdf_input = true;
+                pdf_media_requested = config::enabled(&cfg, "/ocr/enabled")
+                    || config::enabled(&cfg, "/screenshot/enabled");
+                let mut document = if pdf_media_requested {
+                    let mut media_cfg = cfg.clone();
+                    if config::enabled(&cfg, "/llm/pure") {
+                        // URL pure mode also wins over screenshot_only during
+                        // PDF vision-budget checks and opt-out diagnostics.
+                        media_cfg["screenshot"]["screenshot_only"] = false.into();
+                    }
+                    let (document, captured, reliable) = prepare_pdf_media(
+                        &downloaded.bytes,
+                        &name,
+                        output_dir.as_deref(),
+                        &media_cfg,
+                        vlm_disabled,
+                    )?;
+                    screenshots = captured;
+                    pdf_has_reliable_text = reliable;
+                    document
+                } else {
+                    // Config-only screenshot_only does not turn on PDF capture.
+                    formats::extract_pdf(&downloaded.bytes)?
+                };
+                document.warnings.extend(downloaded.warnings);
+                document.metadata.insert("format".into(), "PDF".into());
+                document
+                    .metadata
+                    .insert("fetch_strategy".into(), "static".into());
+                if downloaded.final_url != source {
+                    document.metadata.insert(
+                        "source_url".into(),
+                        output::redact_url(&downloaded.final_url).into(),
+                    );
+                }
+                document
+            }
+        }
     } else if pdf_media_requested {
-        if cfg["security"]["pdf_sanitize"] == "remove" {
-            return Err(Error::Unsupported(
-                "PDF hidden-text removal is not implemented in this development build".into(),
-            ));
-        }
-        let prefix = cfg
-            .pointer("/output/filename")
-            .and_then(Value::as_str)
-            .map(|name| name.strip_suffix(".md").unwrap_or(name))
-            .or_else(|| cfg.pointer("/output/reserved_stem").and_then(Value::as_str))
-            .unwrap_or(&name);
-        let mut prepared =
-            pdf_media::prepare(&std::fs::read(&input_path)?, prefix, &cfg, vlm_disabled)?;
-        pdf_has_reliable_text = prepared.has_reliable_text;
-        // Publish before assembling references so they use actual capture names.
-        if let Some(dir) = &output_dir {
-            output::publish_page_screenshots(dir, &mut prepared.screenshots, &cfg)?;
-        }
-        let (mut document, captured) = prepared.finish()?;
+        let (mut document, captured, reliable) = prepare_pdf_media(
+            &std::fs::read(&input_path)?,
+            &name,
+            output_dir.as_deref(),
+            &cfg,
+            vlm_disabled,
+        )?;
+        pdf_has_reliable_text = reliable;
         screenshots = captured;
         document.metadata.insert(
             "source".into(),
@@ -273,6 +297,7 @@ pub fn convert_with_publication(
         .and_then(Value::as_str)
         .unwrap_or("");
     if format == "PDF" {
+        pdf_input = true;
         if cfg["security"]["pdf_sanitize"] == "remove" {
             return Err(Error::Unsupported(
                 "PDF hidden-text removal is not implemented in this development build".into(),
@@ -318,8 +343,15 @@ pub fn convert_with_publication(
         None
     };
     let screenshot_only = is_url
+        && !pdf_input
         && config::enabled(&cfg, "/screenshot/screenshot_only")
         && !(config::enabled(&cfg, "/llm/enabled") && config::enabled(&cfg, "/llm/pure"));
+    if screenshot_only && !config::enabled(&cfg, "/llm/enabled") && output_dir.is_none() {
+        return Err(Error::InvalidInput(
+            "Screenshot-only conversion without LLM requires output_dir to retain captured images"
+                .into(),
+        ));
+    }
     if screenshot_only && screenshots.is_empty() {
         return Err(Error::Fetch(
             "Screenshot-only conversion captured no screenshots".into(),
@@ -341,6 +373,7 @@ pub fn convert_with_publication(
         result.base_frontmatter = Some(result.frontmatter.clone());
         let pure = config::enabled(&cfg, "/llm/pure");
         let pdf_screenshot_only = pdf_input
+            && !(is_url && pure)
             && !screenshots.is_empty()
             && config::enabled(&cfg, "/screenshot/screenshot_only");
         let send_pdf_images = pdf_input && (!pure || pdf_screenshot_only);
@@ -452,8 +485,8 @@ pub fn convert_with_publication(
                             &name,
                             &mut result,
                             &doc.assets,
-                            if pdf_media_requested {
-                                output::Screenshots::Published(&screenshots)
+                            if pdf_input {
+                                output::Screenshots::PublishedPdf(&screenshots)
                             } else {
                                 output::Screenshots::New(&screenshots)
                             },
@@ -478,8 +511,8 @@ pub fn convert_with_publication(
             &name,
             &mut result,
             &doc.assets,
-            if pdf_media_requested {
-                output::Screenshots::Published(&screenshots)
+            if pdf_input {
+                output::Screenshots::PublishedPdf(&screenshots)
             } else {
                 output::Screenshots::New(&screenshots)
             },
@@ -489,6 +522,34 @@ pub fn convert_with_publication(
     }
     result.duration = start.elapsed().as_secs_f64();
     Ok(result)
+}
+
+fn prepare_pdf_media(
+    bytes: &[u8],
+    name: &str,
+    output_dir: Option<&Path>,
+    cfg: &Value,
+    vlm_disabled: bool,
+) -> Result<(Document, Vec<Asset>, bool)> {
+    if cfg["security"]["pdf_sanitize"] == "remove" {
+        return Err(Error::Unsupported(
+            "PDF hidden-text removal is not implemented in this development build".into(),
+        ));
+    }
+    let prefix = cfg
+        .pointer("/output/filename")
+        .and_then(Value::as_str)
+        .map(|name| name.strip_suffix(".md").unwrap_or(name))
+        .or_else(|| cfg.pointer("/output/reserved_stem").and_then(Value::as_str))
+        .unwrap_or(name);
+    let mut prepared = pdf_media::prepare(bytes, prefix, cfg, vlm_disabled)?;
+    let reliable = prepared.has_reliable_text;
+    // Freeze capture names before page references or model inputs are assembled.
+    if let Some(dir) = output_dir {
+        output::publish_page_screenshots(dir, &mut prepared.screenshots, cfg)?;
+    }
+    let (document, screenshots) = prepared.finish()?;
+    Ok((document, screenshots, reliable))
 }
 
 pub fn is_url(source: &str) -> bool {

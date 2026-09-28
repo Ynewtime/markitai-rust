@@ -112,15 +112,40 @@ fn remote_allowed(url: &Url, cfg: &Value) -> Result<()> {
     Ok(())
 }
 
+pub(crate) enum FetchContent {
+    Document(Document),
+    Pdf(DownloadedPdf),
+}
+
+pub(crate) struct DownloadedPdf {
+    pub bytes: Vec<u8>,
+    pub final_url: String,
+    pub warnings: Vec<String>,
+}
+
+impl FetchContent {
+    fn warnings_mut(&mut self) -> &mut Vec<String> {
+        match self {
+            Self::Document(document) => &mut document.warnings,
+            Self::Pdf(pdf) => &mut pdf.warnings,
+        }
+    }
+}
+
 pub(crate) struct FetchOutcome {
-    pub document: Document,
+    pub content: FetchContent,
     pub cache_hit: bool,
     pub screenshots: Vec<Asset>,
 }
 
 #[cfg(test)]
 pub fn fetch(source: &str, cfg: &Value) -> Result<Document> {
-    Ok(fetch_with_context(source, cfg, None)?.document)
+    match fetch_with_context(source, cfg, None, true)?.content {
+        FetchContent::Document(document) => Ok(document),
+        FetchContent::Pdf(_) => Err(Error::Unsupported(
+            "The document-only test helper cannot consume deferred PDF bytes".into(),
+        )),
+    }
 }
 
 /// Explicit strategy provenance affects the cache key, not strategy selection.
@@ -128,6 +153,7 @@ pub(crate) fn fetch_with_context(
     source: &str,
     cfg: &Value,
     explicit_strategy: Option<&str>,
+    output_available: bool,
 ) -> Result<FetchOutcome> {
     let url = Url::parse(source).map_err(|_| Error::InvalidInput("Invalid URL".into()))?;
     if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() {
@@ -142,18 +168,31 @@ pub(crate) fn fetch_with_context(
     let capture = config::enabled(cfg, "/screenshot/enabled")
         || config::enabled(cfg, "/screenshot/screenshot_only");
     match strategy {
-        "playwright" => fetch_browser(source, cfg, capture),
-        "auto" if capture => fetch_browser(source, cfg, true),
+        "playwright" => {
+            require_capture_output(cfg, output_available)?;
+            fetch_browser(source, cfg, capture)
+        }
+        "auto" if capture => match probe_pdf(source, &url, cfg, explicit_strategy)? {
+            Some(outcome) => Ok(outcome),
+            None => {
+                require_capture_output(cfg, output_available)?;
+                fetch_browser(source, cfg, true)
+            }
+        },
         "static" if capture => {
             // Explicit static keeps its chosen text representation, even when
             // Chromium is additionally needed for a rendered screenshot.
             let mut outcome = match fetch_static(source, &url, cfg, explicit_strategy) {
                 Err(error) if visual_only(cfg) && browser_quality_failure(&error) => {
+                    require_capture_output(cfg, output_available)?;
                     return fetch_browser(source, cfg, true);
                 }
                 result => result?,
             };
-            attach_screenshot(source, cfg, &mut outcome)?;
+            if matches!(&outcome.content, FetchContent::Document(_)) {
+                require_capture_output(cfg, output_available)?;
+                attach_screenshot(source, cfg, &mut outcome)?;
+            }
             Ok(outcome)
         }
         "auto" => match fetch_static(source, &url, cfg, explicit_strategy) {
@@ -164,6 +203,7 @@ pub(crate) fn fetch_with_context(
         },
         "static" => fetch_static(source, &url, cfg, explicit_strategy),
         "defuddle" | "jina" => {
+            require_capture_output(cfg, output_available)?;
             remote_allowed(&url, cfg)?;
             let client = client(30)?;
             let remote = if strategy == "defuddle" {
@@ -217,7 +257,7 @@ pub(crate) fn fetch_with_context(
             doc.metadata
                 .insert("fetch_strategy".into(), json!(strategy));
             let mut outcome = FetchOutcome {
-                document: doc,
+                content: FetchContent::Document(doc),
                 cache_hit: false,
                 screenshots: Vec::new(),
             };
@@ -230,6 +270,16 @@ pub(crate) fn fetch_with_context(
             "Fetch strategy '{strategy}' is not implemented in this development build"
         ))),
     }
+}
+
+fn require_capture_output(cfg: &Value, output_available: bool) -> Result<()> {
+    if visual_only(cfg) && !config::enabled(cfg, "/llm/enabled") && !output_available {
+        return Err(Error::InvalidInput(
+            "Screenshot-only conversion without LLM requires output_dir to retain captured images"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn visual_only(cfg: &Value) -> bool {
@@ -253,12 +303,12 @@ fn attach_screenshot(source: &str, cfg: &Value, outcome: &mut FetchOutcome) -> R
     match browser::fetch(source, cfg, true) {
         Ok(page) => {
             outcome.screenshots = page.screenshots;
-            outcome.document.warnings.extend(page.warnings);
+            outcome.content.warnings_mut().extend(page.warnings);
         }
         Err(error) if visual_only(cfg) => return Err(error),
         Err(_) => outcome
-            .document
-            .warnings
+            .content
+            .warnings_mut()
             .push("Browser screenshot failed; retained the selected text representation.".into()),
     }
     Ok(())
@@ -303,7 +353,7 @@ fn browser_outcome(page: browser::BrowserPage, cfg: &Value) -> Result<FetchOutco
     );
     document.warnings.extend(page.warnings);
     Ok(FetchOutcome {
-        document,
+        content: FetchContent::Document(document),
         cache_hit: false,
         screenshots: page.screenshots,
     })
@@ -314,16 +364,16 @@ const CACHE_WARNING: &str =
     "Persistent URL fetch cache is unavailable; caching could not be completed.";
 
 struct StaticPage {
-    document: Document,
+    content: FetchContent,
     cache_eligible: bool,
     final_url: String,
     etag: Option<String>,
     last_modified: Option<String>,
 }
 
-fn cache_warning(document: &mut Document, unavailable: bool) {
+fn cache_warning(content: &mut FetchContent, unavailable: bool) {
     if unavailable {
-        document.warnings.push(CACHE_WARNING.into());
+        content.warnings_mut().push(CACHE_WARNING.into());
     }
 }
 
@@ -365,10 +415,10 @@ fn fetch_static(
                 && entry.last_modified.as_deref().is_none_or(str::is_empty) =>
         {
             // The store enforces TTL and updates access time on reads.
-            let mut document = cached_document(entry);
-            cache_warning(&mut document, cache_unavailable);
+            let mut content = FetchContent::Document(cached_document(entry));
+            cache_warning(&mut content, cache_unavailable);
             return Ok(FetchOutcome {
-                document,
+                content,
                 cache_hit: true,
                 screenshots: Vec::new(),
             });
@@ -393,17 +443,17 @@ fn fetch_static(
                 if let Some(cache) = &cache {
                     cache_unavailable |= cache.touch(source, explicit_strategy).is_err();
                 }
-                let mut document = cached_document(entry);
-                cache_warning(&mut document, cache_unavailable);
+                let mut content = FetchContent::Document(cached_document(entry));
+                cache_warning(&mut content, cache_unavailable);
                 return Ok(FetchOutcome {
-                    document,
+                    content,
                     cache_hit: true,
                     screenshots: Vec::new(),
                 });
             }
             // A failed status, unreadable body or unusable extracted page takes
             // the same unconditional path as a failed conditional request.
-            fresh = decode_static(response).ok();
+            fresh = decode_static(response, defer_pdf(cfg)).ok();
         }
     }
     let mut page = match fresh {
@@ -414,19 +464,20 @@ fn fetch_static(
                 .header(reqwest::header::ACCEPT, STATIC_ACCEPT)
                 .send()
                 .map_err(|e| Error::Fetch(e.without_url().to_string()))?,
+            defer_pdf(cfg),
         )?,
     };
     if let Some(cache) = cache {
         if page.cache_eligible
-            && page.document.assets.is_empty()
-            && page.document.warnings.is_empty()
+            && let FetchContent::Document(document) = &page.content
+            && document.assets.is_empty()
+            && document.warnings.is_empty()
         {
             let entry = fetch_cache::Entry {
-                content: page.document.markdown.clone(),
-                metadata: page.document.metadata.clone(),
+                content: document.markdown.clone(),
+                metadata: document.metadata.clone(),
                 strategy_used: "static".into(),
-                title: page
-                    .document
+                title: document
                     .metadata
                     .get("title")
                     .and_then(Value::as_str)
@@ -443,9 +494,9 @@ fn fetch_static(
             cache_unavailable |= cache.remove(source, explicit_strategy).is_err();
         }
     }
-    cache_warning(&mut page.document, cache_unavailable);
+    cache_warning(&mut page.content, cache_unavailable);
     Ok(FetchOutcome {
-        document: page.document,
+        content: page.content,
         cache_hit: false,
         screenshots: Vec::new(),
     })
@@ -575,64 +626,196 @@ fn html_rejection(html: &str) -> Option<&'static str> {
     None
 }
 
-fn decode_static(response: Response) -> Result<StaticPage> {
-    let effective_url = response.url().clone();
-    let content_type = header_text(&response, reqwest::header::CONTENT_TYPE).unwrap_or_default();
-    let etag = header_text(&response, reqwest::header::ETAG);
-    let last_modified = header_text(&response, reqwest::header::LAST_MODIFIED);
-    let bytes = body(response)?;
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    let prefix = bytes
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .take(32)
-        .collect::<Vec<_>>();
-    // An explicitly labelled text document can itself contain an HTML example.
-    // Sniffing must not turn that literal text into an executable-page kind.
-    let explicit_text = mime.starts_with("text/") && !mime.contains("html");
-    let html = mime.contains("html")
-        || (!explicit_text
-            && (prefix.to_ascii_lowercase().starts_with(b"<!doctype html")
-                || prefix.to_ascii_lowercase().starts_with(b"<html")));
-    let text = mime.starts_with("text/") && !mime.contains("xml");
-    let cache_eligible = html || text;
-    let mut doc = if html {
-        let html = decode_text(&bytes, &content_type);
-        if let Some(reason) = html_rejection(&html) {
-            return Err(Error::Fetch(reason.into()));
-        }
-        formats::extract_html(&html, Some(effective_url.as_str()))?
-    } else if text {
-        Document {
-            markdown: decode_text(&bytes, &content_type).into_owned(),
-            ..Default::default()
-        }
-    } else {
-        let extension = if mime.contains("pdf") {
-            "pdf"
+fn defer_pdf(cfg: &Value) -> bool {
+    config::enabled(cfg, "/ocr/enabled")
+        || config::enabled(cfg, "/screenshot/enabled")
+        || config::enabled(cfg, "/screenshot/screenshot_only")
+}
+
+struct StaticResponse {
+    effective_url: Url,
+    content_type: String,
+    mime: String,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    bytes: Vec<u8>,
+}
+
+impl StaticResponse {
+    fn read(response: Response) -> Result<Self> {
+        let effective_url = response.url().clone();
+        let content_type =
+            header_text(&response, reqwest::header::CONTENT_TYPE).unwrap_or_default();
+        let mime = content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let etag = header_text(&response, reqwest::header::ETAG);
+        let last_modified = header_text(&response, reqwest::header::LAST_MODIFIED);
+        let bytes = body(response)?;
+        Ok(Self {
+            effective_url,
+            content_type,
+            mime,
+            etag,
+            last_modified,
+            bytes,
+        })
+    }
+
+    fn kind(&self) -> StaticKind {
+        let prefix = self
+            .bytes
+            .iter()
+            .copied()
+            .skip_while(u8::is_ascii_whitespace)
+            .take(32)
+            .map(|byte| byte.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        // Explicit text keeps literal HTML/PDF examples; actual HTML remains
+        // authoritative even when a download URL or PDF MIME says otherwise.
+        let explicit_text = self.mime.starts_with("text/") && !self.mime.contains("html");
+        if self.mime.contains("html")
+            || (!explicit_text
+                && (prefix.starts_with(b"<!doctype html") || prefix.starts_with(b"<html")))
+        {
+            StaticKind::Html
+        } else if self.mime.starts_with("text/") && !self.mime.contains("xml") {
+            StaticKind::Text
         } else {
-            std::path::Path::new(effective_url.path())
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-        };
-        if !formats::supports_extension(extension) {
-            return Err(Error::Unsupported(format!(
-                "Unsupported URL content type: {mime}"
-            )));
+            StaticKind::Other
         }
-        let mut file = tempfile::Builder::new()
-            .prefix("markitai-fetch-")
-            .suffix(&format!(".{extension}"))
-            .tempfile()?;
-        file.write_all(&bytes)?;
-        formats::extract(file.path())?
+    }
+
+    fn is_pdf(&self) -> bool {
+        if self.kind() != StaticKind::Other || self.mime.starts_with("text/") {
+            return false;
+        }
+        // An authoritative MIME is a representation change even when its bytes
+        // are malformed. Its later reader failure must not replay cached HTML
+        // or cause another download of the same accepted response.
+        if matches!(self.mime.as_str(), "application/pdf" | "application/x-pdf") {
+            return true;
+        }
+        let generic = matches!(
+            self.mime.as_str(),
+            "" | "application/octet-stream"
+                | "binary/octet-stream"
+                | "application/binary"
+                | "application/download"
+        );
+        let path_hint = std::path::Path::new(self.effective_url.path())
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+        (generic || path_hint)
+            && self.bytes[..self.bytes.len().min(1024)]
+                .windows(8)
+                .any(|header| {
+                    &header[..5] == b"%PDF-"
+                        && matches!(header[5], b'1' | b'2')
+                        && header[6] == b'.'
+                        && header[7].is_ascii_digit()
+                })
+    }
+
+    fn into_pdf(self) -> DownloadedPdf {
+        DownloadedPdf {
+            bytes: self.bytes,
+            final_url: self.effective_url.into(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum StaticKind {
+    Html,
+    Text,
+    Other,
+}
+
+/// Auto capture must inspect the response before invoking a browser: extensions
+/// and cached HTML cannot identify an opaque URL that now downloads a PDF.
+fn probe_pdf(
+    source: &str,
+    url: &Url,
+    cfg: &Value,
+    explicit_strategy: Option<&str>,
+) -> Result<Option<FetchOutcome>> {
+    let response = StaticResponse::read(
+        client(30)?
+            .get(url.clone())
+            .header(reqwest::header::ACCEPT, STATIC_ACCEPT)
+            .send()
+            .map_err(|error| Error::Fetch(error.without_url().to_string()))?,
+    )?;
+    if !response.is_pdf() {
+        return Ok(None);
+    }
+    let mut content = FetchContent::Pdf(response.into_pdf());
+    if let Some(cache) = fetch_cache::Cache::from_config(cfg) {
+        cache_warning(
+            &mut content,
+            cache.remove(source, explicit_strategy).is_err(),
+        );
+    }
+    Ok(Some(FetchOutcome {
+        content,
+        cache_hit: false,
+        screenshots: Vec::new(),
+    }))
+}
+
+fn decode_static(response: Response, defer_pdf: bool) -> Result<StaticPage> {
+    let response = StaticResponse::read(response)?;
+    if defer_pdf && response.is_pdf() {
+        let final_url = response.effective_url.to_string();
+        return Ok(StaticPage {
+            content: FetchContent::Pdf(response.into_pdf()),
+            cache_eligible: false,
+            final_url,
+            etag: None,
+            last_modified: None,
+        });
+    }
+    let kind = response.kind();
+    let cache_eligible = kind != StaticKind::Other;
+    let mut doc = match kind {
+        StaticKind::Html => {
+            let html = decode_text(&response.bytes, &response.content_type);
+            if let Some(reason) = html_rejection(&html) {
+                return Err(Error::Fetch(reason.into()));
+            }
+            formats::extract_html(&html, Some(response.effective_url.as_str()))?
+        }
+        StaticKind::Text => Document {
+            markdown: decode_text(&response.bytes, &response.content_type).into_owned(),
+            ..Default::default()
+        },
+        StaticKind::Other => {
+            let extension = if response.mime.contains("pdf") {
+                "pdf"
+            } else {
+                std::path::Path::new(response.effective_url.path())
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+            };
+            if !formats::supports_extension(extension) {
+                return Err(Error::Unsupported(format!(
+                    "Unsupported URL content type: {}",
+                    response.mime
+                )));
+            }
+            let mut file = tempfile::Builder::new()
+                .prefix("markitai-fetch-")
+                .suffix(&format!(".{extension}"))
+                .tempfile()?;
+            file.write_all(&response.bytes)?;
+            formats::extract(file.path())?
+        }
     };
     if doc.markdown.trim().is_empty() {
         return Err(Error::Fetch("URL returned no extractable content".into()));
@@ -640,12 +823,28 @@ fn decode_static(response: Response) -> Result<StaticPage> {
     doc.metadata
         .insert("fetch_strategy".into(), json!("static"));
     Ok(StaticPage {
-        document: doc,
+        content: FetchContent::Document(doc),
         cache_eligible,
-        final_url: effective_url.into(),
-        etag,
-        last_modified,
+        final_url: response.effective_url.into(),
+        etag: response.etag,
+        last_modified: response.last_modified,
     })
+}
+
+#[cfg(test)]
+impl FetchOutcome {
+    fn document(&self) -> &Document {
+        match &self.content {
+            FetchContent::Document(document) => document,
+            FetchContent::Pdf(_) => panic!("expected extracted text, received deferred PDF"),
+        }
+    }
+    fn document_mut(&mut self) -> &mut Document {
+        match &mut self.content {
+            FetchContent::Document(document) => document,
+            FetchContent::Pdf(_) => panic!("expected extracted text, received deferred PDF"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -677,14 +876,14 @@ mod tests {
         let mut result = browser_outcome(page, &cfg).unwrap();
         assert!(
             result
-                .document
+                .document()
                 .markdown
                 .contains("https://example.test/section/next")
         );
         let prepared = output::prepare(
             "https://example.test/start",
             "start",
-            &mut result.document,
+            result.document_mut(),
             &cfg,
         );
         let metadata = serde_json::to_string(&prepared.frontmatter).unwrap();
@@ -724,36 +923,43 @@ mod cache_tests {
     };
 
     #[derive(Clone)]
-    struct Reply {
+    pub(super) struct Reply {
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     }
 
     impl Reply {
-        fn text(body: &str) -> Self {
+        pub(super) fn bytes(mime: &str, bytes: &[u8]) -> Self {
+            Self {
+                status: 200,
+                headers: vec![("Content-Type".into(), mime.into())],
+                body: bytes.to_vec(),
+            }
+        }
+        pub(super) fn text(body: &str) -> Self {
             Self {
                 status: 200,
                 headers: vec![("Content-Type".into(), "text/plain".into())],
                 body: body.as_bytes().to_vec(),
             }
         }
-        fn html(body: &str) -> Self {
+        pub(super) fn html(body: &str) -> Self {
             Self::text(body).header("Content-Type", "text/html")
         }
-        fn header(mut self, name: &str, value: &str) -> Self {
+        pub(super) fn header(mut self, name: &str, value: &str) -> Self {
             self.headers
                 .retain(|(key, _)| !key.eq_ignore_ascii_case(name));
             self.headers.push((name.into(), value.into()));
             self
         }
-        fn status(mut self, status: u16) -> Self {
+        pub(super) fn status(mut self, status: u16) -> Self {
             self.status = status;
             self
         }
     }
 
-    struct Server {
+    pub(super) struct Server {
         origin: String,
         requests: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
@@ -761,7 +967,7 @@ mod cache_tests {
     }
 
     impl Server {
-        fn new(replies: Vec<Reply>) -> Self {
+        pub(super) fn new(replies: Vec<Reply>) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
             listener.set_nonblocking(true).unwrap();
@@ -824,10 +1030,10 @@ mod cache_tests {
                 thread: Some(thread),
             }
         }
-        fn url(&self, path: &str) -> String {
+        pub(super) fn url(&self, path: &str) -> String {
             format!("{}{path}", self.origin)
         }
-        fn requests(&self) -> Vec<String> {
+        pub(super) fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
         }
     }
@@ -840,7 +1046,7 @@ mod cache_tests {
             }
         }
     }
-    fn settings() -> (tempfile::TempDir, Value) {
+    pub(super) fn settings() -> (tempfile::TempDir, Value) {
         let directory = tempfile::tempdir().unwrap();
         let mut cfg = config::defaults();
         // These fixtures test HTTP validators and store state, without a browser
@@ -850,7 +1056,7 @@ mod cache_tests {
         (directory, cfg)
     }
     fn run(server: &Server, cfg: &Value) -> FetchOutcome {
-        fetch_with_context(&server.url("/page"), cfg, None).unwrap()
+        fetch_with_context(&server.url("/page"), cfg, None, true).unwrap()
     }
     fn header(request: &str, name: &str) -> Option<String> {
         request
@@ -876,11 +1082,11 @@ mod cache_tests {
             .unwrap();
         let second = run(&server, &cfg);
         assert!(!second.cache_hit);
-        assert_eq!(second.document.markdown, "second");
+        assert_eq!(second.document().markdown, "second");
         cfg["cache"]["fetch_ttl_seconds"] = json!(0);
         let third = run(&server, &cfg);
         assert!(!third.cache_hit);
-        assert_eq!(third.document.markdown, "third");
+        assert_eq!(third.document().markdown, "third");
         assert_eq!(server.requests().len(), 3);
         for request in server.requests() {
             assert_eq!(header(&request, "Accept").as_deref(), Some(STATIC_ACCEPT));
@@ -907,8 +1113,8 @@ mod cache_tests {
             .unwrap();
         let cached = run(&server, &cfg);
         assert!(cached.cache_hit);
-        assert_eq!(cached.document.markdown, first.document.markdown);
-        assert_eq!(cached.document.metadata, first.document.metadata);
+        assert_eq!(cached.document().markdown, first.document().markdown);
+        assert_eq!(cached.document().metadata, first.document().metadata);
         assert_eq!(
             db.query_row("SELECT created_at FROM fetch_cache", [], |row| row
                 .get::<_, i64>(0))
@@ -917,8 +1123,8 @@ mod cache_tests {
         );
         let fresh = run(&server, &cfg);
         assert!(!fresh.cache_hit);
-        assert!(fresh.document.markdown.contains("Second body."));
-        assert_eq!(fresh.document.metadata["title"], "Second title");
+        assert!(fresh.document().markdown.contains("Second body."));
+        assert_eq!(fresh.document().metadata["title"], "Second title");
         assert!(run(&server, &cfg).cache_hit);
         let requests = server.requests();
         assert_eq!(requests.len(), 4);
@@ -948,7 +1154,7 @@ mod cache_tests {
         assert!(!run(&server, &cfg).cache_hit);
         let fresh = run(&server, &cfg);
         assert!(!fresh.cache_hit);
-        assert_eq!(fresh.document.markdown, "replacement");
+        assert_eq!(fresh.document().markdown, "replacement");
         assert!(run(&server, &cfg).cache_hit);
         let requests = server.requests();
         assert_eq!(requests.len(), 3);
@@ -980,16 +1186,16 @@ mod cache_tests {
             Reply::text("").status(304),
         ]);
         let first = run(&server, &cfg);
-        assert!(first.document.markdown.contains("Café"));
+        assert!(first.document().markdown.contains("Café"));
         assert!(
             first
-                .document
+                .document()
                 .markdown
                 .contains(&server.url("/folder/child"))
         );
         let second = run(&server, &cfg);
         assert!(second.cache_hit);
-        assert_eq!(second.document.markdown, first.document.markdown);
+        assert_eq!(second.document().markdown, first.document().markdown);
         let db = rusqlite::Connection::open(directory.path().join("fetch_cache.db")).unwrap();
         let final_url: String = db
             .query_row("SELECT final_url FROM fetch_cache", [], |row| row.get(0))
@@ -1008,12 +1214,12 @@ mod cache_tests {
         ]);
         run(&server, &cfg);
         cfg["cache"]["no_cache"] = json!(true);
-        assert_eq!(run(&server, &cfg).document.markdown, "refresh");
+        assert_eq!(run(&server, &cfg).document().markdown, "refresh");
         assert!(header(&server.requests()[1], "If-None-Match").is_none());
         cfg["cache"]["no_cache"] = json!(false);
         assert!(run(&server, &cfg).cache_hit);
         cfg["cache"]["no_cache_patterns"] = json!(["**/page"]);
-        assert_eq!(run(&server, &cfg).document.markdown, "pattern refresh");
+        assert_eq!(run(&server, &cfg).document().markdown, "pattern refresh");
         cfg["cache"]["no_cache_patterns"] = json!([]);
         assert!(run(&server, &cfg).cache_hit);
         assert_eq!(server.requests().len(), 3);
@@ -1030,20 +1236,21 @@ mod cache_tests {
         assert!(!run(&server, &cfg).cache_hit);
         cfg["fetch"]["strategy"] = json!("static");
         assert!(run(&server, &cfg).cache_hit);
-        let explicit = fetch_with_context(&server.url("/page"), &cfg, Some("static")).unwrap();
+        let explicit =
+            fetch_with_context(&server.url("/page"), &cfg, Some("static"), true).unwrap();
         assert!(!explicit.cache_hit);
-        assert_eq!(explicit.document.markdown, "explicit static");
-        let auto = fetch_with_context(&server.url("/page"), &cfg, Some("auto")).unwrap();
+        assert_eq!(explicit.document().markdown, "explicit static");
+        let auto = fetch_with_context(&server.url("/page"), &cfg, Some("auto"), true).unwrap();
         assert!(auto.cache_hit);
-        assert_eq!(auto.document.markdown, "unscoped");
+        assert_eq!(auto.document().markdown, "unscoped");
         cfg["fetch"]["strategy"] = json!("playwright");
         cfg["fetch"]["playwright"]["session_mode"] = json!("domain_persistent");
         assert!(matches!(
-            fetch_with_context(&server.url("/page"), &cfg, None),
+            fetch_with_context(&server.url("/page"), &cfg, None, true),
             Err(Error::Unsupported(message)) if message.contains("domain_persistent")
         ));
         cfg["fetch"]["strategy"] = json!("jina");
-        assert!(fetch_with_context(&server.url("/page"), &cfg, None).is_err());
+        assert!(fetch_with_context(&server.url("/page"), &cfg, None, true).is_err());
         assert_eq!(server.requests().len(), 2);
     }
 
@@ -1061,13 +1268,13 @@ mod cache_tests {
         ]);
         let first = run(&server, &cfg);
         assert!(!first.cache_hit);
-        assert!(first.document.warnings.is_empty());
-        assert_eq!(run(&server, &cfg).document.markdown, "second");
+        assert!(first.document().warnings.is_empty());
+        assert_eq!(run(&server, &cfg).document().markdown, "second");
         cfg["cache"]["enabled"] = json!(true);
         let third = run(&server, &cfg);
-        assert_eq!(third.document.markdown, "third");
-        assert_eq!(third.document.warnings, [CACHE_WARNING]);
-        assert!(!third.document.warnings[0].contains("private-token-path"));
+        assert_eq!(third.document().markdown, "third");
+        assert_eq!(third.document().warnings, [CACHE_WARNING]);
+        assert!(!third.document().warnings[0].contains("private-token-path"));
         assert!(!directory.path().join("fetch_cache.db").exists());
         assert_eq!(server.requests().len(), 3);
     }
@@ -1081,7 +1288,7 @@ mod cache_tests {
         ] {
             let (directory, cfg) = settings();
             let server = Server::new(vec![reply]);
-            assert!(fetch_with_context(&server.url("/page"), &cfg, None).is_err());
+            assert!(fetch_with_context(&server.url("/page"), &cfg, None, true).is_err());
             assert!(!directory.path().join("fetch_cache.db").exists());
             assert_eq!(server.requests().len(), 1);
         }
@@ -1105,10 +1312,10 @@ mod cache_tests {
                 Reply::text("").status(304),
             ]);
             run(&server, &cfg);
-            assert!(fetch_with_context(&server.url("/page"), &cfg, None).is_err());
+            assert!(fetch_with_context(&server.url("/page"), &cfg, None, true).is_err());
             let saved = run(&server, &cfg);
             assert!(saved.cache_hit);
-            assert_eq!(saved.document.markdown, "saved");
+            assert_eq!(saved.document().markdown, "saved");
             let requests = server.requests();
             assert_eq!(requests.len(), 4);
             assert!(header(&requests[2], "If-None-Match").is_none());
@@ -1150,10 +1357,10 @@ mod cache_tests {
                 Reply::text(example).header("Content-Type", content_type),
             ]);
             let fresh = run(&server, &cfg);
-            assert_eq!(fresh.document.markdown, example);
+            assert_eq!(fresh.document().markdown, example);
             assert!(!fresh.cache_hit);
             let cached = run(&server, &cfg);
-            assert_eq!(cached.document.markdown, example);
+            assert_eq!(cached.document().markdown, example);
             assert!(cached.cache_hit);
             assert_eq!(server.requests().len(), 1);
         }
@@ -1165,15 +1372,16 @@ mod cache_tests {
         let reply = downloadable_email();
         let server = Server::new(vec![reply.clone(), reply]);
         for _ in 0..2 {
-            let outcome = fetch_with_context(&server.url("/document.eml"), &cfg, None).unwrap();
+            let outcome =
+                fetch_with_context(&server.url("/document.eml"), &cfg, None, true).unwrap();
             assert!(!outcome.cache_hit);
-            assert_eq!(outcome.document.assets.len(), 1);
-            assert_eq!(outcome.document.assets[0].bytes, [0, 1, 2, 255]);
+            assert_eq!(outcome.document().assets.len(), 1);
+            assert_eq!(outcome.document().assets[0].bytes, [0, 1, 2, 255]);
             assert!(
                 outcome
-                    .document
+                    .document()
                     .markdown
-                    .contains(&outcome.document.assets[0].name)
+                    .contains(&outcome.document().assets[0].name)
             );
         }
         assert_eq!(server.requests().len(), 2);
@@ -1199,16 +1407,20 @@ mod cache_tests {
             let reply = downloadable_email();
             let server = Server::new(vec![initial, reply.clone(), reply]);
             let url = server.url("/document.eml");
-            assert!(!fetch_with_context(&url, &cfg, None).unwrap().cache_hit);
+            assert!(
+                !fetch_with_context(&url, &cfg, None, true)
+                    .unwrap()
+                    .cache_hit
+            );
             // Without validators, force a refresh while the old TTL is fresh.
             cfg["cache"]["no_cache"] = json!(!validators);
-            let fresh = fetch_with_context(&url, &cfg, None).unwrap();
+            let fresh = fetch_with_context(&url, &cfg, None, true).unwrap();
             assert!(!fresh.cache_hit);
-            assert_eq!(fresh.document.assets[0].bytes, [0, 1, 2, 255]);
+            assert_eq!(fresh.document().assets[0].bytes, [0, 1, 2, 255]);
             cfg["cache"]["no_cache"] = json!(false);
-            let next = fetch_with_context(&url, &cfg, None).unwrap();
+            let next = fetch_with_context(&url, &cfg, None, true).unwrap();
             assert!(!next.cache_hit);
-            assert_eq!(next.document.assets[0].bytes, [0, 1, 2, 255]);
+            assert_eq!(next.document().assets[0].bytes, [0, 1, 2, 255]);
             let requests = server.requests();
             assert_eq!(requests.len(), 3);
             assert!(header(&requests[2], "If-None-Match").is_none());
@@ -1222,3 +1434,6 @@ mod cache_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod pdf_tests;

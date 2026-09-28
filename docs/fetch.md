@@ -14,12 +14,51 @@ HTML challenge detection.
 
 `auto` starts with the static path when screenshots are not requested, with
 local browser fallback for recognized JavaScript/challenge or empty-HTML quality
-failures. Screenshot requests render directly. The `playwright` strategy uses
+failures. Capture requests first perform one bounded, unconditional static GET
+to distinguish PDF downloads from browser pages. A PDF is handed directly to
+the native document pipeline, including for extensionless and redirected URLs;
+other successful responses continue through browser capture. Ordinary HTML
+capture therefore adds a static request. Probe transport, HTTP-status, body-read
+and size-limit failures propagate instead of being hidden by browser fallback.
+The probe does not reuse or admit HTML cache entries, so a fresh cached HTML row
+cannot conceal a URL that now downloads a PDF. The `playwright` strategy uses
 [native Chromium CDP](browser.md) for JavaScript and captures; the complete
 reference fallback policy and SPA-domain learning remain unfinished. `jina` and
 `defuddle` keep explicit remote-consent and target checks and do not use this
-cache. Unsupported strategies fail before cache lookup, so an old page cannot
+cache. Explicit browser and remote strategies retain their selected backend;
+they do not perform this native PDF handoff. Unsupported strategies fail before cache lookup, so an old page cannot
 make an unsupported strategy appear to work.
+
+## Downloaded PDF media
+
+When OCR, screenshots or the screenshot-only flag is requested, the static path
+passes an owned, bounded byte buffer and the final response URL to the core PDF
+pipeline. It performs no second GET and does not serialize those bytes into
+metadata or cache rows. The original URL remains the conversion/cache identity;
+the core redacts the final URL before exposing it. The screenshot-only flag alone
+does not enable PDF rendering: classification can still return native text.
+Ordinary PDF conversion without these flags retains its existing reader path.
+
+Explicit text MIME and HTML responses take precedence over PDF-looking names
+or bytes. `application/pdf` and `application/x-pdf` identify a PDF representation
+even when it is corrupt. Generic/absent MIME or a final `.pdf` path require a PDF
+version header within the first 1,024 bytes. A path suffix alone is insufficient.
+This preserves Rust's literal text behavior; the Python reference instead treats
+`text/plain` as generic and also uses Content-Disposition filenames. That broader
+filename precedence is not implemented here.
+
+An accepted 200 PDF invalidates the old HTML cache entry before native parsing,
+OCR or rendering. Later PDF failure therefore neither redownloads the body nor
+restores obsolete HTML. PDF bytes, OCR text and screenshots are never admitted to
+the extracted-page cache. Default static conditional-failure retry behavior for
+responses that have not been accepted as a deferred PDF remains unchanged.
+
+For screenshot-only requests without LLM or an output directory, static/auto
+must classify the response before deciding whether the request is a PDF text
+conversion or an unobservable browser capture. Non-PDF content is rejected before
+starting the browser. This makes classification HTTP errors observable before
+the missing-output error. Explicit browser/remote requests reject that combination
+before making their selected fetch.
 
 ## Stored results and identity
 
@@ -39,7 +78,8 @@ this page cache, including when they happen to contain no images. Their assets
 remain available to normal output processing. A successful refresh that changes
 into an ineligible representation removes its old page-cache row, preventing a
 later 304 or still-fresh TTL from replaying the previous representation. Failed
-or rejected refreshes retain the old row instead.
+or rejected refreshes retain the old row instead, except that an accepted deferred
+PDF has already changed the representation even if its later reader fails.
 
 The key hashes `native-fetch-v1`, a NUL separator and the exact original URL.
 Query strings and fragments therefore remain part of identity. An explicitly
@@ -122,6 +162,12 @@ asset-bearing downloaded documents. They use temporary configured state paths;
 the older direct-fetch test explicitly disables caching. Storage and CLI/API
 integration tests exercise their respective boundaries separately. No tests
 need provider credentials or the user's real state directory.
+
+The PDF handoff tests additionally check byte identity, exact GET counts,
+redirects, MIME/header precedence, unchanged default extraction, stale HTML
+invalidation before downstream failure, auto-probe TTL bypass, output capability
+checks and status/size rejection. The public conversion tests separately cover
+native page media and model input after this private handoff.
 
 [Decision 0003](decisions/0003-persistent-fetch-cache.md) records the detailed
 reference comparison, storage contract and deferred browser, remote-cache,

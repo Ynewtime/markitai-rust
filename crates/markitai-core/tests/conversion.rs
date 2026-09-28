@@ -7,6 +7,9 @@ use std::net::TcpListener;
 #[path = "conversion/pdf_media.rs"]
 mod pdf_media;
 
+#[path = "conversion/url_pdf.rs"]
+mod url_pdf;
+
 fn options() -> ConvertOptions {
     ConvertOptions {
         config: Some(json!({})),
@@ -592,11 +595,11 @@ fn local_image_ocr_reads_original_pixels_and_blank_images_are_explicit() {
 }
 
 #[test]
-fn screenshot_only_memory_mode_rejects_unobservable_results_before_fetching() {
+fn explicit_browser_screenshot_only_memory_rejects_before_fetching() {
     let error = convert(
         "http://127.0.0.1:9/canvas",
         ConvertOptions {
-            config: Some(json!({"llm":{"enabled":false},"screenshot":{"screenshot_only":true}})),
+            config: Some(json!({"fetch":{"strategy":"playwright"},"llm":{"enabled":false},"screenshot":{"screenshot_only":true}})),
             ..Default::default()
         },
     )

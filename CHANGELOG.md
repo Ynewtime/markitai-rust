@@ -32,6 +32,7 @@
 - Native macOS Vision image OCR and optional isolated Chromium fetching/screenshots through Rust CDP.
 - URL screenshot-only output, persistent screenshot tiles and multi-image model requests with complete request-budget validation.
 - Native macOS PDF page rendering, local per-page OCR and bounded JPEG/PNG/WebP screenshots with typed page references and complete-page vision requests.
+- Static/automatic URL PDF media processing reuses bounded downloaded bytes, supports redirects and extensionless downloads, and preserves URL identity and pure-mode precedence.
 
 ### Fixed
 

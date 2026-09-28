@@ -4,6 +4,31 @@ The PDF reader uses `pdf-inspector` for decoding and page-level reliability
 decisions, with `lopdf` for bounded content inspection and embedded images.
 There is no Python runtime, external converter or implicit OCR fallback.
 
+## Downloaded PDFs
+
+Static and automatic fetches can hand one bounded HTTP response directly to the
+same PDF media pipeline as local files. PDF MIME types identify the representation;
+generic downloads and PDF paths additionally use a bounded header check. Explicit
+HTML/text responses keep their declared interpretation. Redirects and extensionless
+downloads need no temporary input file or second download when media is enabled.
+
+The original URL remains the public source and naming input. A redirected final
+URL is recorded with sensitive components redacted. PDF responses are never stored
+as extracted HTML/text cache entries, including when subsequent PDF parsing fails.
+Explicit browser and remote strategies retain their selected backend.
+
+Downloaded PDFs support requested native OCR and page screenshots. Screenshot-only
+PDF output retains its Markdown and page references, unlike webpage capture-only
+output. Configuration with only `screenshot_only=true` does not implicitly enable
+PDF screenshots; the CLI flag still enables them. URL `pure` takes precedence over
+screenshot-only for model requests: it sends extracted text without image blocks or
+appended page comments. Ordinary visual requests include every captured page.
+
+This is an intentional extension: the reference URL converter did not pass local
+PDF OCR/screenshot options through to the PDF converter. No public request/result
+schema changes are required. Native media still has the platform and accuracy
+limitations described in [PDF rendering](pdf-rendering.md) and [OCR](ocr.md).
+
 Layout refinement runs only after the existing page checks. A page requiring
 OCR, containing suspicious hidden text, or having incomplete content inspection
 does not enter refinement. The existing narrowly guarded font-decoded recovery

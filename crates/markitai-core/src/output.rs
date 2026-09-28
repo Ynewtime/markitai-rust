@@ -413,7 +413,8 @@ pub fn write_with_publication(
 
 pub(crate) enum Screenshots<'a> {
     New(&'a [Asset]),
-    Published(&'a [Asset]),
+    /// PDF documents retain Markdown even when their source is a URL.
+    PublishedPdf(&'a [Asset]),
 }
 
 pub(crate) fn write_document(
@@ -507,7 +508,7 @@ pub(crate) fn write_document(
     }
     let (screenshots, published) = match screenshots {
         Screenshots::New(shots) => (shots, false),
-        Screenshots::Published(shots) => (shots, true),
+        Screenshots::PublishedPdf(shots) => (shots, true),
     };
     for screenshot in screenshots {
         let path = if published {
@@ -525,6 +526,7 @@ pub(crate) fn write_document(
         }
     }
     let capture_only = crate::is_url(&result.source)
+        && !published
         && config::enabled(cfg, "/screenshot/screenshot_only")
         && !(config::enabled(cfg, "/llm/enabled") && config::enabled(cfg, "/llm/pure"));
     if !capture_only && (result.llm_markdown.is_none() || config::enabled(cfg, "/llm/keep_base")) {
@@ -706,7 +708,7 @@ mod tests {
             "report.pdf",
             &mut result,
             &[],
-            Screenshots::Published(&shots),
+            Screenshots::PublishedPdf(&shots),
             &cfg,
             None,
         )
