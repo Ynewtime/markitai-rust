@@ -15,6 +15,9 @@ markitai -c isolated.json --config-json '{"output":{"on_conflict":"skip"}}' note
 markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 markitai serve --host 127.0.0.1 --port 3600 --no-open
 markitai mcp
+markitai note.txt -o output/ --log-level DEBUG --config-json '{"log":{"dir":"./logs","format":"json"}}'
+markitai config edit
+markitai init --local
 ```
 
 ## 已实现的命令行为
@@ -29,8 +32,11 @@ markitai mcp
 - Unix 目录/URL 列表每次保存恢复状态；`--resume` 合并新发现任务、保留完成项并重试未完成项。输出归属凭证保护隐式重试，旧状态按普通冲突策略升级。首次 Ctrl-C 停止派发、同步状态并等待在途转换，退出 130；再次中断立即退出。详见 [恢复状态](state-storage.md) 与 [输出归属](output-ownership.md)。
 - `--record-history` 将本次实际处理项保存到隔离 home 下的 `serve/jobs/`，包含独立的最终文档、资产和兼容元数据；归档失败只警告，stdout/dry-run/中断不归档。开关覆盖环境和配置，详见 [历史归档](history.md)。
 - 配置优先级由核心解析；根级 `-c` 和 `--config-json` 对子命令同样生效。布尔参数支持显式否定；重复正反开关以最后一个为准，preset 应用后显式参数覆盖。
-- `config list/get/path/validate/set` 可用；list 支持 JSON/YAML/table；默认隐藏凭据。set 原子更新配置，不写入临时 `--config-json` 内容。
-- `init --yes [--local|-o path]` 创建最小配置；已有文件不覆盖。
+- `config list/get/path/validate/set/edit` 可用；list 支持 JSON/YAML/table；默认隐藏凭据。set/edit 原子更新配置，保留未知字段，不写入临时 `--config-json` 内容。
+- `config edit` 是终端中的导航编辑器：`/关键字` 模糊搜索、数字选择当前页设置、`n/p` 翻页，也可输入完整配置 key。输入值后按同一配置 schema 验证并立即保存；无效值不落盘。空输入保留当前值，`:empty` 写空字符串，`:cancel` 返回，`q` 退出。列表隐藏凭据，外部修改配置后拒绝覆盖，要求重新打开。
+- 编辑器遍历标量设置和嵌套配置，跳过数组、字典、prompts、presets、domain_profiles；复杂值仍用 `config set`。界面使用按行导航，不复刻参考版全屏方向键界面；顶层转换选择器 `-I/--interactive` 仍未实现。stdin/stderr 非终端时明确拒绝，不等待脚本输入。Unix 敏感值输入暂时关闭终端回显；此时 Ctrl-C/SIGTERM 恢复回显后退出 130/143，不保存未确认值。其他平台敏感输入明确拒绝，可使用 `config set` 保存 `env:VARIABLE` 引用。
+- `init [--local|-o path]` 提供位置选择与已有文件 update/overwrite/keep；默认 keep。`init --yes` 无提示创建配置，已有配置只追加新发现的模型、保留已有模型和其他字段，重复运行无变化。`-o` 指向已有目录时写入该目录的 `markitai.json`。坏配置仅允许交互明确覆盖，自动更新报错并保留原字节。
+- 初始化只检测当前核心支持的 API 环境配置和 `MODEL`，不发模型请求，不保存凭据明文，生成配置默认关闭 LLM。不检测订阅登录、不安装运行时、不创建参考版 `.env` 模板；可用环境变量或现有隔离 home 下的 `.env` 配置凭据。交互编辑/初始化与其他新功能的验证状态以调度中心为准。
 - `doctor [--json]` 报告当前开发版原生能力；诊断 JSON 暂为 Rust 新 schema，尚未与旧 doctor 逐字段对齐。
 - `serve` 启动原生 REST 服务，支持提交文件/URL、任务快照与 SSE、结果/资产/ZIP 下载及持久历史。沿用 host、port、no-open、no-auth、allowed-host 参数；完整工作区界面和其他未迁移接口见 [REST 服务](serve.md)。
 - `mcp` 通过标准输入/输出提供 `convert_document`、`convert_url`、`batch_convert`、`job_status` 四个工具。配置与文件输出沿用同一核心，批处理任务保存在当前 MCP 进程内；协议和结果边界见 [MCP 服务](mcp.md)。
@@ -46,11 +52,38 @@ markitai mcp
 
 ## 明确的迁移缺口
 
-URL 抓取的其他策略、图片/URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、交互配置、订阅登录、serve 完整工作区、文件日志仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 页截图、其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取的其他策略、图片/URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、顶层交互转换选择器、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 页截图、其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
 
 持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 
 具体文件格式支持取决于核心当前实现，注册参考扩展名不意味着全部可用。性能与质量对比未完成前，不承诺生产替代、完整旧版兼容或具体加速比。
+
+## 文件日志
+
+转换的文件日志默认关闭（`log.dir=null`）。设置目录后，默认文件级别为 INFO；
+`--log-level DEBUG|INFO|WARNING|ERROR|CRITICAL` 覆盖 `log.level`，仅影响文件。
+`--quiet`/`--verbose` 沿用终端策略，日志不进入 stdout Markdown 或 `--json` envelope。
+配置、缓存、服务等子命令保留自己的输出，不因根级 `--log-level` 启用转换日志。
+
+`MARKITAI_LOG_DIR` 的非空值覆盖目录，合法的 `MARKITAI_LOG_FORMAT=text|json` 覆盖格式。
+路径支持 `~`；显式隔离 `MARKITAI_HOME` 时，`~/.markitai/...` 路径跟随隔离 home。
+每次运行独立建立 `markitai_<日期>_<时间>_<微秒>_<进程号>.log`，Unix 新文件权限为 0600。
+持久报告的 `log_file` 指向本次首个日志文件；轮转文件使用同一前缀和序号。
+
+文本日志逐行写入，换行转义；JSON 日志每行含 `ts`、`lvl`、`src`、`msg`，
+其中 `src="cli"`。记录配置加载、实际文档开始/完成/跳过/失败、转换 warnings、
+CLI 诊断和退出状态；不记录文档正文、模型请求响应或全配置，也不截获所有核心库和第三方内部日志。
+线程共享同一个受锁保护的 sink，整行写入，退出时 flush/sync。
+URL 的用户信息、全部 query/fragment、可疑路径段和已知配置/环境凭据在日志及 CLI 诊断前脱敏；
+这是诊断脱敏，不改变输出文档、报告或 stdout JSON 的既有数据合同。
+
+`log.rotation` 支持正数 B/KB/MB/GB/KiB/MiB/GiB，默认 `10 MB`；
+`log.retention` 支持秒、分钟、小时、天、周，默认 `7 days`。
+超阈值在下一整条记录之前切换文件，单条记录不会拆开。
+启动时只清理符合 Markitai 日志命名的过期普通文件，跳过符号链接及被其他原生运行锁定的文件。
+参考 Loguru 的时间点轮转、组合时长等其他表达式会明确报错，不会静默忽略。
+日志初始化失败使转换报错；运行中写入或最终 flush 失败会在 stderr 报错并退出非零，
+保留已完成的文档和已发出的唯一 stdout JSON，不追加第二个 envelope。
 
 ## 开发验证
 

@@ -109,7 +109,9 @@ used by the readers above.
 
 ## Explicit remaining compatibility work
 
-Numbers and HEIF/AVIF decoding remain unfinished. Local and static/automatic URL PDFs support explicit
+Numbers decoding remains unfinished. macOS HEIF/AVIF primary images use native
+ImageIO decoding, with the scoped limits in [images](images.md); other platforms
+still return an explicit unsupported error. Local and static/automatic URL PDFs support explicit
 page rendering, screenshots and OCR through the [PDF media pipeline](pdf-ocr.md),
 including its documented accuracy gap. URL media preserves original request
 identity while processing downloaded bytes without a second download.
@@ -133,7 +135,9 @@ fallback or browser CSS visibility. The precise implemented boundaries are in
 [article selection](html-article.md). Basic success on an HTML fixture is not
 evidence that its full extraction contract matches.
 
-The email readers preserve body and attachments, but complete header, attachment
+The [EML reader](eml.md) resolves Content-ID images within the selected MIME body
+scope and retains missing or ambiguous references with warnings. The email readers
+preserve body and attachments, but complete header, attachment
 and layout parity is pending. XML now has structured prose and the sample fixture
 is exact; arbitrary dialect parity remains open.
 Office conversion can differ in whitespace, table header selection, numbering,

@@ -13,6 +13,9 @@ mod url_pdf;
 #[path = "conversion/multipage_image.rs"]
 mod multipage_image;
 
+#[path = "conversion/heif_image.rs"]
+mod heif_image;
+
 #[path = "conversion/image_enrichment.rs"]
 mod image_enrichment;
 

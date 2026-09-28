@@ -8,7 +8,10 @@ use std::collections::{HashMap, HashSet};
 
 mod css;
 mod image_references;
-pub(crate) use image_references::{image_references, replace_image_alts, rewrite_image_targets};
+pub(crate) use image_references::{
+    html_image_references, image_references, replace_image_alts, rewrite_html_image_targets,
+    rewrite_image_targets, rewrite_image_uri_targets,
+};
 
 pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cfg: &Value) {
     match cfg.pointer("/output/profile").and_then(Value::as_str) {

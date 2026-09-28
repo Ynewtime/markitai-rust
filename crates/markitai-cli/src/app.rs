@@ -1,3 +1,10 @@
+#[path = "app/interactive.rs"]
+mod interactive;
+#[path = "app/logging.rs"]
+mod logging;
+macro_rules! eprintln {
+    ($($argument:tt)*) => { $crate::app::logging::diagnostic(format_args!($($argument)*)) };
+}
 #[cfg_attr(unix, path = "batch_run.rs")]
 #[cfg_attr(not(unix), path = "batch_run_portable.rs")]
 mod batch_run;
@@ -225,7 +232,7 @@ pub fn run() -> i32 {
         return 0;
     }
     let cli = Cli::parse();
-    match execute(&cli) {
+    let code = match execute(&cli) {
         Ok(code) => code,
         Err((code, message)) => {
             eprintln!("Error: {message}");
@@ -234,7 +241,12 @@ pub fn run() -> i32 {
             }
             code
         }
+    };
+    if let Err(error) = logging::finish(code) {
+        eprintln!("Error: {error}");
+        return if code == 0 { 1 } else { code };
     }
+    code
 }
 
 type CliResult<T> = Result<T, (i32, String)>;
@@ -294,7 +306,6 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             cli.llm_batch || cli.llm_batch_timeout.is_some() || cli.llm_batch_collect.is_some(),
             "LLM Batch API",
         ),
-        (cli.log_level.is_some(), "--log-level"),
     ] {
         if requested {
             return Err(unsupported(name));
@@ -414,6 +425,11 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         cfg["llm"]["concurrency"] = json!(n);
     }
     config::validate(&cfg).map_err(runtime)?;
+    logging::start(&cfg, cli.log_level.as_deref()).map_err(runtime)?;
+    logging::event(
+        logging::Level::Debug,
+        "Configuration loaded; native CLI conversion starting",
+    );
     let input_path = Path::new(input);
     let directory = !is_url(input) && input_path.is_dir();
     let batch = !is_url(input)
@@ -543,7 +559,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
                 input: input.into(),
                 output_dir,
                 started_at,
-                log_file: None,
+                log_file: logging::path(),
                 options: ReportOptions::from_config(&cfg, cli.max_depth, &cli.globs),
             },
             cfg["output"]["report"].as_bool(),
@@ -805,9 +821,33 @@ fn convert_item(
     let started_at = timestamp();
     let history_enabled = task.output.is_some() && config::enabled(cfg, "/history/record");
     let history_eligible = history_enabled && crate::history::eligible(&task.source);
+    logging::event(logging::Level::Info, format!("Converting {}", task.display));
     let result = convert_task(task, cfg, context, publication);
     let mut record = recorded(task, index, clock, started_at, &result);
     record.history_eligible = history_eligible;
+    match &result {
+        Ok(output) => {
+            logging::event(
+                logging::Level::Info,
+                format!(
+                    "{} {}",
+                    if output.skip_reason.is_some() {
+                        "Skipped"
+                    } else {
+                        "Completed"
+                    },
+                    task.display
+                ),
+            );
+            for warning in &output.warnings {
+                logging::event(
+                    logging::Level::Warning,
+                    format!("{}: {warning}", task.display),
+                );
+            }
+        }
+        Err(error) => logging::event(logging::Level::Error, format!("{}: {error}", task.display)),
+    }
     if history_enabled && record.skip_reason.as_deref() == Some("exists") {
         record.history_output = task.output.as_ref().map(|directory| {
             let fallback = if is_url(&task.source) {
@@ -1269,33 +1309,13 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 if overrides.is_some() {
                     return Err((2, "--config-json overrides cannot be saved; drop --config-json to edit a config file".into()));
                 }
-                return Err(unsupported("Interactive configuration editor"));
+                let path =
+                    selected_config(cli).unwrap_or_else(|| config::home().join("config.json"));
+                interactive::edit(&path)?;
             }
         },
         Command::Init { yes, output, local } => {
-            if !yes {
-                return Err(unsupported(
-                    "Interactive init; use init --yes for a minimal config",
-                ));
-            }
-            let path = output.clone().unwrap_or_else(|| {
-                if *local {
-                    PathBuf::from("markitai.json")
-                } else {
-                    config::home().join("config.json")
-                }
-            });
-            if path.exists() {
-                return Err((
-                    1,
-                    format!("Configuration already exists: {}", path.display()),
-                ));
-            }
-            write_config(
-                &path,
-                &json!({"output":{"dir":"./output"},"llm":{"enabled":false}}),
-            )?;
-            println!("Created {}", path.display());
+            interactive::init(*yes, output.as_deref(), *local)?;
         }
         Command::Doctor {
             json: as_json,
@@ -1490,6 +1510,10 @@ fn write_config(path: &Path, value: &Value) -> CliResult<()> {
     writeln!(file).map_err(runtime)?;
     file.as_file().sync_all().map_err(runtime)?;
     file.persist(path).map_err(runtime)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(runtime)?;
     Ok(())
 }
 

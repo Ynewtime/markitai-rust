@@ -1,0 +1,558 @@
+//! The CLI owns its sinks; core and language bindings do not install global loggers.
+use chrono::Local;
+use markitai_core::config;
+use serde_json::{Value, json};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
+
+static ACTIVE: Mutex<Option<Session>> = Mutex::new(None);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Level {
+    Debug,
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
+impl Level {
+    fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "DEBUG" => Ok(Self::Debug),
+            "INFO" => Ok(Self::Info),
+            "WARNING" => Ok(Self::Warning),
+            "ERROR" => Ok(Self::Error),
+            "CRITICAL" => Ok(Self::Critical),
+            _ => Err(invalid("Invalid file log level")),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warning => "WARNING",
+            Self::Error => "ERROR",
+            Self::Critical => "CRITICAL",
+        }
+    }
+}
+
+struct Sink {
+    file: File,
+    first_path: PathBuf,
+    stem: String,
+    sequence: u64,
+    bytes: u64,
+    rotation: u64,
+    json: bool,
+    minimum: Level,
+    failed: bool,
+}
+struct Session {
+    sink: Option<Sink>,
+    secrets: Vec<String>,
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+pub(super) fn start(cfg: &Value, level: Option<&str>) -> io::Result<()> {
+    let env = config::environment();
+    let directory = env
+        .get("MARKITAI_LOG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(String::as_str)
+        .or_else(|| cfg.pointer("/log/dir").and_then(Value::as_str))
+        .filter(|v| !v.is_empty());
+    let mut secrets = Vec::new();
+    collect_secrets(cfg, &config::redact(cfg), &mut secrets);
+    for (key, value) in &env {
+        let key = key.to_ascii_uppercase();
+        if ["API_KEY", "TOKEN", "PASSWORD", "SECRET", "AUTHORIZATION"]
+            .iter()
+            .any(|part| key.contains(part))
+            && !value.is_empty()
+        {
+            secrets.push(value.clone());
+        }
+    }
+    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    secrets.dedup();
+    let sink = directory
+        .map(|directory| {
+            let directory = config::state_path(Path::new(directory));
+            let rotation = size(
+                cfg.pointer("/log/rotation")
+                    .and_then(Value::as_str)
+                    .unwrap_or("10 MB"),
+            )?;
+            let retention = duration(
+                cfg.pointer("/log/retention")
+                    .and_then(Value::as_str)
+                    .unwrap_or("7 days"),
+            )?;
+            let minimum = Level::parse(
+                level
+                    .or_else(|| cfg.pointer("/log/level").and_then(Value::as_str))
+                    .unwrap_or("INFO"),
+            )?;
+            let format = env
+                .get("MARKITAI_LOG_FORMAT")
+                .filter(|v| matches!(v.as_str(), "text" | "json"))
+                .map(String::as_str)
+                .or_else(|| cfg.pointer("/log/format").and_then(Value::as_str))
+                .unwrap_or("text");
+            private_directory(&directory)?;
+            prune(&directory, retention)?;
+            let stem = format!(
+                "markitai_{}_{}",
+                Local::now().format("%Y%m%d_%H%M%S_%6f"),
+                std::process::id()
+            );
+            let first_path = directory.join(format!("{stem}.log"));
+            let file = private_file(&first_path)?;
+            Ok::<_, io::Error>(Sink {
+                file,
+                first_path,
+                stem,
+                sequence: 0,
+                bytes: 0,
+                rotation,
+                json: format == "json",
+                minimum,
+                failed: false,
+            })
+        })
+        .transpose()?;
+    let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+    *active = Some(Session { sink, secrets });
+    Ok(())
+}
+
+fn collect_secrets(original: &Value, redacted: &Value, out: &mut Vec<String>) {
+    if original != redacted && redacted.as_str() == Some("[REDACTED]") {
+        match original {
+            Value::String(value) if !value.is_empty() && !value.starts_with("env:") => {
+                out.push(value.clone())
+            }
+            Value::Object(values) => {
+                for value in values.values() {
+                    collect_secrets(value, &json!("[REDACTED]"), out);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect_secrets(value, &json!("[REDACTED]"), out);
+                }
+            }
+            _ => {}
+        }
+    } else {
+        match original {
+            Value::Object(values) => {
+                for (key, value) in values {
+                    collect_secrets(value, &redacted[key], out);
+                }
+            }
+            Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    collect_secrets(value, &redacted[index], out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(super) fn path() -> Option<PathBuf> {
+    ACTIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|session| session.sink.as_ref().map(|sink| sink.first_path.clone()))
+}
+
+pub(super) fn event(level: Level, message: impl AsRef<str>) {
+    let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(session) = active.as_mut() else {
+        return;
+    };
+    let Some(sink) = session.sink.as_mut() else {
+        return;
+    };
+    if level < sink.minimum || sink.failed {
+        return;
+    }
+    let message = redact(message.as_ref(), &session.secrets);
+    if sink.write(level, &message).is_err() {
+        sink.failed = true;
+    }
+}
+
+/// All existing CLI diagnostics keep their console policy and gain redaction.
+pub(super) fn diagnostic(args: std::fmt::Arguments<'_>) {
+    let original = args.to_string();
+    let message = {
+        let active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        redact(
+            &original,
+            active.as_ref().map(|s| s.secrets.as_slice()).unwrap_or(&[]),
+        )
+    };
+    let level = if original.starts_with("Error:") {
+        Level::Error
+    } else if original.starts_with("Warning:") || original.starts_with("Interrupted:") {
+        Level::Warning
+    } else {
+        Level::Info
+    };
+    event(level, &original);
+    let _ = writeln!(io::stderr().lock(), "{message}");
+}
+
+pub(super) fn finish(code: i32) -> io::Result<()> {
+    event(
+        if code == 0 {
+            Level::Info
+        } else {
+            Level::Warning
+        },
+        format!("Run finished with exit code {code}"),
+    );
+    let session = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(mut sink) = session.and_then(|s| s.sink) {
+        sink.file.flush()?;
+        sink.file.sync_data()?;
+        if sink.failed {
+            return Err(io::Error::other(
+                "File logging failed; conversion output has been preserved",
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl Sink {
+    fn write(&mut self, level: Level, message: &str) -> io::Result<()> {
+        let now = Local::now();
+        let line = if self.json {
+            format!(
+                "{}\n",
+                json!({"ts": now.format("%Y-%m-%dT%H:%M:%S").to_string(), "lvl":level.name(), "src":"cli", "msg":message})
+            )
+        } else {
+            format!(
+                "{} | {:<5} | cli | {}\n",
+                now.format("%Y-%m-%d %H:%M:%S"),
+                level.name(),
+                message.replace('\n', "\\n").replace('\r', "\\r")
+            )
+        };
+        if self.bytes > 0 && self.bytes.saturating_add(line.len() as u64) > self.rotation {
+            self.file.flush()?;
+            self.file.sync_data()?;
+            self.sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("Log rotation exhausted"))?;
+            self.file = private_file(
+                &self
+                    .first_path
+                    .with_file_name(format!("{}_{:06}.log", self.stem, self.sequence)),
+            )?;
+            self.bytes = 0;
+        }
+        self.file.write_all(line.as_bytes())?;
+        self.bytes += line.len() as u64;
+        Ok(())
+    }
+}
+
+fn private_directory(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink() || !m.is_dir()) {
+        return Err(invalid("Log directory must be a directory, not a symlink"));
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+fn private_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    file.lock()?;
+    Ok(file)
+}
+
+fn size(value: &str) -> io::Result<u64> {
+    quantity(
+        value,
+        &[
+            ("b", 1.0),
+            ("kb", 1e3),
+            ("mb", 1e6),
+            ("gb", 1e9),
+            ("kib", 1024.0),
+            ("mib", 1_048_576.0),
+            ("gib", 1_073_741_824.0),
+        ],
+    )
+    .filter(|value| *value > 0)
+    .ok_or_else(|| invalid("log.rotation supports positive byte sizes, e.g. '10 MB'"))
+}
+fn duration(value: &str) -> io::Result<Duration> {
+    quantity(
+        value,
+        &[
+            ("s", 1.0),
+            ("second", 1.0),
+            ("seconds", 1.0),
+            ("m", 60.0),
+            ("minute", 60.0),
+            ("minutes", 60.0),
+            ("h", 3600.0),
+            ("hour", 3600.0),
+            ("hours", 3600.0),
+            ("d", 86400.0),
+            ("day", 86400.0),
+            ("days", 86400.0),
+            ("week", 604800.0),
+            ("weeks", 604800.0),
+        ],
+    )
+    .map(Duration::from_secs)
+    .ok_or_else(|| invalid("log.retention supports durations, e.g. '7 days'"))
+}
+fn quantity(value: &str, units: &[(&str, f64)]) -> Option<u64> {
+    let value = value.trim();
+    let split = value.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let number = value[..split].parse::<f64>().ok()?;
+    let unit = value[split..].trim().to_ascii_lowercase();
+    let multiplier = units.iter().find(|(name, _)| *name == unit)?.1;
+    let total = number * multiplier;
+    (total.is_finite() && total >= 0.0 && total < u64::MAX as f64).then_some(total as u64)
+}
+fn prune(directory: &Path, retention: Duration) -> io::Result<()> {
+    let now = SystemTime::now();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !owned_name(name) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        if now
+            .duration_since(metadata.modified()?)
+            .is_ok_and(|age| age > retention)
+        {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            }
+            let Ok(file) = options.open(entry.path()) else {
+                continue;
+            };
+            if file.try_lock().is_ok() {
+                fs::remove_file(entry.path())?;
+            }
+        }
+    }
+    Ok(())
+}
+fn owned_name(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix("markitai_")
+        .and_then(|v| v.strip_suffix(".log"))
+    else {
+        return false;
+    };
+    let parts: Vec<_> = stem.split('_').collect();
+    (3..=5).contains(&parts.len())
+        && parts[0].len() == 8
+        && parts[1].len() == 6
+        && parts[2].len() == 6
+        && parts
+            .iter()
+            .all(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn redact(message: &str, secrets: &[String]) -> String {
+    let mut safe = String::with_capacity(message.len().min(65536));
+    let mut rest = message;
+    while let Some(start) = rest
+        .find("http://")
+        .into_iter()
+        .chain(rest.find("https://"))
+        .min()
+    {
+        safe.push_str(&rest[..start]);
+        let url = &rest[start..];
+        let end = url
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '\'' | '"'))
+            .unwrap_or(url.len());
+        safe.push_str(&safe_url(&url[..end]));
+        rest = &url[end..];
+    }
+    safe.push_str(rest);
+    for secret in secrets {
+        safe = safe.replace(secret, "[REDACTED]");
+    }
+    safe = safe
+        .chars()
+        .map(|c| {
+            if c.is_control() && !matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    if safe.len() > 65536 {
+        let mut end = 65536;
+        while !safe.is_char_boundary(end) {
+            end -= 1;
+        }
+        safe.truncate(end);
+        safe.push_str(" [truncated]");
+    }
+    safe
+}
+
+fn safe_url(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return "[URL redacted]".into();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    // Log URLs need no opaque path identifiers. Keep ordinary paths readable,
+    // but hide token routes and encoded segments rather than guessing secrets.
+    let mut sensitive_next = false;
+    let parts: Vec<_> = url
+        .path()
+        .split('/')
+        .map(|part| {
+            let key = part.to_ascii_lowercase();
+            let hide = sensitive_next
+                || part.contains('%')
+                || part.contains('=')
+                || (part.len() >= 24
+                    && part.bytes().any(|c| c.is_ascii_uppercase())
+                    && part.bytes().any(|c| c.is_ascii_digit()));
+            sensitive_next = [
+                "token",
+                "secret",
+                "auth",
+                "password",
+                "reset",
+                "invite",
+                "session",
+                "activation",
+                "verify",
+                "magic",
+            ]
+            .iter()
+            .any(|s| key.contains(s));
+            if hide {
+                "[REDACTED]".to_owned()
+            } else {
+                part.to_owned()
+            }
+        })
+        .collect();
+    url.set_path(&parts.join("/"));
+    url.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn redaction_removes_url_credentials_and_configured_secrets_before_encoding() {
+        let result = redact(
+            "Failed https://alice:pass@example.com/path?key=secret#fragment secret-value\u{1b}[31m",
+            &["secret-value".into()],
+        );
+        assert_eq!(result, "Failed https://example.com/path [REDACTED] [31m");
+        let cfg = json!({"llm":{"model_list":[{"litellm_params":{"api_key":"key-secret"}}]},"fetch":{"playwright":{"extra_http_headers":{"Authorization":"Bearer header-secret"}}}});
+        let mut secrets = vec![];
+        collect_secrets(&cfg, &config::redact(&cfg), &mut secrets);
+        assert!(secrets.contains(&"key-secret".into()));
+        assert!(secrets.contains(&"Bearer header-secret".into()));
+    }
+    #[test]
+    fn rotation_retains_valid_complete_json_and_retention_ignores_unrelated_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("markitai_20260101_120000_123456_999.log");
+        let mut sink = Sink {
+            file: private_file(&path).unwrap(),
+            first_path: path.clone(),
+            stem: path.file_stem().unwrap().to_str().unwrap().into(),
+            sequence: 0,
+            bytes: 0,
+            rotation: 100,
+            json: true,
+            minimum: Level::Debug,
+            failed: false,
+        };
+        for i in 0..20 {
+            sink.write(Level::Info, &format!("{i}: \"hello\"\n世界"))
+                .unwrap();
+        }
+        drop(sink);
+        let mut count = 0;
+        for entry in fs::read_dir(temp.path()).unwrap() {
+            let entry = entry.unwrap();
+            for line in fs::read_to_string(entry.path()).unwrap().lines() {
+                let row: Value = serde_json::from_str(line).unwrap();
+                assert_eq!(row["lvl"], "INFO");
+                count += 1;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    entry.metadata().unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        assert_eq!(count, 20);
+        fs::write(temp.path().join("markitai_notes.log"), "keep").unwrap();
+        fs::write(temp.path().join("other.log"), "keep").unwrap();
+        prune(temp.path(), Duration::ZERO).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
+    #[test]
+    fn policy_parsing_is_explicit() {
+        assert_eq!(size("10 MB").unwrap(), 10_000_000);
+        assert_eq!(size("1.5 KiB").unwrap(), 1536);
+        assert_eq!(duration("7 days").unwrap().as_secs(), 604800);
+        assert!(size("midnight").is_err());
+        assert!(size("0 B").is_err());
+        assert!(duration("NaN days").is_err());
+    }
+}

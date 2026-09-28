@@ -37,6 +37,10 @@
 - Complete bounded TIFF page decoding, orientation, original-file retention and per-page OCR/vision previews.
 - Image caption/description analysis with real-reference updates, shared document request budgets and atomic cross-process images.json merging.
 - Persistent REST item retry/enhance and deletion with per-item options, shared-asset ownership and recoverable output transactions.
+- macOS HEIF/AVIF primary-image decoding through ImageIO, with orientation, alpha, bounded pixel checks and native OCR/vision routing.
+- MIME-scoped EML body selection and Content-ID image binding, preserving unresolved references and ordinary attachment downloads.
+- Private CLI file logs with level, rotation and retention controls, plus terminal configuration editing and initialization.
+- Portable native validation and installable-artifact CI for Linux, Windows and both macOS architectures; remote execution remains pending.
 
 ### Fixed
 

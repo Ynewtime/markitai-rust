@@ -54,7 +54,66 @@ pub(crate) fn image_references(markdown: &str) -> Vec<String> {
 /// Localize only actual image targets; ordinary links sharing a definition stay
 /// untouched. Map keys are complete original URIs, values are raw local paths.
 pub(crate) fn rewrite_image_targets(markdown: &str, paths: &HashMap<String, String>) -> String {
-    let edits = uses(markdown)
+    rewrite_targets(markdown, uses(markdown), paths, false)
+}
+
+/// Restore complete URI targets while retaining their percent escapes, queries
+/// and fragments. Callers supply URIs, not raw filesystem paths.
+pub(crate) fn rewrite_image_uri_targets(markdown: &str, uris: &HashMap<String, String>) -> String {
+    rewrite_targets(markdown, uses(markdown), uris, true)
+}
+
+/// Inspect raw HTML before sanitization without interpreting Markdown syntax.
+pub(crate) fn html_image_references(html: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    raw_html_uses(html)
+        .into_iter()
+        .filter_map(|image| seen.insert(image.uri.clone()).then_some(image.uri))
+        .collect()
+}
+
+pub(crate) fn rewrite_html_image_targets(html: &str, paths: &HashMap<String, String>) -> String {
+    rewrite_targets(html, raw_html_uses(html), paths, false)
+}
+
+fn raw_html_uses(html: &str) -> Vec<ImageUse> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while let Some(relative) = html[index..].find('<') {
+        index += relative;
+        let tail = &html[index..];
+        if let Some(end) = html_literal_end(tail) {
+            index += end;
+        } else if let Some(reference) = html_reference(tail) {
+            if reference.name.eq_ignore_ascii_case("plaintext") {
+                break;
+            }
+            if ["textarea", "title", "xmp", "iframe", "noembed", "noframes"]
+                .iter()
+                .any(|name| reference.name.eq_ignore_ascii_case(name))
+            {
+                index += html_closing(tail, reference.tag_end, reference.name)
+                    .map_or(tail.len(), |(_, end)| end);
+            } else {
+                html_uses(tail, index, &reference, &mut output);
+                index += reference.tag_end;
+            }
+        } else if let Some(end) = html_tag_end(tail) {
+            index += end;
+        } else {
+            index += 1;
+        }
+    }
+    output
+}
+
+fn rewrite_targets(
+    markdown: &str,
+    images: Vec<ImageUse>,
+    paths: &HashMap<String, String>,
+    uri: bool,
+) -> String {
+    let edits = images
         .into_iter()
         .filter_map(|image| {
             let next = paths.get(&image.uri)?;
@@ -64,6 +123,8 @@ pub(crate) fn rewrite_image_targets(markdown: &str, paths: &HashMap<String, Stri
             Some(match image.target {
                 Target::Direct(range, syntax) => {
                     let value = match syntax {
+                        TargetSyntax::Html if uri => html_escape(&uri_destination(next, false)),
+                        _ if uri => uri_destination(next, false),
                         TargetSyntax::Markdown => destination(next, false),
                         TargetSyntax::Html => html_escape(&html_file_path(next)),
                         TargetSyntax::Wiki => uri_file_path(next, true),
@@ -72,19 +133,53 @@ pub(crate) fn rewrite_image_targets(markdown: &str, paths: &HashMap<String, Stri
                 }
                 Target::Srcset(range) => (
                     range,
-                    srcset_destination(TargetRewrite {
-                        path: next,
-                        suffix: "",
-                    }),
+                    if uri {
+                        html_escape(&uri_destination(next, true))
+                    } else {
+                        srcset_destination(TargetRewrite {
+                            path: next,
+                            suffix: "",
+                        })
+                    },
                 ),
                 Target::Indirect { whole, alt, title } => (
                     whole,
-                    format!("![{alt}]({}{title})", destination(next, false)),
+                    format!(
+                        "![{alt}]({}{title})",
+                        if uri {
+                            uri_destination(next, false)
+                        } else {
+                            destination(next, false)
+                        }
+                    ),
                 ),
             })
         })
         .collect();
     apply_edits(markdown, edits)
+}
+
+fn uri_destination(value: &str, srcset: bool) -> String {
+    let mut output = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_whitespace()
+            || ch.is_control()
+            || matches!(
+                ch,
+                '(' | ')' | '<' | '>' | '\\' | '"' | '\'' | '[' | ']' | '|'
+            )
+            || (srcset && ch == ',')
+        {
+            let mut bytes = [0; 4];
+            for byte in ch.encode_utf8(&mut bytes).as_bytes() {
+                use std::fmt::Write;
+                write!(output, "%{byte:02X}").expect("writing to String cannot fail");
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 pub(crate) fn replace_image_alts(markdown: &str, captions: &HashMap<String, String>) -> String {
@@ -428,6 +523,43 @@ mod tests {
             &map(&[("old.png", "assets/a b,.png")]),
         );
         assert_eq!(result, "<img srcset='assets/a%20b%2C.png 1x'>");
+    }
+
+    #[test]
+    fn raw_html_images_do_not_interpret_markdown_or_attribute_examples() {
+        let html = "<p>![literal](cid:markdown) `<img src='cid:real'>`</p><div data-example=\"<img src='cid:attribute'>\"></div><textarea><img src='cid:textarea'></textarea><script><img src='cid:script'></script><!-- <img src='cid:comment'> --><pre><img src='cid:pre'></pre><img srcset='cid:one 1x, cid:two 2x'>";
+        assert_eq!(
+            html_image_references(html),
+            ["cid:real", "cid:one", "cid:two"]
+        );
+        let changed = rewrite_html_image_targets(
+            html,
+            &map(&[
+                ("cid:real", "assets/a.png"),
+                ("cid:one", "assets/one, x.png"),
+                ("cid:markdown", "wrong"),
+            ]),
+        );
+        assert!(changed.contains("![literal](cid:markdown)"));
+        assert!(changed.contains("`<img src='assets/a.png'>`"));
+        assert!(changed.contains("assets/one%2C%20x.png 1x, cid:two 2x"));
+        assert!(changed.contains("<textarea><img src='cid:textarea'></textarea>"));
+    }
+
+    #[test]
+    fn restored_uris_preserve_encoding_and_only_change_image_uses() {
+        let source = "![direct](placeholder) ![ref][id] [download][id] `![code](placeholder)`\n[id]: placeholder \"title\"\n<img src='placeholder'><img srcset='placeholder 1x'>";
+        let result =
+            rewrite_image_uri_targets(source, &map(&[("placeholder", "cid:a%2Fb?x=1&y=2#frame")]));
+        assert!(result.contains("![direct](cid:a%2Fb?x=1&y=2#frame)"));
+        assert!(result.contains("![ref](cid:a%2Fb?x=1&y=2#frame \"title\") [download][id]"));
+        assert!(result.contains("`![code](placeholder)`\n[id]: placeholder \"title\""));
+        assert!(result.contains("src='cid:a%2Fb?x&#61;1&amp;y&#61;2#frame'"));
+        assert!(result.contains("srcset='cid:a%2Fb?x&#61;1&amp;y&#61;2#frame 1x'"));
+        assert_eq!(image_references(&result), ["cid:a%2Fb?x=1&y=2#frame"]);
+        let result =
+            rewrite_image_uri_targets("<img srcset='old 2x'>", &map(&[("old", "cid:a,b %23\n")]));
+        assert_eq!(result, "<img srcset='cid:a%2Cb%20%23%0A 2x'>");
     }
 
     #[test]

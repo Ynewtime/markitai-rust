@@ -1,5 +1,6 @@
 //! Bounded image decoding and shared asset preparation.
 
+mod heif;
 mod svg;
 mod tiff;
 
@@ -44,7 +45,17 @@ fn error(error: impl std::fmt::Display) -> Error {
     Error::Conversion(format!("Cannot decode or encode image: {error}"))
 }
 
-fn decode(bytes: &[u8]) -> Result<(DynamicImage, ImageFormat)> {
+#[derive(Debug, Clone, Copy)]
+enum DecodedFormat {
+    Raster(ImageFormat),
+    Heif(heif::Info),
+}
+
+fn decode(bytes: &[u8]) -> Result<(DynamicImage, DecodedFormat)> {
+    if heif::signature(bytes) {
+        let decoded = heif::decode(bytes)?;
+        return Ok((decoded.image, DecodedFormat::Heif(decoded.info)));
+    }
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let format = reader
         .format()
@@ -62,7 +73,7 @@ fn decode(bytes: &[u8]) -> Result<(DynamicImage, ImageFormat)> {
     let orientation = decoder.orientation().map_err(error)?;
     let mut image = DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
-    Ok((image, format))
+    Ok((image, DecodedFormat::Raster(format)))
 }
 
 fn dimension(cfg: &Value, key: &str, fallback: u32) -> u32 {
@@ -198,7 +209,10 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        if !is_image_extension(extension) && image::guess_format(&asset.bytes).is_err() {
+        if !is_image_extension(extension)
+            && image::guess_format(&asset.bytes).is_err()
+            && !heif::signature(&asset.bytes)
+        {
             replacements.entry(from.clone()).or_insert(from);
             prepared.push(asset);
             continue;
@@ -240,12 +254,16 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
                 continue;
             }
         };
+        if let DecodedFormat::Heif(info) = format {
+            primary_notice(doc, info);
+        }
         if filtered(&image, cfg) {
             replacements.entry(from).or_default();
             continue;
         }
-        let asset = if config::enabled(cfg, "/image/compress") {
-            match encode(&image, cfg, false) {
+        let compress = config::enabled(cfg, "/image/compress");
+        let asset = if compress || matches!(format, DecodedFormat::Heif(_)) {
+            match encode(&image, cfg, !compress) {
                 Ok((bytes, extension, _)) => Asset {
                     name: format!("{}.{}", asset.name, extension),
                     bytes,
@@ -260,6 +278,9 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
             }
         } else {
             // Correct mislabeled embedded payloads even when preserving their bytes.
+            let DecodedFormat::Raster(format) = format else {
+                unreachable!()
+            };
             let suffix = format.extensions_str()[0];
             Asset {
                 name: format!("{}.{}", asset.name, suffix),
@@ -303,6 +324,9 @@ pub(crate) fn extract(
     }
     if tiff::signature(&bytes) && tiff::multiple(&bytes)? {
         return extract_tiff(path, bytes, cfg, local_ocr);
+    }
+    if heif::signature(&bytes) {
+        return extract_heif(path, &bytes, cfg, local_ocr);
     }
     let (image, svg) = single_vision(&bytes, path, cfg)?;
     let (name, asset) = if svg {
@@ -379,21 +403,16 @@ fn single_vision(bytes: &[u8], path: &Path, cfg: &Value) -> Result<(VisionImage,
     let detected = image::guess_format(bytes)
         .ok()
         .or_else(|| tiff::signature(bytes).then_some(ImageFormat::Tiff));
-    if detected.is_none() && (extension == "svg" || svg::is_svg(bytes)) {
+    if detected.is_none() && !heif::signature(bytes) && (extension == "svg" || svg::is_svg(bytes)) {
         let rendered = svg::render(bytes)?;
         let (bytes, _, mime) = encode(&rendered, cfg, true)?;
         return Ok((VisionImage { mime, bytes }, true));
     }
-    if detected == Some(ImageFormat::Avif)
-        || detected.is_none() && matches!(extension.as_str(), "heic" | "heif" | "avif")
-    {
-        return Err(Error::Unsupported(
-            "HEIF/AVIF decoding is not enabled in this build; no image has been sent to a model"
-                .into(),
-        ));
-    }
     let (image, format) = if detected == Some(ImageFormat::Tiff) {
-        (tiff::Pages::new(bytes)?.decode(0)?, ImageFormat::Tiff)
+        (
+            tiff::Pages::new(bytes)?.decode(0)?,
+            DecodedFormat::Raster(ImageFormat::Tiff),
+        )
     } else {
         decode(bytes)?
     };
@@ -401,14 +420,16 @@ fn single_vision(bytes: &[u8], path: &Path, cfg: &Value) -> Result<(VisionImage,
     let (bytes, mime) = if preserve
         && matches!(
             format,
-            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Gif
+            DecodedFormat::Raster(
+                ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Gif
+            )
         ) {
         (
             bytes.to_vec(),
             match format {
-                ImageFormat::Jpeg => "image/jpeg",
-                ImageFormat::WebP => "image/webp",
-                ImageFormat::Gif => "image/gif",
+                DecodedFormat::Raster(ImageFormat::Jpeg) => "image/jpeg",
+                DecodedFormat::Raster(ImageFormat::WebP) => "image/webp",
+                DecodedFormat::Raster(ImageFormat::Gif) => "image/gif",
                 _ => "image/png",
             },
         )
@@ -417,6 +438,67 @@ fn single_vision(bytes: &[u8], path: &Path, cfg: &Value) -> Result<(VisionImage,
         (bytes, mime)
     };
     Ok((VisionImage { mime, bytes }, false))
+}
+
+fn primary_notice(doc: &mut Document, info: heif::Info) {
+    if info.images > 1 {
+        notice(
+            doc,
+            &format!(
+                "{} contains {} images; only primary image {} was converted, matching the primary-image policy.",
+                info.format,
+                info.images,
+                info.primary + 1
+            ),
+        );
+    }
+}
+
+fn extract_heif(
+    path: &Path,
+    bytes: &[u8],
+    cfg: &Value,
+    local_ocr: bool,
+) -> Result<(Document, Vec<VisionImage>)> {
+    let decoded = heif::decode(bytes)?;
+    let (encoded, extension, mime) = encode(
+        &decoded.image,
+        cfg,
+        !config::enabled(cfg, "/image/compress"),
+    )?;
+    let mut doc = image_document(path, &format!("image.{extension}"), encoded.clone());
+    doc.metadata
+        .insert("format".into(), decoded.info.format.into());
+    doc.metadata
+        .insert("image_count".into(), decoded.info.images.into());
+    doc.metadata
+        .insert("primary_image".into(), (decoded.info.primary + 1).into());
+    primary_notice(&mut doc, decoded.info);
+    webp_notice(&mut doc, cfg);
+    if local_ocr {
+        let recognized = crate::ocr::recognize_rgb(rgb_on_white(&decoded.image), cfg)?;
+        if recognized.text.trim().is_empty() {
+            doc.warnings.push(
+                "Local OCR found no readable text; the output retains the image reference.".into(),
+            );
+        } else {
+            doc.markdown.push('\n');
+            doc.markdown.push_str(&recognized.text);
+            if !doc.markdown.ends_with('\n') {
+                doc.markdown.push('\n');
+            }
+        }
+        ocr_metadata(&mut doc, cfg);
+        Ok((doc, Vec::new()))
+    } else {
+        Ok((
+            doc,
+            vec![VisionImage {
+                mime,
+                bytes: encoded,
+            }],
+        ))
+    }
 }
 
 fn mime_extension(mime: &str) -> &'static str {
@@ -911,5 +993,57 @@ mod tests {
         assert!(output.markdown.contains(".svg)"));
         assert!(output.llm_markdown.unwrap().contains("A red rectangle."));
         assert!(output.output_path.unwrap().is_file());
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn embedded_heif_and_avif_are_real_pngs_with_primary_notice_and_alpha() {
+        let mut doc = Document {
+            markdown:
+                "![primary](.markitai/assets/primary.heic) ![circle](.markitai/assets/circle.avif)"
+                    .into(),
+            assets: vec![
+                Asset {
+                    name: "primary.heic".into(),
+                    bytes: include_bytes!("images/fixtures/heif/primary-second.heic").to_vec(),
+                },
+                Asset {
+                    name: "circle.avif".into(),
+                    bytes: include_bytes!("images/fixtures/heif/circle_custom_properties.avif")
+                        .to_vec(),
+                },
+            ],
+            ..Default::default()
+        };
+        let cfg=config::normalize(&json!({"image":{"compress":false,"filter":{"min_width":0,"min_height":0,"min_area":0}}})).unwrap();
+        prepare_assets(&mut doc, &cfg);
+        assert_eq!(doc.assets.len(), 2);
+        assert!(
+            doc.markdown.contains("primary.heic.png") && doc.markdown.contains("circle.avif.png")
+        );
+        assert!(
+            doc.warnings
+                .iter()
+                .any(|w| w.contains("only primary image 2"))
+        );
+        let primary = image::load_from_memory(&doc.assets[0].bytes)
+            .unwrap()
+            .to_rgba8();
+        assert!(primary.get_pixel(30, 20)[1] > 240);
+        let circle = image::load_from_memory(&doc.assets[1].bytes)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(circle.get_pixel(0, 0)[3], 0);
+        for asset in &doc.assets {
+            assert_eq!(image::guess_format(&asset.bytes).unwrap(), ImageFormat::Png);
+        }
+        let vision = prepare_vision(
+            include_bytes!("images/fixtures/heif/quadrants-orientation6.heic"),
+            "misleading.svg",
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(vision[0].mime, "image/png");
+        let decoded = image::load_from_memory(&vision[0].bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (80, 120));
     }
 }

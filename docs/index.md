@@ -9,6 +9,7 @@
 - [Browser fetching and screenshots](browser.md): isolated optional Chromium and CDP.
 - [Images](images.md): raster/SVG inputs, shared compression and resource boundaries.
 - [HTML](html.md) and [MSG](msg.md): extraction semantics and known gaps.
+- [EML](eml.md): MIME body selection, scoped CID images and attachment downloads.
 - [HTML code blocks](html-code.md) and [article boundaries](html-article.md): code fidelity and structural content selection.
 - [Streamed HTML](html-stream.md): React transport and script-stripped article snapshots.
 - [PDF layout](pdf.md): positioned text, paragraphs, headings and ruled tables.
@@ -26,6 +27,7 @@
 - [REST service](serve.md): native jobs, event streams, results and persistent history.
 - [MCP service](mcp.md): stdio tools, conversion results and in-memory batch jobs.
 - [CLI](cli.md) and [bindings](bindings.md): current user interfaces.
+- [Native CI](ci.md): per-platform builds, installed artifacts and evidence boundaries.
 - [Validation](validation/README.md): differential checks and measured evidence.
 - [Performance plan](performance-plan.md): profile tradeoffs, binding costs and long-lived memory checks.
 - Decisions: [native core](decisions/0001-native-core.md),

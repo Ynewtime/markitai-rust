@@ -268,9 +268,15 @@ impl Model {
                             worker_gate.clone(),
                         );
                         workers.push(std::thread::spawn(move||{
+                        // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+                        stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(WAIT)).unwrap();stream.set_write_timeout(Some(WAIT)).unwrap();
                         let mut headers=Vec::new();let mut byte=[0];
-                        while stream.read(&mut byte).ok()==Some(1){headers.push(byte[0]);if headers.ends_with(b"\r\n\r\n"){break;}assert!(headers.len()<16384);}
+                        while !headers.ends_with(b"\r\n\r\n") {
+                            assert!(headers.len()<16384, "model request headers exceed fixture limit");
+                            stream.read_exact(&mut byte).expect("read complete model request headers");
+                            headers.push(byte[0]);
+                        }
                         let text=String::from_utf8(headers).unwrap();let length=text.lines().find_map(|line|line.split_once(':').filter(|(name,_)|name.eq_ignore_ascii_case("content-length")).map(|(_,value)|value.trim().parse::<usize>().unwrap())).unwrap();assert!(length<2*1024*1024);
                         let mut body=vec![0;length];stream.read_exact(&mut body).unwrap();let request:Value=serde_json::from_slice(&body).unwrap();assert_eq!(request["model"],"fixture");
                         entered.fetch_add(1,Ordering::SeqCst);

@@ -139,7 +139,11 @@ fn data_image(target: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 fn local_image(source: &str, target: &str, allow_symlinks: bool) -> Result<Vec<u8>> {
-    if target.contains("://") || target.starts_with('#') || target.starts_with('/') {
+    if Url::parse(target).is_ok()
+        || target.contains("://")
+        || target.starts_with('#')
+        || target.starts_with('/')
+    {
         return Err(failure("unsupported or absolute local image target"));
     }
     let text = String::from_utf8(unquote(
@@ -307,6 +311,26 @@ mod tests {
             assert!(local_image(source.to_str().unwrap(), "link.png", false).is_err());
         }
     }
+    #[test]
+    #[cfg(unix)]
+    fn unresolved_cid_cannot_read_an_existing_same_named_local_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("message.eml");
+        std::fs::write(
+            dir.path().join("cid:photo"),
+            b"must not become the missing MIME image",
+        )
+        .unwrap();
+        assert!(local_image(source.to_str().unwrap(), "cid:photo", false).is_err());
+        assert!(local_image(source.to_str().unwrap(), "CID:photo", false).is_err());
+        assert!(local_image(source.to_str().unwrap(), "file:photo", false).is_err());
+        // An explicitly encoded colon is a local filename, not a URI scheme.
+        assert_eq!(
+            local_image(source.to_str().unwrap(), "cid%3Aphoto", false).unwrap(),
+            b"must not become the missing MIME image"
+        );
+    }
+
     #[test]
     fn private_networks_and_embedded_credentials_cannot_bypass_download_policy() {
         for address in [

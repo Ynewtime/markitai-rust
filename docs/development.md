@@ -5,12 +5,13 @@ Use Rust stable, Node 24+, Go 1.22+, and Python 3.11+ for adapter testing.
 The manifest floor is Rust 1.89 due to resolved dependencies; this checkpoint
 was verified with Rust 1.98.1, not with the minimum compiler.
 
-Standard checks (`scripts/check.sh` runs them with isolated state):
+Standard checks (`python scripts/check.py` runs the complete gate with isolated
+state on all hosts; `scripts/check.sh` delegates to it on Unix):
 
 ```sh
 cargo fmt --all --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --release -p markitai-cli
 ```
 
@@ -27,3 +28,6 @@ comparison. Never discard working tree changes to recover an earlier version.
 
 The original repository is not a build dependency. Any referenced differential
 test runner must accept its location explicitly and record the reference SHA.
+
+See [native CI](ci.md) for the clean-checkout package driver and its actual
+installation checks. Configuring a runner is separate from executing it.

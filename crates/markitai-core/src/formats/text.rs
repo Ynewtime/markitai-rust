@@ -1,5 +1,4 @@
 use crate::{Document, Error, Result};
-use mail_parser::MimeHeaders;
 use serde_json::Value;
 
 pub(super) fn decode(bytes: &[u8]) -> Result<String> {
@@ -287,97 +286,11 @@ pub(super) fn xml(source: &str) -> Result<Document> {
     })
 }
 
+#[path = "native/eml.rs"]
+mod eml;
+
 pub(super) fn email(bytes: &[u8]) -> Result<Document> {
-    let message = mail_parser::MessageParser::default()
-        .parse(bytes)
-        .ok_or_else(|| Error::Conversion("Malformed email message".into()))?;
-    let title = message.subject().unwrap_or("");
-    let mut metadata = serde_json::Map::new();
-    if !title.is_empty() {
-        metadata.insert("title".into(), title.into());
-    }
-    if let Some(date) = message.date() {
-        metadata.insert("date".into(), date.to_rfc3339().into());
-    }
-    let actual_html =
-        message
-            .html_body
-            .iter()
-            .find_map(|id| match &message.parts.get(*id as usize)?.body {
-                mail_parser::PartType::Html(html) => Some(html.as_ref()),
-                _ => None,
-            });
-    let body = if let Some(html) = actual_html {
-        super::html::fragment(html)?
-    } else {
-        message
-            .body_text(0)
-            .map(|s| s.into_owned())
-            .unwrap_or_default()
-    };
-    let mut headers = Vec::new();
-    for name in ["From", "To", "Cc", "Date", "Subject"] {
-        for value in message.header_as(name, mail_parser::HeaderForm::Text) {
-            if let Some(value) = value.as_text() {
-                let date = (name == "Date")
-                    .then(|| message.date())
-                    .flatten()
-                    .map(|date| {
-                        // RFC 5322 date headers are rendered with a two-digit day.
-                        date.to_rfc822().replacen(
-                            &format!(", {} ", date.day),
-                            &format!(", {:02} ", date.day),
-                            1,
-                        )
-                    });
-                let value = date
-                    .as_deref()
-                    .unwrap_or(value)
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .replace('<', "\\<")
-                    .replace('>', "\\>");
-                if !value.is_empty() {
-                    headers.push(format!("**{name}:** {value}"));
-                }
-            }
-        }
-    }
-    let mut markdown = "# Email Message".to_owned();
-    if !headers.is_empty() {
-        markdown.push_str(&format!("\n\n{}", headers.join("\n")));
-    }
-    markdown.push_str(&format!("\n\n## Content\n\n{}", body.trim()));
-    let mut assets = Vec::new();
-    for (index, attachment) in message.attachments().enumerate() {
-        let name = attachment.attachment_name().unwrap_or("attachment.bin");
-        let name: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let name = format!("email-{}-{name}", index + 1);
-        assets.push(crate::Asset {
-            name: name.clone(),
-            bytes: attachment.contents().to_vec(),
-        });
-        markdown.push_str(&format!(
-            "\n\n[Attachment {}](.markitai/assets/{name})",
-            index + 1
-        ));
-    }
-    Ok(Document {
-        markdown,
-        metadata,
-        assets,
-        warnings: Vec::new(),
-    })
+    eml::extract(bytes)
 }
 
 #[cfg(test)]

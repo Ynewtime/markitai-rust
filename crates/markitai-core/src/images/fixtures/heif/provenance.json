@@ -1,0 +1,63 @@
+[
+  {
+    "file": "libavif-LICENSE",
+    "source": "https://raw.githubusercontent.com/AOMediaCodec/libavif/v1.3.0/LICENSE",
+    "bytes": 20415,
+    "sha256": "165abf92cc04b39e80d29cadea7a6a7e8fddf59407d4ad2616507a7ebe8216f9"
+  },
+  {
+    "file": "quadrants-orientation1.heic",
+    "source": "locally authored CoreGraphics quadrants encoded by ImageIO; round19 probe.m",
+    "bytes": 977,
+    "sha256": "c73caeb61976440d354210cfbf2c7b2df03f7b17b8750d29765b25f3b3416117"
+  },
+  {
+    "file": "quadrants-orientation6.heic",
+    "source": "locally authored CoreGraphics quadrants encoded by ImageIO; round19 probe.m",
+    "bytes": 977,
+    "sha256": "587650156573547edab8d6975d9eda166454cedae1378b0587bac99d160f1d30"
+  },
+  {
+    "file": "white_1x1.avif",
+    "source": "https://raw.githubusercontent.com/AOMediaCodec/libavif/v1.3.0/tests/data/white_1x1.avif",
+    "license": "BSD-2-Clause; tests/data/README.md explicitly assigns same license as libavif",
+    "bytes": 305,
+    "sha256": "ea4e43d1f07e4c00de16c13afa32376111bb306e51f08212cf4c1b6064df3667"
+  },
+  {
+    "file": "circle_custom_properties.avif",
+    "source": "https://raw.githubusercontent.com/AOMediaCodec/libavif/v1.3.0/tests/data/circle_custom_properties.avif",
+    "license": "BSD-2-Clause; tests/data/README.md explicitly assigns same license as libavif",
+    "bytes": 1065,
+    "sha256": "6c57595c1b814392c6a0d0e1f60e34c6f7f09a8ce7e46885d85059b7205e82fb"
+  },
+  {
+    "file": "circle-trns-after-plte.png",
+    "source": "https://raw.githubusercontent.com/AOMediaCodec/libavif/v1.3.0/tests/data/circle-trns-after-plte.png",
+    "license": "BSD-2-Clause; tests/data/README.md explicitly assigns same license as libavif",
+    "bytes": 2117,
+    "sha256": "ce764335248751e965239365227608a27a93cea49bfd248794c241ae9f4a67b2"
+  },
+  {
+    "file": "english.heic",
+    "source": "authored existing OCR english.png; encoded locally with macOS ImageIO via /usr/bin/sips",
+    "source_sha256": "a9f547051baeaaa96c9299363a3c79b1fb3842c2c7192c0bde0663f86081b94d",
+    "command": [
+      "/usr/bin/sips",
+      "-s",
+      "format",
+      "heic",
+      "crates/markitai-core/src/ocr/fixtures/english.png",
+      "--out",
+      "crates/markitai-core/src/images/fixtures/heif/english.heic"
+    ],
+    "bytes": 10693,
+    "sha256": "c31ed78422e46eebbca42e734f44b2947da85e14376fdd335ea3f67b18705fb3"
+  },
+  {
+    "file": "primary-second.heic",
+    "source": "authored generate-quadrants.m; macOS ImageIO two-image HEIC with explicit second primary image",
+    "bytes": 1223,
+    "sha256": "a32f372a24927a75ad79a3d9b303daa992e4f96b0945734b8fc19c2b0d6a2e20"
+  }
+]

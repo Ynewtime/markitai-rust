@@ -3,9 +3,9 @@
 Raster preparation lives in the Rust core, so CLI and language adapters use the
 same decoding, resize and asset rules. Native decoding uses no Python process or
 external image editor. Optional [image enrichment](image-enrichment.md) can fetch
-actual remote image references before passing their bytes to these decoders. The enabled codecs are JPEG, PNG, GIF, BMP, TIFF and
-WebP. Static SVG inputs are rendered natively with resvg. HEIF/AVIF decoding
-remains unfinished.
+actual remote image references before passing their bytes to these decoders.
+JPEG, PNG, GIF, BMP, TIFF and WebP use Rust codecs. Static SVG inputs are rendered
+natively with resvg. On macOS, HEIF/HEIC and AVIF use ImageIO's native codecs.
 
 ## Standalone inputs
 
@@ -28,8 +28,48 @@ reference Python API. Missing files still report a missing-file error.
 enabled, it selects image vision unless `MARKITAI_NO_VLM_OCR` disables that
 upload; then local OCR supplies text for enhancement without image blocks.
 [PDF page OCR and screenshots](pdf-rendering.md) use the native macOS renderer.
-HEIF/AVIF conversion remains unfinished. [Browser screenshots](browser.md)
-are available with an installed Chromium executable.
+[Browser screenshots](browser.md) are available with an installed Chromium executable.
+
+## HEIF and AVIF
+
+The macOS decoder accepts bytes in memory, validates the ISO BMFF container's
+declared box boundaries, then asks ImageIO for the actual format and primary
+image. Content takes precedence over a misleading filename. The primary image
+is selected explicitly, including when its index is not zero. Other images in
+a collection or sequence are not additional document pages: standalone and
+embedded conversion warn when the container has more than one image. This
+matches the reference's primary-image behavior; it does not claim complete
+HEIF sequence extraction.
+
+Image dimensions are checked before pixel decoding against the 32-million-pixel
+limit, then checked again against the returned bitmap. ImageIO must report a
+complete image; a partially available image is an error. Pixels are drawn into
+an explicit sRGB RGBA8 buffer, with transparency preserved and EXIF orientation
+applied once. Local OCR receives upright pixels composited on white. Vision and
+embedded output use PNG when compression is disabled, or the configured encoder
+when enabled; HEIF/AVIF bytes are never labeled as PNG and sent unchanged.
+Standalone inputs retain the normal one-preview document shape. Original files
+are not modified.
+
+There is no Python, libheif or external decoder process. Other platforms report
+`unsupported`, as does a macOS runtime unable to decode a particular codec. OS
+codec availability depends on the installed macOS version; current verification
+does not establish support on every version allowed by the binary deployment
+target. HDR/high-bit-depth images are converted to an 8-bit sRGB representation;
+HDR tone fidelity and every HEIF coding variant are not claimed. The owned input,
+pixel and encoded buffers are bounded, but ImageIO's internal allocations and
+decode time are not an OS sandbox or a peak-RSS guarantee.
+
+Regression fixtures include locally authored HEIC quadrant images with EXIF
+orientations 1 and 6, a two-image collection whose second image is primary,
+and local OCR text. Real AVIF white-pixel and transparent-circle files come from
+libavif v1.3.0 under its stated BSD license. Source URLs, exact hashes and local
+generation commands are stored beside the fixtures in
+`crates/markitai-core/src/images/fixtures/heif/provenance.json`; the license and
+authored HEIC generator are included. Tests inspect decoded pixels, alpha,
+primary-image selection, truncated data, actual model PNG payloads and local
+OCR without model image uploads. A system capability list alone is not decode
+evidence.
 
 ## Multi-page TIFF
 
@@ -69,7 +109,7 @@ earlier pages as a complete document.
 Embedded multi-page TIFF assets are preserved unchanged during ordinary asset
 compression, so that pass cannot flatten them to the first frame. Image analysis
 uses the same all-page vision preparation. No external decoder or Python runtime
-is used. HEIF/AVIF support and cross-platform local OCR remain separate work.
+is used. Cross-platform local OCR remains separate work.
 
 ## SVG inputs
 
@@ -154,7 +194,7 @@ addition to the existing strict asset-hash audit.
 With compression disabled, supported embedded image bytes remain unchanged.
 The actual decoded format determines the output suffix. Standalone JPEG/PNG/
 WebP/GIF assets and vision payloads also preserve original bytes in this mode;
-BMP/TIFF previews become PNG without resizing. Metadata such as EXIF orientation
+BMP/TIFF/HEIF/AVIF previews become PNG without resizing. Metadata such as EXIF orientation
 is retained in the unchanged payload; orientation is baked in only when encoding
 new pixels. Provider size limits are not yet reproduced for every service.
 
@@ -165,8 +205,9 @@ raster processing entirely. Input files are never modified.
 
 ## Resource boundaries
 
-Each raster decode allows at most 32 million pixels and a 256 MiB decoder
-allocation budget. Dimensions are checked before decoded pixel allocation;
+Each raster decode allows at most 32 million pixels. Rust codecs use a 256 MiB
+decoder allocation budget; ImageIO uses the separate boundaries described above.
+Dimensions are checked before decoded pixel allocation;
 codec limits can reject earlier. The total temporary working set may be larger
 while resizing, compositing or encoding because those buffers coexist. This is
 not a peak-RSS guarantee. General local inputs have the reference's 500 MiB

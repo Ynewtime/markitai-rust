@@ -630,3 +630,136 @@ fn standalone_multiframe_tiff_sends_every_preview_once_and_keeps_original_downlo
         [20, 200, 30]
     );
 }
+
+fn mime_part(headers: &str, content: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "{headers}\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+        base64::engine::general_purpose::STANDARD.encode(content)
+    )
+}
+fn multipart_email(kind: &str, members: &[String]) -> Vec<u8> {
+    let mut message = format!(
+        "MIME-Version: 1.0\r\nSubject: Related chart\r\nContent-Type: multipart/{kind}; boundary=mail-boundary\r\n\r\n"
+    );
+    for member in members {
+        message.push_str("--mail-boundary\r\n");
+        message.push_str(member);
+    }
+    message.push_str("--mail-boundary--\r\n");
+    message.into_bytes()
+}
+
+#[test]
+fn real_eml_cid_references_reach_alt_description_and_published_metadata_in_both_profiles() {
+    if isolated(
+        "real_eml_cid_references_reach_alt_description_and_published_metadata_in_both_profiles",
+    ) {
+        return;
+    }
+    for profile in [None, Some("rag")] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("related.eml");
+        let bytes = png();
+        let html = b"<p>Inline chart and literal cid:logo@example.test.</p><p><img src='CID:%3Clogo%40example.test%3E' alt='Original one'> and <img src='cid:LOGO@example.test' alt='Original two'></p><pre><code>&lt;img src=\"cid:logo@example.test\"&gt;</code></pre><p><img src='cid:ordinary' alt='Not an image MIME part'></p>";
+        std::fs::write(&source, multipart_email("related", &[
+            mime_part("Content-Type: text/html; charset=utf-8", html),
+            mime_part("Content-Type: image/png\r\nContent-ID: <logo@example.test>\r\nContent-Disposition: inline; filename=\"../../chart [x].png\"", &bytes),
+            mime_part("Content-Type: application/octet-stream\r\nContent-ID: <ordinary>\r\nContent-Disposition: attachment; filename=\"not-a-picture.png\"", b"NON_IMAGE_ATTACHMENT"),
+        ])).unwrap();
+        let server = Server::new(vec![Reply::echo(), analysis()]);
+        let mut config = cfg(&server);
+        if let Some(profile) = profile {
+            config["output"] = json!({"profile":profile});
+        }
+        let output = run(
+            source.to_str().unwrap(),
+            config,
+            Some(dir.path().join("out")),
+        )
+        .unwrap();
+        assert_eq!(output.images.len(), 1, "{output:#?}");
+        assert_eq!(
+            body(&output).matches("![A \\[safe\\] chart]").count(),
+            2,
+            "{}",
+            body(&output)
+        );
+        assert!(body(&output).contains("literal cid:logo@example.test"));
+        assert!(body(&output).contains("<img src=\"cid:logo@example.test\">"));
+        assert!(body(&output).contains("cid:ordinary"));
+        assert!(
+            output
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Content-ID") && warning.contains("ordinary"))
+        );
+        assert!(output.markdown.contains("![Original one]"));
+        assert!(output.markdown.contains("[Attachment 1]"));
+        assert!(output.markdown.contains("[Attachment 2]"));
+        let asset = Path::new(output.images[0]["asset"].as_str().unwrap());
+        assert!(asset.is_absolute());
+        assert_eq!(std::fs::read(asset).unwrap(), bytes);
+        assert_eq!(
+            asset.parent().unwrap(),
+            if profile.is_some() {
+                dir.path().join("out/assets")
+            } else {
+                dir.path().join("out/.markitai/assets")
+            }
+        );
+        let index: Value = serde_json::from_slice(
+            &std::fs::read(asset.parent().unwrap().join("images.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(index["images"].as_array().unwrap().len(), 1);
+        assert_eq!(index["images"][0]["path"], output.images[0]["asset"]);
+        assert_eq!(index["images"][0]["source"], source.to_str().unwrap());
+        assert_eq!(requests(&server).len(), 2);
+        assert_eq!(vision_bytes(&requests(&server)[1]), vec![bytes]);
+        assert!(
+            output
+                .assets
+                .iter()
+                .any(|path| std::fs::read(path).unwrap() == b"NON_IMAGE_ATTACHMENT")
+        );
+        assert!(!dir.path().join("chart [x].png").exists());
+    }
+}
+
+#[test]
+fn ambiguous_eml_content_ids_never_choose_an_arbitrary_image_or_call_vision() {
+    if isolated("ambiguous_eml_content_ids_never_choose_an_arbitrary_image_or_call_vision") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("ambiguous.eml");
+    #[cfg(unix)]
+    std::fs::write(dir.path().join("cid:missing"), png()).unwrap();
+    std::fs::write(&source, multipart_email("related", &[
+        mime_part("Content-Type: text/html; charset=utf-8", b"<p>Keep this body.</p><img src='cid:duplicate' alt='Ambiguous author alt'><img src='cid:missing' alt='Missing author alt'>"),
+        mime_part("Content-Type: image/png\r\nContent-ID: <duplicate>\r\nContent-Disposition: inline; filename=first.png", &png()),
+        mime_part("Content-Type: image/png\r\nContent-ID: <duplicate>\r\nContent-Disposition: inline; filename=second.png", &png()),
+    ])).unwrap();
+    let server = Server::new(vec![Reply::echo()]);
+    let output = run(
+        source.to_str().unwrap(),
+        cfg(&server),
+        Some(dir.path().join("out")),
+    )
+    .unwrap();
+    assert!(output.images.is_empty(), "{output:#?}");
+    assert!(body(&output).contains("![Ambiguous author alt](cid:duplicate)"));
+    assert!(body(&output).contains("![Missing author alt](cid:missing)"));
+    assert_eq!(
+        output
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("EML image reference"))
+            .count(),
+        2
+    );
+    assert_eq!(requests(&server).len(), 1);
+    assert_eq!(output.usage.requests, 1);
+    assert!(!dir.path().join("out/.markitai/assets/images.json").exists());
+}
