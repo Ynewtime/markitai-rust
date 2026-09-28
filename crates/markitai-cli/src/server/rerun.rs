@@ -98,7 +98,7 @@ pub(super) async fn retry(
             if let Some(fields)=saved.as_object(){for (key,value) in fields{if let Some(target)=known.get_mut(key){*target=value.clone();}}}
             serde_json::from_value(known).map_err(|_|ApiError::new(422,"saved item options are invalid"))?
         }};
-        let mut cfg=opts.config(&state.cfg)?;
+        let mut cfg=opts.config(&state.settings.snapshot())?;
         if body.operation==Operation::Enhance&& (cfg["llm"]["enabled"]!=true||!markitai_core::llm_capabilities(&cfg).routable){return Err(ApiError::new(409,"LLM enhancement is unavailable; enable a routable LLM first"));}
         let base=files::item_base(&data,&prior);
         if base.is_empty()||FsPath::new(&base).components().count()!=1||base.contains(['/', '\\'])||matches!(base.as_str(),"."|"..") {return Err(ApiError::new(409,"saved output identity is not safe to retry"));}

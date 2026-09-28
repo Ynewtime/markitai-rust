@@ -213,6 +213,9 @@ def main():
                 bundle.write(release / (name + extension), name + extension)
             for name in ["LICENSE", "NOTICE"]:
                 bundle.write(root / name, name)
+            for name in ["marked-LICENSE", "DOMPurify-LICENSE", "provenance.json"]:
+                relative = "vendor/web/" + name
+                bundle.write(root / relative, relative)
         artifact(archive)
         extracted = work / "cli"
         with zipfile.ZipFile(archive) as bundle:

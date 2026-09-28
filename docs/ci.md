@@ -48,6 +48,8 @@ not a filesystem monitor that can detect an edit reverted between snapshots.
 ## Package license files and provenance
 
 CLI archives and C-ABI artifacts carry the repository's LICENSE and NOTICE.
+CLI archives also carry the embedded Markdown renderer/sanitizer licenses and
+provenance under `vendor/web/`.
 The current ZIP carries both executable aliases, `markitai` and `mkai`; report
 its archive size separately from the size of one runnable executable.
 Node staging explicitly includes both in the package's `files` list, then checks

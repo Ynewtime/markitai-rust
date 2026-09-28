@@ -2,12 +2,20 @@
 mod files;
 mod http;
 mod jobs;
+mod launch;
+mod providers;
 mod rerun;
 mod security;
+mod settings;
 mod sidecar;
 mod store;
 mod transaction;
 mod types;
+mod web;
+
+pub(super) use launch::open_config;
+pub(crate) use launch::settings_source;
+pub(crate) use settings::SettingsSource;
 
 use axum::{
     Router, middleware,
@@ -33,7 +41,7 @@ pub struct ServeOptions {
 }
 
 struct State {
-    cfg: Value,
+    settings: settings::Store,
     root: PathBuf,
     jobs: Mutex<HashMap<String, Arc<jobs::Job>>>,
     file_slots: Arc<Semaphore>,
@@ -46,15 +54,19 @@ struct State {
     allowed_hosts: HashSet<String>,
 }
 
-pub fn run(cfg: Value, options: ServeOptions) -> Result<(), String> {
+pub(crate) fn settings_config(source: &SettingsSource) -> Result<Value, String> {
+    settings::load_base(source).map_err(|error| error.detail)
+}
+
+pub(crate) fn run(cfg: Value, source: SettingsSource, options: ServeOptions) -> Result<(), String> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?
-        .block_on(serve(cfg, options))
+        .block_on(serve(cfg, source, options))
 }
 
-async fn serve(cfg: Value, options: ServeOptions) -> Result<(), String> {
+async fn serve(cfg: Value, source: SettingsSource, options: ServeOptions) -> Result<(), String> {
     let root = markitai_core::config::home().join("serve/jobs");
     store::private_dir(&root).map_err(|e| e.to_string())?;
     let (shutdown, _) = watch::channel(false);
@@ -82,7 +94,7 @@ async fn serve(cfg: Value, options: ServeOptions) -> Result<(), String> {
     let file_count = cfg["batch"]["concurrency"].as_u64().unwrap_or(4).max(1) as usize;
     let url_count = cfg["batch"]["url_concurrency"].as_u64().unwrap_or(4).max(1) as usize;
     let state = Arc::new(State {
-        cfg,
+        settings: settings::Store::new(cfg, source).map_err(|error| error.detail)?,
         root,
         jobs: Mutex::new(HashMap::new()),
         file_slots: Arc::new(Semaphore::new(file_count)),
@@ -96,7 +108,9 @@ async fn serve(cfg: Value, options: ServeOptions) -> Result<(), String> {
     });
     store::rehydrate(&state.root, &state.jobs).map_err(|e| e.to_string())?;
     let router = Router::new()
-        .route("/", get(http::index))
+        .merge(web::routes())
+        .merge(settings::routes())
+        .merge(providers::routes())
         .route("/api/capabilities", get(http::capabilities))
         .route("/api/jobs", post(http::create))
         .route("/api/jobs/{job_id}", get(http::snapshot))
@@ -135,9 +149,10 @@ async fn serve(cfg: Value, options: ServeOptions) -> Result<(), String> {
         eprintln!("Remote access token: {token}");
     }
     if !options.no_open {
-        eprintln!(
-            "The native service exposes its REST API at this address; an interactive web UI is not bundled."
-        );
+        let url = launch::browser_url(address, state.token.as_deref());
+        if let Err(error) = launch::open_browser(&url) {
+            eprintln!("Could not open a browser: {error}; open the server address manually.");
+        }
     }
     let shutdown_state = state.clone();
     let outcome = axum::serve(

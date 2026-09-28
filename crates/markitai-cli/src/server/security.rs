@@ -51,9 +51,25 @@ pub(super) fn allowed_host(value: &str) -> ApiResult<String> {
 
 pub(super) async fn guard(
     ExtractState(state): ExtractState<Arc<State>>,
-    mut request: Request,
+    request: Request,
     next: Next,
 ) -> Response {
+    let settings = settings_path(request.uri().path());
+    let mut response = guard_inner(state, request, next).await;
+    if settings {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
+fn settings_path(path: &str) -> bool {
+    path == "/api/settings/llm" || path.starts_with("/api/settings/llm/")
+}
+
+async fn guard_inner(state: Arc<State>, mut request: Request, next: Next) -> Response {
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -126,6 +142,13 @@ pub(super) async fn guard(
                 .into_response();
         }
     }
+    if settings_path(request.uri().path()) && !(loopback || authenticated) {
+        return ApiError::new(
+            403,
+            "settings access requires loopback or token authentication",
+        )
+        .into_response();
+    }
     if request
         .headers()
         .get("content-length")
@@ -185,7 +208,15 @@ mod router_tests {
         super::super::store::private_dir(root).unwrap();
         let (shutdown, _) = watch::channel(false);
         let state = Arc::new(State {
-            cfg: markitai_core::config::normalize(&json!({"llm":{"enabled":false}})).unwrap(),
+            settings: super::super::settings::Store::new(
+                markitai_core::config::normalize(&json!({"llm":{"enabled":false}})).unwrap(),
+                super::super::SettingsSource {
+                    path: root.join("config.json"),
+                    origin: "default".into(),
+                    overrides: None,
+                },
+            )
+            .unwrap(),
             root: root.into(),
             jobs: Mutex::new(HashMap::new()),
             file_slots: Arc::new(Semaphore::new(1)),
@@ -204,6 +235,11 @@ mod router_tests {
                     Json(json!({"trusted":trust.0}))
                 })
                 .post(|| async { Json(json!({"ok":true})) }),
+            )
+            .route(
+                "/api/settings/llm",
+                get(|| async { Json(json!({"ok":true})) })
+                    .post(|| async { Json(json!({"ok":true})) }),
             )
             .route("/api/jobs", post(super::super::http::create))
             .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -233,6 +269,95 @@ mod router_tests {
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status().as_u16(), status);
         serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn settings_always_require_trust_and_never_cache_success_or_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let authenticated = app(temp.path(), Some("settings-test-token"));
+        let open = app(temp.path(), None);
+        for (router, method, path, peer, headers, expected) in [
+            (
+                &authenticated,
+                "GET",
+                "/api/settings/llm",
+                "203.0.113.40:1234",
+                vec![],
+                401,
+            ),
+            (
+                &open,
+                "GET",
+                "/api/settings/llm",
+                "203.0.113.40:1234",
+                vec![],
+                403,
+            ),
+            (
+                &authenticated,
+                "GET",
+                "/api/settings/llm",
+                "203.0.113.40:1234",
+                vec![("authorization", "Bearer settings-test-token")],
+                200,
+            ),
+            (
+                &open,
+                "GET",
+                "/api/settings/llm",
+                "127.0.0.1:1234",
+                vec![],
+                200,
+            ),
+            (
+                &open,
+                "POST",
+                "/api/settings/llm",
+                "127.0.0.1:1234",
+                vec![("origin", "https://evil.invalid")],
+                403,
+            ),
+            (
+                &open,
+                "GET",
+                "/api/settings/llm/missing",
+                "127.0.0.1:1234",
+                vec![],
+                404,
+            ),
+            (
+                &open,
+                "PUT",
+                "/api/settings/llm",
+                "127.0.0.1:1234",
+                vec![],
+                405,
+            ),
+            (
+                &open,
+                "POST",
+                "/api/settings/llm",
+                "127.0.0.1:1234",
+                vec![("content-length", "99999999999")],
+                413,
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(request(method, path, peer, &headers, ""))
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), expected, "{method} {path}");
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
+        let mut invalid_host = request("GET", "/api/settings/llm", "127.0.0.1:1234", &[], "");
+        invalid_host
+            .headers_mut()
+            .insert("host", "evil.invalid".parse().unwrap());
+        let response = open.oneshot(invalid_host).await.unwrap();
+        assert_eq!(response.status().as_u16(), 400);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(!settings_path("/api/settings/llm-other"));
     }
 
     #[tokio::test]

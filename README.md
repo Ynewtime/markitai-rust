@@ -11,6 +11,7 @@ Documentation starts at [docs/index.md](docs/index.md).
 cargo build --release -p markitai-cli
 target/release/markitai document.docx -o out/
 target/release/markitai https://example.com --no-remote-fetch -o out/
+target/release/markitai serve
 ```
 
 Use `MARKITAI_HOME` to select a private configuration/state directory. During

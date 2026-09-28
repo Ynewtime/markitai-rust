@@ -15,3 +15,8 @@ and include each dependency's applicable license/copyright notices. A crate's
 metadata license identifier alone is not the complete notice bundle.
 Reference test fixtures remain in the reference checkout; audit reports record
 fixture hashes and never redistribute them as newly authored fixtures.
+
+The embedded browser workspace includes Marked 18.0.14 (MIT) and DOMPurify
+3.4.16 (Apache-2.0). Their complete notices are in vendor/web/marked-LICENSE
+and vendor/web/DOMPurify-LICENSE. Download provenance, upstream package
+integrity and embedded-file hashes are recorded in vendor/web/provenance.json.

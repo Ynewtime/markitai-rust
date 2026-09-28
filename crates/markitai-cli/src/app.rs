@@ -1367,9 +1367,12 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
             no_auth,
             allowed_host,
         } => {
-            let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
+            let source = crate::server::settings_source(cli.config.as_deref(), overrides.clone())
+                .map_err(runtime)?;
+            let cfg = crate::server::settings_config(&source).map_err(runtime)?;
             crate::server::run(
                 cfg,
+                source,
                 crate::server::ServeOptions {
                     host: host.clone(),
                     port: *port,

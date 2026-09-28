@@ -1,10 +1,20 @@
 # Native REST service
 
 `markitai serve --host 127.0.0.1 --port 3600 --no-open` runs an HTTP API inside
-the Rust binary. Conversion calls the same Rust core as the native bindings;
-it does not launch the CLI, Python, or a conversion subprocess. This delivery
-covers the job and history workflow. An interactive web UI, settings/provider
-administration and workspace management are not implemented by this service.
+the Rust binary. Conversion calls the same Rust core as the native bindings.
+The root URL serves an embedded browser workspace for conversion, preview,
+history and model settings; no Node runtime or CDN is required. Without
+`--no-open`, the service asks the system URL handler to open that workspace.
+See [browser workspace](web-ui.md), [settings](service-settings.md) and
+[provider discovery and probes](provider-management.md) for their contracts.
+
+The configuration destination is fixed at startup: explicit `--config`, then
+`MARKITAI_CONFIG`, project `markitai.json`, user `config.json`, or a new file
+under the isolated Markitai home. Service reads reject nonregular files,
+symlinks and files larger than 8 MiB. Settings saves change the configuration
+snapshot for newly admitted jobs and retries; an active job keeps its original
+snapshot. CLI model/provider session overrides remain effective and make
+settings writes unavailable until restart without those overrides.
 
 ## Job workflow
 
@@ -143,6 +153,14 @@ trust. `--no-auth` disables the token requirement, but unauthenticated nonloopba
 URL conversion is explicitly rejected: a full DNS/redirect-aware public-network
 fetch policy has not been implemented. Such clients may still upload files and
 access/delete history, so expose this mode only as intended by its operator.
+
+All model settings endpoints additionally require a loopback peer or valid token,
+including with `--no-auth`. Every settings response, including rejected requests,
+carries `Cache-Control: no-store`. Static UI bootstrap remains accessible under
+the Host policy so a remote user can enter a service token. Browser launch places
+the token in the URL fragment; the UI removes it immediately and sends API
+requests with Bearer authentication. Credentials are retrieved only through the
+explicit connection-edit route and are never stored by the browser workspace.
 
 Host validation accepts localhost, IP literals, and explicit `--allowed-host`
 entries. State-changing requests with an Origin must satisfy the origin policy.

@@ -1,8 +1,10 @@
 //! Native text and image requests with a bounded routing and retry policy.
+mod service_probe;
 use crate::{ConversionUsage, Error, LlmRuntime, Result, config, llm_cache};
 use base64::Engine;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
+pub(crate) use service_probe::probe as service_probe;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::io::Read;

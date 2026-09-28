@@ -24,11 +24,6 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
-pub(super) async fn index() -> Json<Value> {
-    Json(
-        json!({"name":"markitai","version":markitai_core::VERSION,"api":"/api/capabilities","ui":false}),
-    )
-}
 pub(super) async fn missing() -> ApiError {
     ApiError::new(404, "route not found")
 }
@@ -36,9 +31,10 @@ pub(super) async fn method_not_allowed() -> ApiError {
     ApiError::new(405, "method not allowed")
 }
 pub(super) async fn capabilities(ExtractState(state): ExtractState<Arc<State>>) -> Json<Value> {
-    let llm = markitai_core::llm_capabilities(&state.cfg);
+    let cfg = state.settings.snapshot();
+    let llm = markitai_core::llm_capabilities(&cfg);
     let mut presets = json!({"minimal":{"llm":false,"ocr":false,"alt":false,"desc":false,"screenshot":false},"standard":{"llm":true,"ocr":false,"alt":true,"desc":true,"screenshot":false},"rich":{"llm":true,"ocr":false,"alt":true,"desc":true,"screenshot":true}});
-    if let Some(overrides) = state.cfg["presets"].as_object() {
+    if let Some(overrides) = cfg["presets"].as_object() {
         for (name, value) in overrides {
             if presets.get(name).is_some() {
                 presets[name] = value.clone();
@@ -188,7 +184,7 @@ pub(super) async fn create(
         Some(bytes) => serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::new(422, format!("invalid options: {e}")))?,
     };
-    let cfg = options.config(&state.cfg)?;
+    let cfg = options.config(&state.settings.snapshot())?;
     let bases = jobs::reserve_outputs(&items);
     for item in &mut items {
         if item.kind == "url" {

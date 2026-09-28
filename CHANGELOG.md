@@ -41,6 +41,9 @@
 - MIME-scoped EML body selection and Content-ID image binding, preserving unresolved references and ordinary attachment downloads.
 - Private CLI file logs with level, rotation and retention controls, plus terminal configuration editing and initialization.
 - Portable native validation and installable-artifact CI for Linux, Windows and both macOS architectures; remote execution remains pending.
+- Embedded browser workspace with file/URL jobs, safe Markdown preview, history and model settings, served directly by the native CLI.
+- Revision-checked provider/deployment settings, private atomic configuration saves and per-job configuration snapshots.
+- Bounded native model discovery with credential-scoped caching, plus single-model connection probes without document conversion.
 
 ### Fixed
 

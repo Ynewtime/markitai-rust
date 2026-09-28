@@ -164,15 +164,25 @@ impl Item {
 }
 
 pub(super) type ApiResult<T> = Result<T, ApiError>;
+#[derive(Debug)]
 pub(super) struct ApiError {
     pub status: StatusCode,
     pub detail: String,
+    structured_detail: Option<Value>,
 }
 impl ApiError {
     pub fn new(status: u16, detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             detail: detail.into(),
+            structured_detail: None,
+        }
+    }
+    pub fn structured(status: u16, detail: Value) -> Self {
+        Self {
+            status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            detail: "structured API error".into(),
+            structured_detail: Some(detail),
         }
     }
     pub fn internal(error: impl std::fmt::Display) -> Self {
@@ -195,8 +205,9 @@ impl IntoResponse for ApiError {
             503 => "unavailable",
             _ => "server_error",
         };
+        let detail = self.structured_detail.unwrap_or(Value::String(self.detail));
         let mut response =
-            (self.status, Json(json!({"detail":self.detail,"code":code}))).into_response();
+            (self.status, Json(json!({"detail":detail,"code":code}))).into_response();
         if self.status == StatusCode::UNAUTHORIZED {
             response
                 .headers_mut()

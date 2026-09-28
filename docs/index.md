@@ -25,6 +25,8 @@
 - [Recovery storage](state-storage.md): checkpoint codec, journal, replay and durability boundaries.
 - [History](history.md): optional independent output/asset archives and metadata.
 - [REST service](serve.md): native jobs, event streams, results and persistent history.
+- [Embedded workspace](web-ui.md): browser conversion, preview and connection editing.
+- [Service settings](service-settings.md) and [provider management](provider-management.md): saved connections, revisions, model discovery and probes.
 - [MCP service](mcp.md): stdio tools, conversion results and in-memory batch jobs.
 - [CLI](cli.md) and [bindings](bindings.md): current user interfaces.
 - [Native CI](ci.md): per-platform builds, installed artifacts and evidence boundaries.
