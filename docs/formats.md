@@ -18,7 +18,7 @@ network policy and optional model enhancement belong to the orchestration layer.
 | EML | mail-parser | Decoded subject, body and MIME attachments; attachment bytes returned separately |
 | MSG | cfb + native properties | Outlook headers, Unicode/ANSI body, HTML fallback and bounded by-value attachments |
 | RST, Org, TeX | native markup readers | Structured sections, lists, code, math, links and tables; unsupported constructs retained with warnings |
-| JPEG, PNG, GIF, BMP, TIFF, WebP | image + native LLM transport | Standalone vision inputs and shared raster assets; local OCR remains unavailable |
+| JPEG, PNG, GIF, BMP, TIFF, WebP | image + native LLM transport + macOS Vision | Standalone vision inputs, shared raster assets and local image OCR; multi-page TIFF OCR remains unfinished |
 | DOC, DOCX, DOCM | anydoc document model | Headings, styled text, lists, tables, links, formulas, notes and embedded assets |
 | PPT, PPS, POT | anydoc document model | Legacy presentation content through the shared Markdown renderer |
 | PPTX, PPTM, PPSX, PPSM | bounded ZIP + PresentationML reader | Ordered slide markers, title placeholders, plain text frames, grouped shapes, tables, referenced images, cached chart data and speaker notes |
@@ -100,14 +100,17 @@ PDF inspection reports invisible rendering modes, transparent text, white text
 and very small text when they accompany text operators, including inside forms.
 This is a diagnostic contract: complete hidden-text removal, page screenshots,
 vector drawing rasterization, image-region text grouping and local OCR remain
-unimplemented. The upstream reader's visibility and layout heuristics still
-determine the extracted text. The browser runtime is outside this module. No Python interpreter,
+unimplemented. The pinned reader patch suppresses nonpainting Tr3/Tr7 text while
+preserving graphics state and cursor movement; other visibility and layout
+heuristics retain their documented limits in [PDF layout](pdf.md).
+The browser runtime is outside this module. No Python interpreter,
 Node runtime, Office installation, LibreOffice or hosted extraction service is
 used by the readers above.
 
 ## Explicit remaining compatibility work
 
-Numbers, HEIF/AVIF decoding and local OCR remain unfinished. Standalone SVG
+Numbers, HEIF/AVIF decoding and PDF OCR remain unfinished. Local image OCR is
+available on macOS through [Vision](ocr.md). Standalone SVG
 rasterization is implemented with bounded native rendering; embedded SVG vision
 and additional image pathways remain separate work.
 Multi-page TIFF vision routing is explicitly rejected pending complete page

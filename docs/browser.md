@@ -4,9 +4,9 @@ The `playwright` fetch strategy retains its public name and uses Chromium's
 DevTools Protocol directly from Rust. It does not import Playwright or run
 Python, Node.js, or a browser automation CLI. Chrome/Chromium remains an optional
 installed executable; the standalone Markitai binary does not bundle it.
-The integrated workspace gate passes. The frozen diagnostic executable also
-passes real loopback Chrome fetching, capture, timeout and cleanup checks;
-release-artifact evidence is recorded separately in the control center.
+The integrated workspace gate and frozen release pass real loopback Chrome
+fetching, capture, timeout, history and cleanup checks. Source and artifact
+identities are recorded in the [validation report](validation/native-backends-round16.md).
 
 Each fetch launches a new headless process with a temporary user-data directory,
 a separate disk-cache directory, a loopback debugging endpoint on a dynamically
@@ -119,7 +119,8 @@ The protocol operations use Chromium's published
 [Network](https://chromedevtools.github.io/devtools-protocol/tot/Network/) and
 [Fetch](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/) domains.
 Unit coverage targets option validation, cookie field conversion, glob boundaries,
-proxy credential rejection and filename identity. Real loopback browser evidence
-must additionally verify delayed JavaScript, headers/cookies, redirects, capture
-bytes and tiling, canvas-only results, timeouts and child cleanup against the
-actual built binary.
+proxy credential rejection and filename identity. The actual release additionally
+passes delayed JavaScript, headers/cookies, redirects, tiling, canvas-only results,
+failure policies, timeout and cleanup cases. Real proxy routes, every wait state,
+shadow-root content, explicit static/remote text plus capture and non-Unix process
+cleanup remain outside this local acceptance corpus.

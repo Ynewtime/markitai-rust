@@ -12,11 +12,14 @@ and heuristic encoding detection are not implemented. Explicit plain-text and
 Markdown MIME types keep literal HTML examples as text rather than triggering
 HTML challenge detection.
 
-`auto` currently uses the static path. It does not implement the reference's
-complete browser/remote fallback chain, JavaScript execution, screenshots or
-SPA-domain learning. `jina` and `defuddle` keep their explicit remote-consent
-and target checks and do not use this cache. Unsupported strategies fail before
-cache lookup, so an old page cannot make an unsupported strategy appear to work.
+`auto` starts with the static path when screenshots are not requested, with
+local browser fallback for recognized JavaScript/challenge or empty-HTML quality
+failures. Screenshot requests render directly. The `playwright` strategy uses
+[native Chromium CDP](browser.md) for JavaScript and captures; the complete
+reference fallback policy and SPA-domain learning remain unfinished. `jina` and
+`defuddle` keep explicit remote-consent and target checks and do not use this
+cache. Unsupported strategies fail before cache lookup, so an old page cannot
+make an unsupported strategy appear to work.
 
 ## Stored results and identity
 
@@ -69,7 +72,8 @@ must not be persisted; `--no-cache` still saves admissible fresh results.
 Empty content, failed extraction and recognized HTML challenges cannot replace
 a good row. Challenge checks examine HTML structure and visible non-code text;
 literal vendor names in plain text, HTML code examples or an ordinary CAPTCHA
-widget are insufficient. Obvious short JavaScript shells fail explicitly.
+widget are insufficient. Obvious short JavaScript shells fail static extraction;
+`auto` may then select the local browser.
 These checks do not implement complete quality classification. If a conditional
 request and its unconditional retry both fail, the operation fails while the
 old row remains intact. The reference's narrower stale-page fallback after a

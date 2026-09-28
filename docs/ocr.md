@@ -92,6 +92,12 @@ language aliases, bounds, alpha handling, row/paragraph assembly and malformed
 geometry. These are focused checks, not an OCR accuracy corpus or a claim that
 results match RapidOCR on arbitrary documents.
 
+The [frozen release check](validation/native-backends-round16.md) observes a
+25.897-second first image OCR call and much shorter subsequent calls. OS caches
+were not reset and the cause is not established; this remains an optimization
+target. A separate small native CPU-only probe does not justify changing the
+default compute policy. These observations are not an OCR speed guarantee.
+
 Implementation references: Apple's [text-recognition guide](https://developer.apple.com/documentation/vision/recognizing-text-in-images),
 [recognition request](https://developer.apple.com/documentation/vision/vnrecognizetextrequest)
 and [in-memory request handler](https://developer.apple.com/documentation/vision/vnimagerequesthandler/init(data:options:)),

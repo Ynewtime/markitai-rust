@@ -60,6 +60,14 @@ its measurements. Full JSON reports retain the complete fixture denominator.
 - [PDF page-prefix loss](pdf-page-prefix-round15.json) records a separately
   reproduced baseline defect rather than counting lost text as a performance gain.
 
+## Round-sixteen evidence
+
+- [Native OCR, browser and PDF correctness](native-backends-round16.md): source
+  `f164978`, 617 distinct workspace tests, 55 vendored tests, 16 real backend cases,
+  complete screenshot history, release size and scoped timing.
+- CLI 22.94 MiB; simple exact Python comparisons are 17.67–27.26 times faster.
+  Prior-Rust wall time increases 1.06–9.48%; OCR first-use latency remains open.
+
 ## Initial CLI benchmark
 
 ```sh
