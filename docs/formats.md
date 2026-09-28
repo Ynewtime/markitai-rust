@@ -109,9 +109,10 @@ used by the readers above.
 
 ## Explicit remaining compatibility work
 
-Numbers and HEIF/AVIF decoding remain unfinished. Local PDF files support explicit
+Numbers and HEIF/AVIF decoding remain unfinished. Local and static/automatic URL PDFs support explicit
 page rendering, screenshots and OCR through the [PDF media pipeline](pdf-ocr.md),
-including its documented accuracy gap; URL PDF media remains unfinished.
+including its documented accuracy gap. URL media preserves original request
+identity while processing downloaded bytes without a second download.
 Local image OCR is
 available on macOS through [Vision](ocr.md). Standalone SVG
 rasterization is implemented with bounded native rendering; embedded SVG vision

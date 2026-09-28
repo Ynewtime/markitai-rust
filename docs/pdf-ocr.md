@@ -120,6 +120,11 @@ explicitly ignored in the ordinary routing gate and exercised by the separate
 quality acceptance driver, which reports a partial result. This is an unresolved
 recognizer error, not successful transcription. No character substitution is
 applied to hide it.
-PDFs downloaded through the URL fetch path still use ordinary extraction;
-requesting their OCR or screenshots currently returns an explicit unsupported
-error. Local PDF media support does not establish parity for that URL path.
+Static/automatic URL fetches hand requested PDF media directly to this pipeline,
+including redirects and extensionless downloads. The original URL remains the
+source and naming input. URL pure mode sends text even with screenshot-only;
+PDF capture-only output retains Markdown and page references. This deliberately
+extends the reference URL converter, which did not pass local media settings
+through. Explicit browser/remote strategy selection remains unchanged. See
+[downloaded PDFs](pdf.md#downloaded-pdfs) for the content/identity contract and
+[round-eighteen validation](validation/url-pdf-round18.md) for execution evidence.
