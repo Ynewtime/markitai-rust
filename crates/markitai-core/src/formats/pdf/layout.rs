@@ -1,5 +1,5 @@
 //! Layout improvements only for pages with a reliable, upright text layer.
-use super::geometry::{self, Frame, Grid};
+use super::geometry::{Frame, Grid};
 use pdf_inspector::{TextItem, types::ItemType};
 use std::collections::{BTreeMap, HashSet};
 
@@ -61,19 +61,12 @@ impl Layout {
     pub(super) fn page(
         &mut self,
         number: u32,
-        pdf: &lopdf::Document,
-        id: lopdf::ObjectId,
+        frame: Frame,
+        grids: Vec<Grid>,
         baseline: &str,
     ) -> Option<String> {
-        let frame = geometry::frame(pdf, id)?;
         let items = self.pages.remove(&number)?;
-        render(
-            items,
-            &self.headings,
-            frame,
-            geometry::grids(pdf, id, frame),
-            baseline,
-        )
+        render(items, &self.headings, frame, grids, baseline)
     }
 }
 
@@ -825,10 +818,13 @@ mod tests {
         let mut layout = Layout::read(&bytes, &HashSet::from([1])).unwrap();
         let doc = lopdf::Document::load_mem(&bytes).unwrap();
         let id = doc.get_pages()[&1];
+        let frame = super::super::geometry::frame(&doc, id).unwrap();
+        let (_, content) = super::super::inspect_page(&doc, id);
+        let grids = super::super::geometry::grids(&content.unwrap(), frame);
         let baseline = pdf_inspector::extract_pages_markdown_mem(&bytes, None).unwrap();
         assert!(
             layout
-                .page(1, &doc, id, &baseline.pages[0].markdown)
+                .page(1, frame, grids, &baseline.pages[0].markdown)
                 .is_none()
         );
     }

@@ -34,6 +34,11 @@ dispatcher must preserve the reader's title so normal output can use it.
 
 ## Rendering and URL handling
 
+Full HTML documents first run bounded [streamed-content recovery](html-stream.md).
+Recognized React transport instructions are applied to existing DOM nodes without
+executing JavaScript. Sparse script-stripped snapshots use a separate, explicitly
+documented article heuristic; ordinary hidden descendants remain hidden.
+
 - `<q>` retains quotation marks and nested inline markup. Source newlines remain
   soft Markdown line breaks outside code; structural block elements establish
   paragraph boundaries. This follows the source renderer's line behavior, which

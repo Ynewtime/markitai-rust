@@ -1,5 +1,6 @@
 mod article;
 mod code;
+mod stream;
 
 use crate::{Document, Error, Result};
 use scraper::{ElementRef, Html, Selector};
@@ -883,8 +884,7 @@ fn reference_candidate(element: ElementRef<'_>) -> bool {
     if element.value().name() != "a" {
         return true;
     }
-    note_number(&plain(element)).is_some()
-        || element.value().attr("data-footnote-ref").is_some()
+    if element.value().attr("data-footnote-ref").is_some()
         || element.value().attr("data-type") == Some("noteref")
         || element
             .value()
@@ -894,7 +894,11 @@ fn reference_candidate(element: ElementRef<'_>) -> bool {
             .value()
             .classes()
             .any(|class| matches!(class, "footnote-ref" | "footnote-anchor" | "noteref"))
-        || (!plain(element).is_empty() && plain(element).chars().all(|ch| "*†‡".contains(ch)))
+    {
+        return true;
+    }
+    let text = plain(element);
+    note_number(&text).is_some() || (!text.is_empty() && text.chars().all(|ch| "*†‡".contains(ch)))
 }
 
 fn literal_container(element: ElementRef<'_>) -> bool {
@@ -1155,6 +1159,22 @@ impl<'a> Footnotes<'a> {
             prune_chrome,
             ..Self::default()
         };
+        let references = root
+            .select(&selector(
+                "a[href], sup, span[data-definition], label.footref",
+            ))
+            .filter(|element| reference_candidate(*element))
+            .collect::<Vec<_>>();
+        let inline = root
+            .select(&selector(
+                "span.footnote-container, span.sidenote-container, span.inline-footnote",
+            ))
+            .collect::<Vec<_>>();
+        // Definitions only move when a reference or inline popover resolves.
+        // Ordinary documents need no document-wide ID, literal or note indexes.
+        if references.is_empty() && inline.is_empty() {
+            return notes;
+        }
         let elements = document
             .descendants()
             .filter_map(ElementRef::wrap)
@@ -1182,15 +1202,9 @@ impl<'a> Footnotes<'a> {
                 }
             }
         }
-        let references = root
-            .select(&selector(
-                "a[href], sup, span[data-definition], label.footref",
-            ))
-            .filter(|element| {
-                !in_literal(*element)
-                    && reference_candidate(*element)
-                    && visible_reference(*element, prune_chrome)
-            })
+        let references = references
+            .into_iter()
+            .filter(|element| !in_literal(*element) && visible_reference(*element, prune_chrome))
             .collect::<Vec<_>>();
         let external = elements
             .iter()
@@ -1231,9 +1245,7 @@ impl<'a> Footnotes<'a> {
 
         // Inline popovers have a definition and a reference at the same DOM
         // position. Only the identified content root bypasses hidden styling.
-        for container in root.select(&selector(
-            "span.footnote-container, span.sidenote-container, span.inline-footnote",
-        )) {
+        for container in inline {
             if in_literal(container) || !visible_reference(container, prune_chrome) {
                 continue;
             }
@@ -2470,7 +2482,8 @@ pub(super) fn fragment(source: &str) -> Result<String> {
 
 /// Extract an article candidate, metadata and Markdown without fetching links.
 pub fn extract_html(source: &str, base_url: Option<&str>) -> Result<Document> {
-    let document = Html::parse_document(source);
+    let mut document = Html::parse_document(source);
+    stream::restore(&mut document)?;
     let base = base_url.and_then(|value| Url::parse(value).ok());
     let root = article::select(&document);
     let mut metadata = Map::new();
@@ -2570,6 +2583,31 @@ pub fn extract_html(source: &str, base_url: Option<&str>) -> Result<Document> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_article_keeps_metadata_links_and_resolved_notes() {
+        let result = extract_html(
+            r##"<title>Recovered article</title><main><!--$?--><template id="B:0"></template><p>Loading content</p><!--/$--></main>
+            <div hidden id="S:0"><article><h1>Recovered article</h1><p>Readable evidence<a role="doc-noteref" href="#fn-1">1</a> and <a href="/source">its source</a>.</p><aside id="fn-1" role="doc-footnote">The complete supporting note.</aside><p hidden>Still hidden</p></article></div>
+            <script>$RC("B:0","S:0");</script>"##,
+            Some("https://example.test/article"),
+        )
+        .unwrap();
+        assert_eq!(result.metadata["title"], "Recovered article");
+        assert!(result.markdown.contains("Readable evidence[^1]"));
+        assert!(
+            result
+                .markdown
+                .contains("[its source](https://example.test/source)")
+        );
+        assert!(
+            result
+                .markdown
+                .contains("[^1]: The complete supporting note.")
+        );
+        assert!(!result.markdown.contains("Loading content"));
+        assert!(!result.markdown.contains("Still hidden"));
+    }
 
     #[test]
     fn article_pruning_keeps_external_notes_and_drops_widget_only_references() {

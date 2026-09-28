@@ -120,8 +120,7 @@ fn edge(a: [f32; 2], b: [f32; 2]) -> Option<Edge> {
     }
 }
 
-fn edges(bytes: &[u8], frame: Frame) -> Option<Vec<Edge>> {
-    let content = Content::decode(bytes).ok()?;
+fn edges(content: &Content, frame: Frame) -> Option<Vec<Edge>> {
     if content.operations.len() > 200_000 {
         return None;
     }
@@ -139,7 +138,7 @@ fn edges(bytes: &[u8], frame: Frame) -> Option<Vec<Edge>> {
     let mut rectangular = false;
     let mut pending_clip = false;
     let mut output = Vec::new();
-    for op in content.operations {
+    for op in &content.operations {
         let numbers = || {
             op.operands
                 .iter()
@@ -365,11 +364,8 @@ pub(super) struct Grid {
     pub ys: Vec<f32>,
 }
 
-pub(super) fn grids(pdf: &lopdf::Document, id: ObjectId, frame: Frame) -> Vec<Grid> {
-    let Ok(bytes) = pdf.get_page_content_with_limit(id, super::MAX_STREAM_BYTES) else {
-        return Vec::new();
-    };
-    let Some(edges) = edges(&bytes, frame).map(merge) else {
+pub(super) fn grids(content: &Content, frame: Frame) -> Vec<Grid> {
+    let Some(edges) = edges(content, frame).map(merge) else {
         return Vec::new();
     };
     detect_grids(&edges)
@@ -433,6 +429,10 @@ fn detect_grids(edges: &[Edge]) -> Vec<Grid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed_edges(bytes: &[u8], frame: Frame) -> Option<Vec<Edge>> {
+        edges(&Content::decode(bytes).unwrap(), frame)
+    }
     #[test]
     fn separate_strokes_and_thin_fills_form_one_complete_grid() {
         let frame = Frame {
@@ -442,7 +442,7 @@ mod tests {
             height: 400.,
         };
         let bytes=b"q 1 0 0 1 10 20 cm 0 g 0 G 20 50 m 220 50 l S 20 100 200 0.2 re f 20 150 m 220 150 l S 20 50 m 20 150 l S 100 50 0.2 100 re f 220 50 m 220 150 l S Q";
-        let grids = detect_grids(&merge(edges(bytes, frame).unwrap()));
+        let grids = detect_grids(&merge(parsed_edges(bytes, frame).unwrap()));
         assert_eq!(grids.len(), 1);
         assert_eq!(grids[0].xs.len(), 3);
         assert_eq!(grids[0].ys.len(), 3);
@@ -457,9 +457,9 @@ mod tests {
             height: 400.,
         };
         let bytes=b"0 0 10 10 re W n 20 50 m 220 50 l S 20 100 m 220 100 l S 20 150 m 220 150 l S 20 50 m 20 150 l S 100 50 m 100 150 l S 220 50 m 220 150 l S";
-        assert!(detect_grids(&merge(edges(bytes, frame).unwrap())).is_empty());
-        assert!(edges(b"/GS gs", frame).is_none());
-        assert!(edges(b"0 0 m 30 0 l 40 0 40 0.2 30 0.2 c h f", frame).is_none());
-        assert!(edges(b"0 0 m 30 40 l W n", frame).is_none());
+        assert!(detect_grids(&merge(parsed_edges(bytes, frame).unwrap())).is_empty());
+        assert!(parsed_edges(b"/GS gs", frame).is_none());
+        assert!(parsed_edges(b"0 0 m 30 0 l 40 0 40 0.2 30 0.2 c h f", frame).is_none());
+        assert!(parsed_edges(b"0 0 m 30 40 l W n", frame).is_none());
     }
 }

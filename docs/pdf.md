@@ -48,6 +48,16 @@ edges per geometry pass, 64 graphics-state levels, 32 tables, 32 columns and
 budgets remain. Positioned-item limits are checked after the dependency returns;
 they are not a claim of a hard allocation limit inside that dependency.
 
+Content inspection and table geometry share one bounded content decode per page.
+Inspection first applies the existing visibility, Form and warning checks; only
+an eligible page's same parsed operations are then read for table borders. Raw
+expanded page streams and parsed operations are released at the end of that
+page's preparation. Only its frame and bounded grid coordinates survive until
+the positioned-text pass completes. Form inspection retains the existing shared
+64 MiB page/Form byte budget, 256 content inspections and 32 nested Form levels;
+Form operations are not used as speculative table borders. Pages with incomplete
+inspection retain the original warning and fallback behavior.
+
 ## Images and remaining work
 
 Executed embedded raster images retain their existing extraction path and are
@@ -65,9 +75,11 @@ tables, complex columns, mathematical layout, local OCR and vector charts remain
 open. The historical five-page sample's chart must not be presented as recovered
 merely because its textual labels are extractable.
 
-The additional positioned pass currently reparses the PDF. Sharing one decoded
-document with the dependency is a future performance optimization; no speedup
-or corpus-parity claim follows from this implementation. Focused tests author
+The additional positioned pass still reparses the PDF. Local page-content reuse
+does not remove the dependency's separate document and font decoding. Sharing one
+decoded document with that dependency needs a future API change; no speedup or
+corpus-parity claim follows from local reuse alone. Focused tests author
 their own PDF streams for heading consistency, paragraphs, continuous emphasis,
-complete tables, hidden text and rotated/invalid geometry. Validation results
+complete tables, hidden text, rotated/invalid geometry, compressed multi-stream
+pages, inspection budget boundaries and unreadable or deeply nested Forms. Validation results
 are recorded by the coordinator after the source is frozen.

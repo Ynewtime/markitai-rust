@@ -8,6 +8,7 @@
 - [Images](images.md): raster/SVG inputs, shared compression and resource boundaries.
 - [HTML](html.md) and [MSG](msg.md): extraction semantics and known gaps.
 - [HTML code blocks](html-code.md) and [article boundaries](html-article.md): code fidelity and structural content selection.
+- [Streamed HTML](html-stream.md): React transport and script-stripped article snapshots.
 - [PDF layout](pdf.md): positioned text, paragraphs, headings and ruled tables.
 - [LLM](llm.md): model routing, prompts, retries and provider requests.
 - [Persistent cache](cache.md): document reuse, bypass semantics, storage and CLI management.

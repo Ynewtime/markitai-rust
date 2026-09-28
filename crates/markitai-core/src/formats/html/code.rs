@@ -1,6 +1,8 @@
 //! Recover code from display-oriented syntax highlighters without executing UI.
 use crate::{Error, Result};
 use scraper::{ElementRef, Node};
+use std::cell::OnceCell;
+use std::collections::HashSet;
 
 const MAX_DEPTH: usize = 256;
 type CodeTarget<'a> = (ElementRef<'a>, usize);
@@ -9,7 +11,10 @@ fn has_class(element: ElementRef<'_>, name: &str) -> bool {
     element.value().classes().any(|class| class == name)
 }
 fn any_class(element: ElementRef<'_>, names: &[&str]) -> bool {
-    names.iter().any(|name| has_class(element, name))
+    element
+        .value()
+        .classes()
+        .any(|class| names.contains(&class))
 }
 
 // Split actual declarations, not semicolons inside CSS strings or functions.
@@ -311,12 +316,17 @@ fn header_label(element: ElementRef<'_>) -> Option<String> {
     }
     language_label(&text)
 }
+fn copy_header_language(element: ElementRef<'_>) -> Option<String> {
+    // Most ordinary elements contain no controls; avoid collecting their text.
+    element
+        .descendants()
+        .filter_map(ElementRef::wrap)
+        .any(|child| child.value().name() == "button")
+        .then(|| header_label(element))
+        .flatten()
+}
 fn header_with_copy(element: ElementRef<'_>) -> bool {
-    header_label(element).is_some()
-        && element
-            .descendants()
-            .filter_map(ElementRef::wrap)
-            .any(|child| child.value().name() == "button")
+    copy_header_language(element).is_some()
 }
 fn isolated_header(element: ElementRef<'_>) -> bool {
     !element
@@ -329,10 +339,13 @@ fn inferred_wrapper(element: ElementRef<'_>) -> bool {
     if element.value().name() != "div" {
         return false;
     }
-    let children = element.child_elements().collect::<Vec<_>>();
-    children.len() == 2
-        && header_with_copy(children[0])
-        && children[1]
+    let mut children = element.child_elements();
+    let (Some(header), Some(content), None) = (children.next(), children.next(), children.next())
+    else {
+        return false;
+    };
+    header_with_copy(header)
+        && content
             .descendants()
             .filter_map(ElementRef::wrap)
             .any(target)
@@ -370,7 +383,7 @@ fn collect_targets<'a>(
 }
 fn only_code_and_controls(
     element: ElementRef<'_>,
-    targets: &[CodeTarget<'_>],
+    is_target: &impl Fn(ElementRef<'_>) -> bool,
     depth: usize,
 ) -> Result<bool> {
     if depth > MAX_DEPTH {
@@ -378,15 +391,12 @@ fn only_code_and_controls(
             "HTML code nesting exceeds 256 elements".into(),
         ));
     }
-    if targets.iter().any(|(target, _)| *target == element)
-        || excluded(element)
-        || isolated_header(element)
-    {
+    if is_target(element) || excluded(element) || isolated_header(element) {
         return Ok(true);
     }
     for child in element.children() {
         if let Some(child) = ElementRef::wrap(child) {
-            if !only_code_and_controls(child, targets, depth + 1)? {
+            if !only_code_and_controls(child, is_target, depth + 1)? {
                 return Ok(false);
             }
         } else if let Node::Text(text) = child.value()
@@ -397,7 +407,38 @@ fn only_code_and_controls(
     }
     Ok(true)
 }
-fn code_language(root: ElementRef<'_>, scope: ElementRef<'_>) -> Option<String> {
+// Sibling targets share container hints, including the absence of a header.
+// Keep resolution lazy so explicit code languages never require a scope scan.
+struct LanguageScope<'a> {
+    element: ElementRef<'a>,
+    attribute: OnceCell<Option<String>>,
+    header: OnceCell<Option<String>>,
+}
+impl<'a> LanguageScope<'a> {
+    fn new(element: ElementRef<'a>) -> Self {
+        Self {
+            element,
+            attribute: OnceCell::new(),
+            header: OnceCell::new(),
+        }
+    }
+    fn attribute(&self) -> Option<&str> {
+        self.attribute
+            .get_or_init(|| language_attribute(self.element))
+            .as_deref()
+    }
+    fn header(&self) -> Option<&str> {
+        self.header
+            .get_or_init(|| {
+                self.element
+                    .descendants()
+                    .filter_map(ElementRef::wrap)
+                    .find_map(copy_header_language)
+            })
+            .as_deref()
+    }
+}
+fn code_language(root: ElementRef<'_>, scope: &LanguageScope<'_>) -> Option<String> {
     // The code's own attributes outrank container labels.
     for node in root.descendants().filter_map(ElementRef::wrap) {
         if node.value().name() == "code"
@@ -411,24 +452,23 @@ fn code_language(root: ElementRef<'_>, scope: ElementRef<'_>) -> Option<String> 
         if matches!(node.value().name(), "article" | "main" | "body" | "html") {
             break;
         }
+        if node == scope.element {
+            if let Some(language) = scope.attribute() {
+                return Some(language.to_owned());
+            }
+            break;
+        }
         if let Some(language) = language_attribute(node) {
             return Some(language);
         }
-        if node == scope {
-            break;
-        }
     }
-    if root != scope
-        && let Some(language) = language_attribute(scope)
+    if root != scope.element
+        && let Some(language) = scope.attribute()
     {
-        return Some(language);
+        return Some(language.to_owned());
     }
-    for element in scope.descendants().filter_map(ElementRef::wrap) {
-        if header_with_copy(element)
-            && let Some(language) = header_label(element)
-        {
-            return Some(language);
-        }
+    if let Some(language) = scope.header() {
+        return Some(language.to_owned());
     }
     // CodeMirror embeds its language label above the actual editor contents.
     if root
@@ -452,11 +492,13 @@ fn code_language(root: ElementRef<'_>, scope: ElementRef<'_>) -> Option<String> 
     None
 }
 fn paired_gutter(element: ElementRef<'_>) -> Option<ElementRef<'_>> {
-    let children = element.child_elements().collect::<Vec<_>>();
-    if children.len() != 2 || !digits(children[0]) {
+    let mut children = element.child_elements();
+    let (Some(first), Some(_), None) = (children.next(), children.next(), children.next()) else {
+        return None;
+    };
+    if !digits(first) {
         return None;
     }
-    let first = children[0];
     let flex =
         has_class(element, "flex-row") || style_is(element, "display", &["flex", "inline-flex"]);
     let marked = gutter(first)
@@ -544,24 +586,25 @@ fn text_content(element: ElementRef<'_>, output: &mut String, depth: usize) -> R
 }
 fn render_target(
     root: ElementRef<'_>,
-    scope: ElementRef<'_>,
+    scope: &LanguageScope<'_>,
     output: &mut String,
     depth: usize,
 ) -> Result<()> {
-    let editors = root
+    let mut editors = root
         .descendants()
         .filter_map(ElementRef::wrap)
-        .filter(|node| code_mirror(*node) && !excluded(*node) && visible_between(*node, root))
-        .take(2)
-        .collect::<Vec<_>>();
+        .filter(|node| code_mirror(*node) && !excluded(*node) && visible_between(*node, root));
+    let first_editor = editors.next();
+    let sole_editor = first_editor.filter(|_| editors.next().is_none());
     // Narrowing to an editor is safe only when everything else is confirmed UI.
     // Otherwise retain the whole pre, including peripheral text or other editors.
-    let content =
-        if editors.len() == 1 && only_code_and_controls(root, &[(editors[0], depth)], depth)? {
-            editors[0]
-        } else {
-            root
-        };
+    let content = if let Some(editor) = sole_editor
+        && only_code_and_controls(root, &|node| node == editor, depth)?
+    {
+        editor
+    } else {
+        root
+    };
     let skipped_depth = if content == root {
         0
     } else {
@@ -585,15 +628,23 @@ fn render_target(
 }
 
 fn confirmed_targets(element: ElementRef<'_>, depth: usize) -> Result<Option<Vec<CodeTarget<'_>>>> {
-    if !target(element) && !explicit_wrapper(element) && !inferred_wrapper(element) {
+    let is_target = target(element);
+    if !is_target && !explicit_wrapper(element) && !inferred_wrapper(element) {
         return Ok(None);
     }
     let mut targets = Vec::new();
     collect_targets(element, depth, &mut targets)?;
-    if targets.is_empty()
-        || (!target(element) && !only_code_and_controls(element, &targets, depth)?)
-    {
+    if targets.is_empty() {
         return Ok(None);
+    }
+    if !is_target {
+        let target_ids = targets
+            .iter()
+            .map(|(target, _)| target.id())
+            .collect::<HashSet<_>>();
+        if !only_code_and_controls(element, &|node| target_ids.contains(&node.id()), depth)? {
+            return Ok(None);
+        }
     }
     Ok(Some(targets))
 }
@@ -610,8 +661,9 @@ pub(super) fn render(element: ElementRef<'_>, output: &mut String, depth: usize)
     };
     // Build separately: malformed/deep markup must not leave a half-written block.
     let mut cleaned = String::new();
+    let scope = LanguageScope::new(element);
     for (target, target_depth) in targets {
-        render_target(target, element, &mut cleaned, target_depth)?;
+        render_target(target, &scope, &mut cleaned, target_depth)?;
     }
     output.push_str(&cleaned);
     Ok(true)
@@ -868,6 +920,97 @@ mod tests {
         assert_eq!(
             super::super::render_sanitized(&cleaned).unwrap(),
             "```\nfirst()\n\n\nsecond()\n```"
+        );
+    }
+
+    #[test]
+    fn wide_sibling_blocks_keep_order_text_and_nearest_language_precedence() {
+        let mut source = String::from(
+            "<div class='highlight'><div><span>Java</span><button>Copy</button></div>",
+        );
+        let mut expected = String::new();
+        for index in 0..512 {
+            let body = format!("block_{index}()\n\n  42  ");
+            let (opening, closing, language) = match index % 4 {
+                0 => (
+                    "<pre data-language='Python'><code data-lang='Rust'>",
+                    "</code></pre>",
+                    "rust",
+                ),
+                1 => (
+                    "<pre data-language='Python'><code>",
+                    "</code></pre>",
+                    "python",
+                ),
+                2 => (
+                    "<section data-lang='Go'><pre><code>",
+                    "</code></pre></section>",
+                    "go",
+                ),
+                _ => ("<pre><code>", "</code></pre>", "java"),
+            };
+            source.push_str(opening);
+            source.push_str(&body);
+            source.push_str(closing);
+            expected.push_str(&format!(
+                "<pre><code class=\"language-{language}\">{body}</code></pre>"
+            ));
+        }
+        source.push_str("</div>");
+        assert_eq!(code(&source, ".highlight"), expected);
+    }
+
+    #[test]
+    fn wide_unlabelled_blocks_do_not_invent_a_shared_language_or_drop_a_sibling() {
+        for count in [1, 32, 512] {
+            let mut source = String::from("<div class='highlight'>");
+            let mut expected = String::new();
+            for index in 0..count {
+                source.push_str(&format!("<pre>item_{index} &lt; {count}</pre>"));
+                expected.push_str(&format!(
+                    "<pre><code>item_{index} &lt; {count}</code></pre>"
+                ));
+            }
+            source.push_str("</div>");
+            assert_eq!(code(&source, ".highlight"), expected);
+        }
+    }
+
+    #[test]
+    fn scope_attributes_precede_headers_and_first_header_still_wins() {
+        let source = "<div class='highlight' data-language='typescript'><div><span>Java</span><button>Copy</button></div><pre>x</pre><pre><code class='language-rust'>y</code></pre></div>";
+        assert_eq!(
+            code(source, ".highlight"),
+            "<pre><code class=\"language-typescript\">x</code></pre><pre><code class=\"language-rust\">y</code></pre>"
+        );
+        let source = "<div class='highlight'><div><span>Python</span><button>Copy</button></div><div><span>Rust</span><button>Copy</button></div><pre>x</pre><pre>y</pre></div>";
+        assert_eq!(
+            code(source, ".highlight"),
+            "<pre><code class=\"language-python\">x</code></pre><pre><code class=\"language-python\">y</code></pre>"
+        );
+    }
+
+    #[test]
+    fn ordinary_wide_prose_and_third_sibling_do_not_become_editor_wrappers() {
+        let mut source = String::from("<div>");
+        for index in 0..512 {
+            source.push_str(&format!("<p>Ordinary paragraph {index}.</p>"));
+        }
+        source.push_str("</div>");
+        assert_eq!(normalized(&source, "div"), (false, String::new()));
+        assert_eq!(
+            normalized(
+                "<div><div>Rust<button>Copy</button></div><pre>x</pre><p>Keep this explanation.</p></div>",
+                "div"
+            ),
+            (false, String::new())
+        );
+        assert_eq!(
+            text(
+                "<pre><span style='display:flex'><span style='user-select:none'>1</span><span> + </span><span>2</span></span></pre>",
+                "pre"
+            ),
+            "1 + 2"
         );
     }
 }

@@ -35,6 +35,16 @@ the normal serializer. A highlight container containing explanatory prose is not
 collapsed into a code block. The reader uses the parent's total DOM-depth budget
 and writes output only after extraction succeeds.
 
+Wrapper validation indexes the collected code targets by DOM identity once,
+so each sibling is checked without scanning the full target list. A rendered
+container resolves its shared language attribute and copy-header fallback at
+most once, on demand; target-local and ancestor attributes retain their existing
+precedence. Missing headers are cached too. Ordinary-node checks inspect the
+necessary child positions directly and avoid constructing child vectors or
+collecting header text when no copy button exists. These changes address the
+identified sibling-count costs; elapsed-time and memory benefits require the
+separate coordinator benchmarks.
+
 This is structural normalization rather than a browser layout engine. CSS-only
 line wrapping, virtualized editor lines absent from the DOM, unrecognized
 application-specific code widgets, and language labels without a reliable

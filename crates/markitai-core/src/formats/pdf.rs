@@ -171,6 +171,7 @@ impl GraphicsState {
     }
 }
 
+#[derive(Default)]
 struct PageInspection {
     images: Vec<ObjectId>,
     signals: BTreeSet<&'static str>,
@@ -194,35 +195,48 @@ fn inspect_content(
     pdf: &lopdf::Document,
     bytes: &[u8],
     resources: &[&Dictionary],
-    mut state: GraphicsState,
+    state: GraphicsState,
     seen_forms: &mut BTreeSet<ObjectId>,
     depth: usize,
     out: &mut PageInspection,
-) {
+) -> Option<Content> {
     if out.inspected_streams >= 256
         || bytes.len() > MAX_STREAM_BYTES.saturating_sub(out.inspected_bytes)
     {
         out.warnings
             .push("Expanded page/Form content exceeds the inspection budget.".into());
-        return;
+        return None;
     }
     out.inspected_bytes += bytes.len();
     out.inspected_streams += 1;
     if depth > 32 {
         out.warnings
             .push("Form nesting exceeds the inspection limit.".into());
-        return;
+        return None;
     }
     let content = match Content::decode(bytes) {
         Ok(content) => content,
         Err(error) => {
             out.warnings
                 .push(format!("Content stream inspection failed: {error}"));
-            return;
+            return None;
         }
     };
+    inspect_operations(pdf, &content, resources, state, seen_forms, depth, out);
+    Some(content)
+}
+
+fn inspect_operations(
+    pdf: &lopdf::Document,
+    content: &Content,
+    resources: &[&Dictionary],
+    mut state: GraphicsState,
+    seen_forms: &mut BTreeSet<ObjectId>,
+    depth: usize,
+    out: &mut PageInspection,
+) {
     let mut states = Vec::new();
-    for operation in content.operations {
+    for operation in &content.operations {
         let last = operation.operands.last();
         let name = last.and_then(|obj| obj.as_name().ok());
         match operation.operator.as_str() {
@@ -345,15 +359,17 @@ fn inspect_content(
                             .chain(resources.iter().copied())
                             .collect();
                         match decoded(stream) {
-                            Ok(bytes) => inspect_content(
-                                pdf,
-                                &bytes,
-                                &form_resources,
-                                state,
-                                seen_forms,
-                                depth + 1,
-                                out,
-                            ),
+                            Ok(bytes) => {
+                                let _ = inspect_content(
+                                    pdf,
+                                    &bytes,
+                                    &form_resources,
+                                    state,
+                                    seen_forms,
+                                    depth + 1,
+                                    out,
+                                );
+                            }
                             Err(error) => out
                                 .warnings
                                 .push(format!("Form stream inspection failed: {error}")),
@@ -368,27 +384,21 @@ fn inspect_content(
     }
 }
 
-fn inspect_page(pdf: &lopdf::Document, id: ObjectId) -> PageInspection {
-    let mut out = PageInspection {
-        images: Vec::new(),
-        signals: BTreeSet::new(),
-        warnings: Vec::new(),
-        inspected_bytes: 0,
-        inspected_streams: 0,
-    };
+fn inspect_page(pdf: &lopdf::Document, id: ObjectId) -> (PageInspection, Option<Content>) {
+    let mut out = PageInspection::default();
     let (direct, ids) = match pdf.get_page_resources(id) {
         Ok(resources) => resources,
         Err(error) => {
             out.warnings
                 .push(format!("Page resource inspection failed: {error}"));
-            return out;
+            return (out, None);
         }
     };
     let resources = direct
         .into_iter()
         .chain(ids.iter().filter_map(|id| pdf.get_dictionary(*id).ok()))
         .collect::<Vec<_>>();
-    match pdf.get_page_content_with_limit(id, MAX_STREAM_BYTES) {
+    let content = match pdf.get_page_content_with_limit(id, MAX_STREAM_BYTES) {
         Ok(bytes) => inspect_content(
             pdf,
             &bytes,
@@ -398,11 +408,13 @@ fn inspect_page(pdf: &lopdf::Document, id: ObjectId) -> PageInspection {
             0,
             &mut out,
         ),
-        Err(error) => out
-            .warnings
-            .push(format!("Page content inspection failed: {error}")),
-    }
-    out
+        Err(error) => {
+            out.warnings
+                .push(format!("Page content inspection failed: {error}"));
+            None
+        }
+    };
+    (out, content)
 }
 
 fn page_markdown(page: &pdf_inspector::PageMarkdown, warnings: &mut Vec<String>) -> String {
@@ -438,6 +450,7 @@ fn readable_fallback(text: &str) -> bool {
 fn recover_plain_text(
     pdf: &lopdf::Document,
     number: u32,
+    page_id: ObjectId,
     page: &mut pdf_inspector::PageMarkdown,
     inspection: &PageInspection,
     warnings: &mut Vec<String>,
@@ -456,9 +469,6 @@ fn recover_plain_text(
     {
         return;
     }
-    let Some(&page_id) = pdf.get_pages().get(&number) else {
-        return;
-    };
     let Ok(fonts) = pdf.get_page_fonts(page_id) else {
         return;
     };
@@ -520,19 +530,24 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
         .collect::<BTreeMap<_, _>>();
     let mut inspections = BTreeMap::new();
     let mut layout_pages = HashSet::new();
+    let mut page_geometry = BTreeMap::new();
     for (&number, &id) in &page_ids {
-        let inspection = inspect_page(&pdf, id);
+        let (inspection, content) = inspect_page(&pdf, id);
         if let Some(page) = pages.get_mut(&number) {
-            recover_plain_text(&pdf, number, page, &inspection, &mut document.warnings);
+            recover_plain_text(&pdf, number, id, page, &inspection, &mut document.warnings);
             if !page.needs_ocr
                 && !page.markdown.trim().is_empty()
                 && inspection.signals.is_empty()
                 && inspection.warnings.is_empty()
-                && geometry::frame(&pdf, id).is_some()
+                && let Some(frame) = geometry::frame(&pdf, id)
+                && let Some(content) = content.as_ref()
             {
                 layout_pages.insert(number);
+                page_geometry.insert(number, (frame, geometry::grids(content, frame)));
             }
         }
+        // Retain only bounded table coordinates across pages, never their
+        // expanded streams or parsed operation trees.
         inspections.insert(number, inspection);
     }
     let mut layout = if layout_pages.is_empty() {
@@ -550,7 +565,7 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
     let mut total_asset_bytes = 0;
     let mut sections = Vec::new();
     let mut readable_pages = 0;
-    for (&number, &id) in &page_ids {
+    for &number in page_ids.keys() {
         let mut page = pages
             .remove(&number)
             .unwrap_or(pdf_inspector::PageMarkdown {
@@ -562,10 +577,10 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
         let inspection = inspections
             .remove(&number)
             .expect("every page was inspected");
-        if layout_pages.contains(&number)
+        if let Some((frame, grids)) = page_geometry.remove(&number)
             && let Some(refined) = layout
                 .as_mut()
-                .and_then(|layout| layout.page(number, &pdf, id, &page.markdown))
+                .and_then(|layout| layout.page(number, frame, grids, &page.markdown))
         {
             page.markdown = refined;
         }
@@ -652,6 +667,210 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
 mod tests {
     use super::*;
     use lopdf::{content::Operation, dictionary};
+
+    #[test]
+    fn compressed_page_streams_share_state_and_keep_complete_grid_geometry() {
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let chunks: &[&[u8]] = &[
+            b"q 1 0 0 1 10 20 cm 0 g 0 G 20 50 m 220 50 l S 20 100 m 220 100 l S",
+            b"20 150 m 220 150 l S 20 50 m 20 150 l S 100 50 m 100 150 l S 220 50 m 220 150 l S Q",
+        ];
+        let mut expanded_bytes = 0;
+        let contents = chunks
+            .iter()
+            .map(|chunk| {
+                let mut bytes = b"% repeated padding makes compression worthwhile\n".repeat(16);
+                bytes.extend_from_slice(chunk);
+                expanded_bytes += bytes.len() + 1;
+                let mut stream = Stream::new(Dictionary::new(), bytes);
+                stream.compress().unwrap();
+                assert_eq!(
+                    stream.dict.get(b"Filter").unwrap().as_name().unwrap(),
+                    b"FlateDecode"
+                );
+                Object::Reference(pdf.add_object(stream))
+            })
+            .collect::<Vec<_>>();
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Contents" => contents,
+            "Resources" => dictionary! {},
+            "MediaBox" => vec![10.into(), 20.into(), 310.into(), 420.into()]
+        });
+        let (inspection, content) = inspect_page(&pdf, page);
+        assert!(inspection.warnings.is_empty());
+        assert!(inspection.signals.is_empty());
+        assert_eq!(inspection.inspected_bytes, expanded_bytes);
+        assert_eq!(inspection.inspected_streams, 1);
+        let grids = geometry::grids(&content.unwrap(), geometry::frame(&pdf, page).unwrap());
+        assert_eq!(grids.len(), 1);
+        assert_eq!(grids[0].xs, [20., 100., 220.]);
+        assert_eq!(grids[0].ys, [50., 100., 150.]);
+    }
+
+    #[test]
+    fn inspection_budget_accepts_the_boundary_and_rejects_further_content() {
+        let pdf = lopdf::Document::with_version("1.7");
+        let bytes = b"3 Tr (hidden) Tj";
+        let mut exact = PageInspection {
+            inspected_bytes: MAX_STREAM_BYTES - bytes.len(),
+            inspected_streams: 255,
+            ..Default::default()
+        };
+        assert!(
+            inspect_content(
+                &pdf,
+                bytes,
+                &[],
+                GraphicsState::default(),
+                &mut BTreeSet::new(),
+                0,
+                &mut exact
+            )
+            .is_some()
+        );
+        assert_eq!(exact.inspected_bytes, MAX_STREAM_BYTES);
+        assert_eq!(exact.inspected_streams, 256);
+        assert!(exact.signals.contains("invisible text rendering mode"));
+        assert!(exact.warnings.is_empty());
+        assert!(
+            inspect_content(
+                &pdf,
+                b"q Q",
+                &[],
+                GraphicsState::default(),
+                &mut BTreeSet::new(),
+                0,
+                &mut exact
+            )
+            .is_none()
+        );
+        assert_eq!(exact.inspected_bytes, MAX_STREAM_BYTES);
+        assert_eq!(exact.inspected_streams, 256);
+        assert_eq!(
+            exact.warnings,
+            ["Expanded page/Form content exceeds the inspection budget."]
+        );
+
+        for (inspected_bytes, inspected_streams) in
+            [(MAX_STREAM_BYTES - bytes.len() + 1, 0), (0, 256)]
+        {
+            let mut limited = PageInspection {
+                inspected_bytes,
+                inspected_streams,
+                ..Default::default()
+            };
+            assert!(
+                inspect_content(
+                    &pdf,
+                    bytes,
+                    &[],
+                    GraphicsState::default(),
+                    &mut BTreeSet::new(),
+                    0,
+                    &mut limited
+                )
+                .is_none()
+            );
+            assert!(limited.signals.is_empty());
+            assert_eq!(limited.inspected_bytes, inspected_bytes);
+            assert_eq!(limited.inspected_streams, inspected_streams);
+            assert_eq!(
+                limited.warnings,
+                ["Expanded page/Form content exceeds the inspection budget."]
+            );
+        }
+    }
+
+    #[test]
+    fn forms_at_depth_limit_are_inspected_and_deeper_forms_warn_without_geometry() {
+        for count in [32, 33] {
+            let mut pdf = lopdf::Document::with_version("1.7");
+            let mut form = pdf.add_object(Stream::new(
+                dictionary! { "Subtype" => "Form" },
+                b"3 Tr (hidden) Tj".to_vec(),
+            ));
+            for _ in 1..count {
+                form = pdf.add_object(Stream::new(dictionary! {
+                    "Subtype" => "Form", "Resources" => dictionary! { "XObject" => dictionary! { "Fm" => form } }
+                }, b"/Fm Do".to_vec()));
+            }
+            let content = pdf.add_object(Stream::new(Dictionary::new(), b"/Fm Do".to_vec()));
+            let page = pdf.add_object(dictionary! {
+                "Type" => "Page", "Contents" => content,
+                "Resources" => dictionary! { "XObject" => dictionary! { "Fm" => form } },
+                "MediaBox" => vec![0.into(), 0.into(), 300.into(), 400.into()]
+            });
+            let (inspection, content) = inspect_page(&pdf, page);
+            assert_eq!(inspection.inspected_streams, count + 1);
+            assert_eq!(
+                inspection.signals.contains("invisible text rendering mode"),
+                count == 32
+            );
+            if count == 32 {
+                assert!(inspection.warnings.is_empty());
+            } else {
+                assert_eq!(
+                    inspection.warnings,
+                    ["Form nesting exceeds the inspection limit."]
+                );
+            }
+            // Root geometry never treats a Form's partial graphics as a table.
+            assert!(
+                geometry::grids(&content.unwrap(), geometry::frame(&pdf, page).unwrap()).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_form_preserves_warning_and_prevents_text_recovery() {
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages = pdf.new_object_id();
+        let font = pdf.add_object(
+            dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+        );
+        let form = pdf.add_object(Stream::new(
+            dictionary! {
+                "Subtype" => "Form", "Filter" => "UnsupportedFilter"
+            },
+            b"3 Tr (hidden) Tj".to_vec(),
+        ));
+        let contents = pdf.add_object(Stream::new(Dictionary::new(), b"BT /F1 12 Tf 40 700 Td (Readable native words alone must not bypass an uninspected form.) Tj ET /Fm Do".to_vec()));
+        let id = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => contents,
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font }, "XObject" => dictionary! { "Fm" => form } }
+        });
+        pdf.objects.insert(pages, dictionary! { "Type" => "Pages", "Kids" => vec![id.into()], "Count" => 1, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()] }.into());
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        pdf.trailer.set("Root", catalog);
+        let (inspection, content) = inspect_page(&pdf, id);
+        assert!(content.is_some());
+        assert_eq!(inspection.warnings.len(), 1);
+        assert!(inspection.warnings[0].starts_with("Form stream inspection failed:"));
+        let mut page = pdf_inspector::PageMarkdown {
+            page: 0,
+            markdown: "Retain the dependency verdict without speculative recovery.".into(),
+            needs_ocr: true,
+            ocr_reason: Some("scanned".into()),
+        };
+        let before = page.markdown.clone();
+        let mut warnings = Vec::new();
+        recover_plain_text(&pdf, 1, id, &mut page, &inspection, &mut warnings);
+        assert!(page.needs_ocr);
+        assert_eq!(page.markdown, before);
+        assert!(warnings.is_empty());
+        // The words are recoverable: it is specifically the incomplete Form
+        // inspection that must keep this page on its warned OCR path.
+        recover_plain_text(
+            &pdf,
+            1,
+            id,
+            &mut page,
+            &PageInspection::default(),
+            &mut warnings,
+        );
+        assert!(!page.needs_ocr);
+        assert!(page.markdown.contains("Readable native words"));
+    }
 
     #[test]
     fn real_pdf_recovers_text_despite_unused_image_and_keeps_blank_page_warning() {
@@ -791,7 +1010,7 @@ mod tests {
             inspected_bytes: 0,
             inspected_streams: 0,
         };
-        inspect_content(
+        let _ = inspect_content(
             &pdf,
             &content,
             &[&resources],
