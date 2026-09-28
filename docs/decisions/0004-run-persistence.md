@@ -251,6 +251,35 @@ Sources: `batch.py:51,193,208,220,314,406,444,1048,1137,1214,1263`,
 `cli/processors/url.py:1186,1257,1270`, `security.py:130,192`,
 `utils/output.py:125`, `config.py:530`, `constants.py:18`.
 
+### Output ownership before scheduler integration (planned)
+
+Preserve independent CLI processes writing unrelated files in the same output
+directory. A whole-parent lock held across conversion or network/model requests
+would unnecessarily make those invocations fail as busy. Plan ownership around
+the actual Markdown member paths instead, using stable OS locks and deterministic
+all-or-release acquisition. The parent identity must be physical and respect the
+original symlink policy; case/Unicode aliases need filesystem-level validation.
+Stem-only identity is insufficient: `x` and `x.llm` can both address `x.llm.md`.
+Do not remove a held lock inode or infer ownership from a PID file.
+
+A failed/interrupted retry needs publication evidence bound to the complete
+scope, native generation, typed raw item key, actual member path, file object and
+bytes. Merely reading a matching digest/path from edited state is insufficient.
+Persist prepared-write evidence before atomic publication so a kill between
+rename and receipt finalization can be recovered. A prepared receipt can remain
+the evidence when its staged file identity matches the published file, avoiding
+a mandatory second receipt write just to rename its phase. These protocols still
+need bounded implementation and process tests; they are not current guarantees.
+
+Observe publication inside the core write path: the existing model failure path
+can save base Markdown and then return an error, so recording only successful
+CLI outcomes misses ownership. Integrate all cooperating CLI disk writers while
+keeping existing binding entrypoints and serialized JSON unchanged. Explicit
+fresh overwrite is a separate authority from implicit failed-item retry. Tests
+must cover competing hashes/overlapping roots, member collisions, crash windows,
+changed files and independent-output concurrency. No portable pre-rename check
+eliminates a hostile noncooperating writer's race; keep that limitation explicit.
+
 ## Optional history export (planned)
 
 Publish one job under `config::home()/serve/jobs/<12-hex-uuid-prefix>/`, honoring

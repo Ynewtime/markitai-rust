@@ -132,5 +132,7 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
 ## Round-eight recovery storage
 
 - [Storage validation](state-round8.md): 410 Rust executions /330 distinct,
-  26 harness tests and 13 matching authored legacy state/replay pairs.
+  26 harness tests and 13 matching authored legacy state/replay pairs at clean
+  `0b38e00`; [build](state-round8-build.json) and
+  [differential](state-round8-r2.json) records retain exact identities.
   The store remains internal; CLI resume, scheduling and history are pending.
