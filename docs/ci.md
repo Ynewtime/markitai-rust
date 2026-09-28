@@ -48,6 +48,8 @@ not a filesystem monitor that can detect an edit reverted between snapshots.
 ## Package license files and provenance
 
 CLI archives and C-ABI artifacts carry the repository's LICENSE and NOTICE.
+The current ZIP carries both executable aliases, `markitai` and `mkai`; report
+its archive size separately from the size of one runnable executable.
 Node staging explicitly includes both in the package's `files` list, then checks
 their bytes inside the actual `.tgz` and after installation. Installed native
 Node bytes must match the staged library.
@@ -67,3 +69,7 @@ not a completed redistribution review. The script does not sign or publish
 packages, prove compatibility on another host, test every OS version, or claim
 universal binaries. Helper unit tests use tiny authored archives and temporary
 files; passing them does not substitute for actual installed-package acceptance.
+
+The first actual macOS arm64 execution and the separate Rosetta limitation are
+recorded in [round twenty](validation/media-cli-round20.md). No remote matrix
+run is implied by that local result.

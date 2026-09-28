@@ -4,9 +4,10 @@ An implementation checkpoint is reproducible only when it records the command,
 source revision, test inputs, build profile, and platform. Passing new unit
 tests establishes specific contracts; it does not imply reference parity.
 
-Latest: [round seventeen](pdf-native-round17.md), native PDF media and rebuilt
-Python/Node/Go bindings. Workflow tests pass; exact scanned-text accuracy remains
-partial and is reported separately.
+Latest: [round twenty](media-cli-round20.md), native HEIF/AVIF, MIME images,
+CLI operation and rebuilt/installed bindings. The full arm64 gate and actual
+release workflows pass. Scoped x86_64 execution retains a Rosetta OCR failure;
+remote CI, exact OCR quality and the complete migration remain unfinished.
 
 ## Local checks
 
