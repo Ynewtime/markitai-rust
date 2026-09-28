@@ -147,10 +147,10 @@ recursively for values, JSON types and key order. It used a debug binary with
 recorded development-source provenance and disabled LLM, OCR, cache and history;
 all four reports had empty model usage. Nonzero usage has native mock/unit
 coverage; neither it nor multiple-model ordering has reference differential
-evidence from this run. The audit
-does not establish release-artifact validation, mixed/failing-run differential
-parity, paid-provider behavior or performance. A clean-source release audit is
-still pending; see the [control center](CONTROL.md) for subsequent evidence.
+evidence from this run. The subsequent [release audit](validation/reports-round7.md)
+at clean `0ab59a0` passes the same four reference cases, and rebuilt host packages
+pass their integration checks. These cases do not establish mixed/failing-run
+differential parity, paid-provider behavior or performance.
 
 Resume journals, interruption recovery and history remain planned in
 [decision 0004](decisions/0004-run-persistence.md). Report publication does not

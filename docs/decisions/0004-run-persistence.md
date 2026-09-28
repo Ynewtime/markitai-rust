@@ -2,8 +2,9 @@
 
 Status: **reports implemented; resume and history planned**. The CLI publishes
 all four report projections, including mixed file/URL directories. Source-level
-acceptance tests and a four-success-case development differential audit pass;
-clean-source release validation is pending. See [reports](../reports.md) for
+acceptance tests and a four-success-case clean-release differential audit pass
+at `0ab59a0`; rebuilt host packages also pass their scoped checks. See
+[validation](../validation/reports-round7.md) and [reports](../reports.md) for
 current runtime behavior and exact validation limits. The CLI still rejects
 `--resume` and enabled history. Structural configuration support does not imply
 runtime support for those remaining features.
@@ -173,9 +174,11 @@ in-progress entries become failed and are eligible for retry.
 
 1. Bound and parse the base; retain the reference 10 MiB base ceiling. Missing or
    corrupt base cannot be recovered solely from JSONL.
-2. Replay lines shaped `{type:"file"|"url",key,data}` in order. Update known base
-   keys only; absent fields do not clear prior fields. Skip malformed JSON lines;
-   warn on other replay failures. Bound journal/line/entry allocations too.
+2. Replay legacy lines shaped `{type:"file"|"url",key,data}` in order. Update
+   known base keys only. Absent output/error/target fields keep prior values;
+   absent status resets to pending in the reference. Skip malformed JSON syntax;
+   a semantic or decoding failure stops the remaining legacy replay and retains
+   the already-applied prefix, with a diagnostic. Bound journal/line/entry reads.
 3. Keep completed entries even if outputs disappeared. Rediscover input, merge
    new keys and preserve old entries. Directory pending entries can refer to
    deleted files; URL scheduling uses current list entries. Preserve the legacy
@@ -184,10 +187,12 @@ in-progress entries become failed and are eligible for retry.
 4. Reserve completed output names before new claims. Retry a failed/interrupted
    item at its recorded, validated owned target without `.v2`; absent a target,
    use normal conflict policy. Another item in the run always gets a distinct
-   name under rename, overwrite and skip alike.
+   name under rename, overwrite and skip alike. A merely pending entry with a
+   target does not acquire the failed-item overwrite privilege.
 5. Publish the full merged base before any newly discovered work. Persist claims
    before expensive conversion, then append dirty status records. Compact by
-   atomically replacing the base before removing the sidecar.
+   atomically replacing the base before removing the sidecar, using the replay
+   fence below so a crash between these operations cannot regress saved state.
 6. Flush on normal completion and controlled cancellation/error. Handle Ctrl-C
    explicitly and stop scheduling; scoped threads alone do not supply this
    lifecycle. Flush errors during abort must retain the original error.
@@ -200,6 +205,45 @@ Write through same-directory temporary files and sync at documented durability
 boundaries. Do not promise exactly-once paid requests: process kill between a
 provider response and a durable completion can repeat work, and no transaction
 spans provider billing and the filesystem.
+
+### Native replay fence and staged implementation
+
+This is a planned native state extension. Keep the reference `"1.0"` envelope
+and entry fields, and add namespaced checkpoint metadata containing a generation,
+applied sequence and validated run scope. Native journal events retain
+`type,key,data` plus the same generation and their sequence. Every mutation,
+including buffered completion, receives a sequence before entering a snapshot.
+On compaction, snapshot all changes through sequence N, sync the temporary base,
+atomically replace it with applied sequence N, and sync its directory where
+supported before removing/truncating the old journal and syncing that change.
+Replay ignores other generations and events at or below the base's applied
+sequence. A fresh run uses a new generation. Claims are acknowledged only after
+their events and any preceding buffered changes are flushed and synced.
+
+Without this fence, a base containing a newly completed item can be overwritten
+by an old journal's `in_progress` event after a crash between base replacement
+and journal deletion. Atomic file replacement alone does not prevent that window.
+Legacy untagged state is read with its reference rules, then upgraded under the
+exclusive lock before new work; a native tagged base must not replay leftover
+untagged events. The Python reader ignores added keys but does not implement this
+fence, so native crash guarantees do not apply to reopening these files in Python.
+No state filename/discovery change is intended.
+
+The next implementation checkpoint is an unreachable-from-CLI codec/store with
+authored legacy fixtures, bounded reads, scope checks, an OS-backed process lock
+and deterministic crash/failure tests around claim sync, base rename and journal
+cleanup. Keep the lock inode stable rather than deleting a held lock file. A
+per-state lock does not protect different task hashes or overlapping output
+roots; output claims require a separately tested ownership policy before CLI
+integration. Stored paths and six-hex hashes alone cannot prove an existing file
+still belongs to a prior run. Preserve corrupt state before fresh replacement,
+and distinguish foreign-scope state from ordinary corruption.
+
+Only after storage is validated should the scheduler add durable claim
+acknowledgements, periodic flushes, observed versus recovered outcomes and
+controlled interruption. Scoped threads do not themselves provide cancellation;
+blocking core work needs an explicit drain/cancellation policy. Keep `--resume`
+guarded until process-level retry, interruption and ownership gates pass.
 
 Sources: `batch.py:51,193,208,220,314,406,444,1048,1137,1214,1263`,
 `cli/processors/batch.py:118,147,1005,1140,1210,1428`,

@@ -123,6 +123,8 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
 ## Round-seven report implementation
 
 - [Report contracts and differential method](reports-round7.md): 296 Rust test
-  executions, 23 harness checks and four matching development report pairs.
-  Clean-source release/package evidence will be recorded after the source
-  checkpoint; history/resume and complete runtime parity remain unfinished.
+  executions, 23 harness checks and four matching release report pairs from
+  clean `0ab59a0`. Rebuilt installed Python/Node packages and Go race checks pass;
+  history/resume and complete runtime parity remain unfinished.
+- [Build identities](reports-round7-build.json), [reference report comparison](reports-round7-r4.json)
+  and [package/log records](reports-round7-artifacts.json) preserve exact evidence.
