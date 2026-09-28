@@ -1,0 +1,244 @@
+use super::*;
+use lopdf::{Object, Stream, dictionary};
+
+const PRESENTATION: &[u8] = include_bytes!("fixtures/hidden-blank-three.pptx");
+const WORD: &[u8] = include_bytes!("fixtures/blank-middle-three.docx");
+
+fn pdf(count: usize) -> Vec<u8> {
+    let mut pdf = lopdf::Document::with_version("1.5");
+    let pages = pdf.new_object_id();
+    let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
+    let children:Vec<Object>=(0..count).map(|_|pdf.add_object(dictionary!{"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),720.into(),540.into()],"Resources"=>dictionary!{},"Contents"=>content}).into()).collect();
+    pdf.objects.insert(
+        pages,
+        dictionary! {"Type"=>"Pages","Count"=>count as i64,"Kids"=>children}.into(),
+    );
+    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn all_existing_office_aliases_are_classified_without_spreadsheet_claims() {
+    for extension in ["ppt", "pps", "pot", "PPTX", "pptm", "ppsx", "ppsm", "odp"] {
+        assert_eq!(kind(extension), Some(OfficeKind::Presentation));
+    }
+    for extension in ["doc", "docx", "docm", "odt", "rtf"] {
+        assert_eq!(kind(extension), Some(OfficeKind::WordProcessing));
+    }
+    for extension in ["xls", "xlsx", "xlsm", "xlsb", "ods", "numbers"] {
+        assert_eq!(kind(extension), Some(OfficeKind::Spreadsheet));
+    }
+    assert_eq!(kind("pdf"), None);
+    assert!(matches!(
+        export_pdf(Path::new("missing.xlsx"), OfficeKind::Spreadsheet),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
+fn hidden_and_blank_slides_are_counted_and_partial_pdf_export_is_rejected() {
+    assert_eq!(
+        crate::formats::extract_presentation_count(PRESENTATION).unwrap(),
+        3
+    );
+    assert_eq!(validate_pdf(&pdf(3), Some(3)).unwrap(), 3);
+    assert!(validate_pdf(&pdf(2), Some(3)).is_err());
+    assert!(validate_pdf(&pdf(0), None).is_err());
+    assert!(validate_pdf(b"%PDF-not-a-document", None).is_err());
+}
+
+#[test]
+fn odp_counts_only_actual_slides_not_master_pages_or_nested_shapes() {
+    use std::io::{Cursor, Write};
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    archive
+        .start_file("content.xml", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    archive.write_all(br#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"><office:styles><draw:page/></office:styles><office:body><office:presentation><draw:page/><draw:page draw:style-name="hidden"><draw:frame><draw:page/></draw:frame></draw:page><draw:page/></office:presentation></office:body></office:document-content>"#).unwrap();
+    let bytes = archive.finish().unwrap().into_inner();
+    assert_eq!(slides::odp(&bytes).unwrap(), 3);
+}
+
+#[cfg(unix)]
+fn mock(root: &Path, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join("mock soffice");
+    fs::write(&path,format!("#!/bin/sh\nset -eu\nout=''\nprevious=''\nfor value in \"$@\"; do\n if [ \"$previous\" = '--outdir' ]; then out=\"$value\"; fi\n previous=\"$value\"\ndone\n{script}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+#[cfg(unix)]
+fn quote(path: &Path) -> String {
+    format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+#[test]
+fn export_requires_new_regular_correct_output_and_does_not_modify_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("报告 with spaces.pptx");
+    fs::write(&input, PRESENTATION).unwrap();
+    let fixture = dir.path().join("golden.pdf");
+    fs::write(&fixture, pdf(3)).unwrap();
+    let program = mock(
+        dir.path(),
+        &format!("cp {} \"$out/document.pdf\"", quote(&fixture)),
+    );
+    let result = export_with(
+        &program,
+        &input,
+        OfficeKind::Presentation,
+        Duration::from_secs(5),
+        MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(result.pages, 3);
+    assert_eq!(result.bytes, fs::read(&fixture).unwrap());
+    assert_eq!(fs::read(&input).unwrap(), PRESENTATION);
+    let private = result._workspace.path().to_owned();
+    assert!(private.exists());
+    drop(result);
+    assert!(!private.exists());
+    for script in [
+        "exit 0".to_owned(),
+        format!("ln -s {} \"$out/document.pdf\"", quote(&fixture)),
+        format!("cp {} \"$out/unexpected.pdf\"", quote(&fixture)),
+        "printf nope > \"$out/document.pdf\"".into(),
+        "exit 9".into(),
+    ] {
+        let program = mock(dir.path(), &script);
+        assert!(
+            export_with(
+                &program,
+                &input,
+                OfficeKind::Presentation,
+                Duration::from_secs(5),
+                MAX_BYTES
+            )
+            .is_err(),
+            "{script}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn timeout_kills_child_group_and_output_growth_stops_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.docx");
+    fs::write(&input, WORD).unwrap();
+    let pidfile = dir.path().join("child.pid");
+    let program = mock(
+        dir.path(),
+        &format!("sleep 30 &\necho $! > {}\nwait", quote(&pidfile)),
+    );
+    // Exercise child cleanup directly; the unrelated global permit queue may
+    // otherwise consume the entire deadline before the child has started.
+    let profile = dir.path().join("profile");
+    let output = dir.path().join("output");
+    fs::create_dir(&profile).unwrap();
+    fs::create_dir(&output).unwrap();
+    let start = Instant::now();
+    let error = process::convert(
+        &program,
+        &input,
+        &output,
+        &profile,
+        "pdf",
+        Instant::now() + Duration::from_millis(500),
+        MAX_BYTES,
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("timed out"));
+    assert!(start.elapsed() < Duration::from_secs(5));
+    let pid = fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    // kill(pid,0) can briefly see a reparented zombie. It must be gone after reaping.
+    let stop = Instant::now() + Duration::from_secs(2);
+    while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < stop {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "Office child survived its deadline"
+    );
+    let program = mock(
+        dir.path(),
+        "dd if=/dev/zero of=\"$out/document.pdf\" bs=1024 count=16 2>/dev/null\nsleep 30",
+    );
+    let start = Instant::now();
+    let error = export_with(
+        &program,
+        &input,
+        OfficeKind::WordProcessing,
+        Duration::from_secs(5),
+        8192,
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("byte limit"));
+    assert!(start.elapsed() < Duration::from_secs(3));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Requires installed LibreOffice; run explicitly for real renderer acceptance"]
+fn installed_libreoffice_keeps_hidden_blank_slides_and_full_frame_pixels() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("original.pptx");
+    fs::write(&path, PRESENTATION).unwrap();
+    let result = export_pdf(&path, OfficeKind::Presentation).unwrap();
+    assert_eq!(result.pages, 3);
+    let session = crate::pdf_raster::PdfRasterSession::open(&result.bytes).unwrap();
+    assert_eq!(session.pages(), 3);
+    for (page, expected) in [
+        (1, [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]),
+        (2, [[0, 255, 255], [255, 0, 255], [0, 255, 0], [255, 0, 0]]),
+    ] {
+        let pixels = session.render(page, 72.).unwrap();
+        assert_eq!(pixels.dimensions(), (720, 540));
+        for ((x, y), color) in [(36, 36), (684, 36), (36, 504), (684, 504)]
+            .into_iter()
+            .zip(expected)
+        {
+            for (actual, wanted) in pixels.get_pixel(x, y).0.into_iter().zip(color) {
+                assert!(
+                    (i16::from(actual) - wanted as i16).abs() < 8,
+                    "page {page} corner {x},{y}"
+                );
+            }
+        }
+    }
+    let blank = session.render(3, 72.).unwrap();
+    assert!(blank.pixels().all(|p| p.0 == [255, 255, 255]));
+    let pdf = lopdf::Document::load_mem(&result.bytes).unwrap();
+    assert!(pdf.extract_text(&[1]).unwrap().contains("VISIBLE FIRST"));
+    assert!(pdf.extract_text(&[2]).unwrap().contains("HIDDEN SECOND"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Requires installed LibreOffice; run explicitly for real renderer acceptance"]
+fn installed_libreoffice_preserves_word_explicit_blank_middle_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("original.docx");
+    fs::write(&path, WORD).unwrap();
+    let result = export_pdf(&path, OfficeKind::WordProcessing).unwrap();
+    assert_eq!(result.pages, 3);
+    let pdf = lopdf::Document::load_mem(&result.bytes).unwrap();
+    assert!(pdf.extract_text(&[1]).unwrap().contains("WORD FIRST PAGE"));
+    assert!(pdf.extract_text(&[3]).unwrap().contains("WORD THIRD PAGE"));
+    assert!(pdf.extract_text(&[2]).unwrap().trim().is_empty());
+    let session = crate::pdf_raster::PdfRasterSession::open(&result.bytes).unwrap();
+    let blank = session.render(2, 72.).unwrap();
+    assert_eq!(blank.dimensions(), (612, 792));
+    assert!(blank.pixels().all(|p| p.0 == [255, 255, 255]));
+}

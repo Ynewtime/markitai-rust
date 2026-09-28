@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CAPACITY: i64 = 512 * 1024 * 1024;
 const MAX_ENTRY_BYTES: i64 = 100 * 1024 * 1024;
@@ -67,6 +67,13 @@ fn now() -> i64 {
 pub(crate) fn key(content: &str, prompt_scope: &str, model_scope: &str) -> String {
     let content_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
     let combined = format!("native-markdown-v1:{prompt_scope}|{model_scope}|{content_hash}");
+    format!("{:x}", Sha256::digest(combined.as_bytes()))[..32].to_owned()
+}
+
+/// Typed document rows cannot collide with legacy Markdown-only answers.
+pub(crate) fn document_key(content: &str, prompt_scope: &str, model_scope: &str) -> String {
+    let content_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+    let combined = format!("native-document-v1:{prompt_scope}|{model_scope}|{content_hash}");
     format!("{:x}", Sha256::digest(combined.as_bytes()))[..32].to_owned()
 }
 
@@ -160,7 +167,16 @@ pub(crate) fn bypasses(cfg: &Value, context: &str) -> bool {
     let path_end = path[after_drive..]
         .find(':')
         .map_or(path.len(), |index| after_drive + index);
-    let filename = path[..path_end].rsplit('/').next().unwrap_or("");
+    let filename = if path.starts_with("http://") || path.starts_with("https://") {
+        path.split(['?', '#'])
+            .next()
+            .unwrap_or(&path)
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+    } else {
+        path[..path_end].rsplit('/').next().unwrap_or("")
+    };
     cfg.pointer("/cache/no_cache_patterns")
         .and_then(Value::as_array)
         .into_iter()
@@ -180,6 +196,14 @@ impl Cache {
     }
 
     pub(crate) fn get(&self, key: &str) -> Result<Option<String>> {
+        match self.get_json(key)? {
+            Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text)),
+            Some(Value::String(_)) | None => Ok(None),
+            Some(_) => Err(unavailable()),
+        }
+    }
+
+    pub(crate) fn get_json(&self, key: &str) -> Result<Option<Value>> {
         if self.skip_read {
             return Ok(None);
         }
@@ -198,10 +222,7 @@ impl Cache {
         let Some(value) = value.flatten() else {
             return Ok(None);
         };
-        let answer: String = serde_json::from_str(&value).map_err(|_| unavailable())?;
-        if answer.trim().is_empty() {
-            return Ok(None);
-        }
+        let answer: Value = serde_json::from_str(&value).map_err(|_| unavailable())?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| unavailable())?;
@@ -219,24 +240,16 @@ impl Cache {
         if answer.trim().is_empty() {
             return Ok(());
         }
+        self.set_json(key, model, &Value::String(answer.to_owned()))
+    }
+
+    pub(crate) fn set_json(&self, key: &str, model: &str, answer: &Value) -> Result<()> {
         let value = serde_json::to_string(answer).map_err(|_| unavailable())?;
         let size = i64::try_from(value.len()).map_err(|_| unavailable())?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|_| unavailable())?;
         }
-        let mut connection = open(
-            &self.path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(|_| unavailable())?;
-        connection
-            .pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|_| unavailable())?;
-        connection
-            .execute_batch(SCHEMA)
-            .map_err(|_| unavailable())?;
+        let mut connection = initialize_writer(&self.path)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| unavailable())?;
@@ -272,6 +285,70 @@ impl Cache {
         transaction.commit().map_err(|_| unavailable())?;
         Ok(())
     }
+}
+
+// WAL migration upgrades a read lock and can return BUSY without invoking
+// SQLite's busy handler. Retrying a fresh connection releases that read lock;
+// retrying the insertion transaction would have a different correctness scope.
+fn initialize_writer(path: &Path) -> Result<Connection> {
+    initialize_writer_with_wait(path, Duration::from_secs(30), &mut std::thread::sleep)
+}
+
+fn initialize_writer_with_wait(
+    path: &Path,
+    timeout: Duration,
+    wait: &mut dyn FnMut(Duration),
+) -> Result<Connection> {
+    let started = Instant::now();
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        // No single internal busy wait can outlive the total initialization
+        // deadline. Short attempts also release migration locks promptly.
+        let result = initialize_writer_once(path, remaining.min(Duration::from_millis(100)));
+        match result {
+            Ok(connection) => {
+                // Ordinary row transactions retain their existing busy policy;
+                // only the idempotent initialization above is replayed.
+                connection
+                    .busy_timeout(Duration::from_secs(30))
+                    .map_err(|_| unavailable())?;
+                return Ok(connection);
+            }
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Err(unavailable());
+                }
+                wait(remaining.min(Duration::from_millis(10)));
+            }
+            Err(_) => return Err(unavailable()),
+        }
+    }
+}
+
+fn initialize_writer_once(path: &Path, timeout: Duration) -> rusqlite::Result<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
+    connection.busy_timeout(timeout)?;
+    connection.pragma_update(None, "trusted_schema", "OFF")?;
+    let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        let mode: String =
+            connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.execute_batch(SCHEMA)?;
+    Ok(connection)
 }
 
 fn open(path: &Path, flags: OpenFlags) -> Result<Connection> {
@@ -318,6 +395,10 @@ fn preview(raw: &str) -> String {
         Ok(value) if value.get("caption").is_some() => {
             ("image", value["caption"].as_str().unwrap_or("").into())
         }
+        Ok(value) if value.get("cleaned_markdown").is_some() => (
+            "document",
+            value["cleaned_markdown"].as_str().unwrap_or("").into(),
+        ),
         Ok(value) if value.get("title").is_some() => {
             ("frontmatter", value["title"].as_str().unwrap_or("").into())
         }
@@ -434,6 +515,207 @@ mod tests {
 
     fn configuration(directory: &Path, size: i64) -> Value {
         json!({"cache":{"enabled":true,"global_dir":directory,"max_size_bytes":size}})
+    }
+
+    #[test]
+    fn rollback_lock_during_wal_initialization_is_retried_after_release() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cache.db");
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("CREATE TABLE existing(value TEXT); INSERT INTO existing VALUES ('retained'); BEGIN IMMEDIATE;").unwrap();
+        let mut retries = 0;
+        let writer = initialize_writer_with_wait(&path, Duration::from_secs(2), &mut |_| {
+            retries += 1;
+            assert_eq!(retries, 1);
+            holder.execute_batch("COMMIT").unwrap();
+        })
+        .unwrap();
+        assert_eq!(
+            retries, 1,
+            "held rollback lock must exercise migration contention"
+        );
+        let mode: String = writer
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        assert_eq!(
+            writer
+                .query_row("SELECT value FROM existing", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "retained"
+        );
+        drop(writer);
+        let cfg = configuration(root.path(), 10_000);
+        let cache = Cache::configured(&cfg, "").unwrap();
+        let value = json!({"cleaned_markdown":"body","description":"description","tags":["tag"]});
+        cache.set_json("new", "pool", &value).unwrap();
+        assert_eq!(cache.get_json("new").unwrap(), Some(value));
+    }
+
+    #[test]
+    fn initialization_contention_deadline_and_corruption_remain_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cache.db");
+        let holder = Connection::open(&path).unwrap();
+        holder
+            .execute_batch("CREATE TABLE existing(value TEXT); BEGIN IMMEDIATE;")
+            .unwrap();
+        let failure = initialize_writer_with_wait(&path, Duration::ZERO, &mut |_| {
+            panic!("expired deadline must not wait")
+        });
+        assert!(failure.is_err());
+        holder.execute_batch("ROLLBACK").unwrap();
+        let bad = root.path().join("malformed.db");
+        std::fs::write(&bad, b"private malformed database bytes").unwrap();
+        let failure = initialize_writer_with_wait(&bad, Duration::from_secs(30), &mut |_| {
+            panic!("corruption must not retry")
+        });
+        assert_eq!(
+            failure.unwrap_err().to_string(),
+            "Persistent LLM cache is unavailable"
+        );
+        assert_eq!(
+            std::fs::read(bad).unwrap(),
+            b"private malformed database bytes"
+        );
+    }
+
+    #[test]
+    #[ignore = "child process for first-write cache coordination"]
+    fn fresh_cache_process_writer() {
+        let root = PathBuf::from(
+            std::env::var_os("MARKITAI_CACHE_TEST_ROOT").expect("private test directory"),
+        );
+        let key = std::env::var("MARKITAI_CACHE_TEST_KEY").expect("test key");
+        std::fs::write(root.join(format!("ready-{key}")), b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !root.join("release").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "parent did not release cache writers"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let cache = Cache::configured(&configuration(&root, 1_000_000), "").unwrap();
+        cache
+            .set_json(
+                &key,
+                "pool",
+                &json!({"cleaned_markdown":key,"description":"child","tags":["topic"]}),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn independent_processes_create_one_cache_without_losing_rows() {
+        struct Workers(Vec<std::process::Child>);
+        impl Drop for Workers {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    if child.try_wait().ok().flatten().is_none() {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut workers = Workers(Vec::new());
+        for index in 0..4 {
+            workers.0.push(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "llm_cache::tests::fresh_cache_process_writer",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("MARKITAI_CACHE_TEST_ROOT", root.path())
+                    .env("MARKITAI_CACHE_TEST_KEY", index.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !(0..4).all(|index| root.path().join(format!("ready-{index}")).exists()) {
+            assert!(
+                Instant::now() < deadline,
+                "cache child did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!root.path().join("cache.db").exists());
+        std::fs::write(root.path().join("release"), b"release").unwrap();
+        for child in &mut workers.0 {
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "cache child failed: {status}");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "cache child exceeded deadline");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let cache = Cache::configured(&configuration(root.path(), 1_000_000), "").unwrap();
+        for index in 0..4 {
+            let key = index.to_string();
+            assert_eq!(
+                cache.get_json(&key).unwrap().unwrap()["cleaned_markdown"],
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn simultaneous_first_writes_preserve_every_typed_chunk_without_prewarming() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg = configuration(root.path(), 1_000_000);
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8).map(|i| {
+            let cfg = cfg.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let cache = Cache::configured(&cfg, "").unwrap();
+                let answer = json!({"cleaned_markdown":format!("chunk {i}"),"description":"summary","tags":["topic"]});
+                cache.set_json(&i.to_string(), "pool", &answer).unwrap();
+            })
+        }).collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let cache = Cache::configured(&cfg, "").unwrap();
+        for i in 0..8 {
+            assert_eq!(
+                cache.get_json(&i.to_string()).unwrap().unwrap()["cleaned_markdown"],
+                format!("chunk {i}")
+            );
+        }
+        assert_eq!(stats(&cfg, false, 20).unwrap()["cache"]["count"], 8);
+    }
+
+    #[test]
+    fn typed_rows_are_isolated_preserved_and_url_globs_use_url_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = configuration(dir.path(), 10_000);
+        let cache = Cache::configured(&cfg, "https://example.test/article.md?q=1").unwrap();
+        let legacy = key("body", "prompt", "pool");
+        let typed = document_key("body", "prompt", "pool");
+        assert_ne!(legacy, typed);
+        cache.set(&legacy, "pool", "legacy Markdown").unwrap();
+        let value = json!({"cleaned_markdown":"body","description":"summary","tags":["topic"]});
+        cache.set_json(&typed, "pool", &value).unwrap();
+        assert_eq!(cache.get_json(&typed).unwrap(), Some(value));
+        assert_eq!(
+            cache.get(&legacy).unwrap().as_deref(),
+            Some("legacy Markdown")
+        );
+        assert!(cache.get(&typed).is_err());
+        let bypass = json!({"cache":{"no_cache_patterns":["article.md"]}});
+        assert!(bypasses(&bypass, "https://example.test/article.md?q=1"));
+        assert!(!bypasses(&bypass, "https://example.test/other.md"));
     }
 
     #[test]

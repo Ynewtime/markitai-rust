@@ -60,8 +60,10 @@ impl ModelServer {
                     }
                     assert!(request.len() < 1024 * 1024);
                 }
+                let split = request.windows(4).position(|s| s == b"\r\n\r\n").unwrap();
+                let payload: Value = serde_json::from_slice(&request[split + 4..]).unwrap();
                 let generation = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                let body = json!({"choices":[{"message":{"content":format!("# Enhanced\n\nGeneration {generation}. 世界")},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}).to_string();
+                let body = json!({"choices":[{"message":{"content":model_content(&payload,&format!("# Enhanced\n\nGeneration {generation}. 世界"))},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}).to_string();
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
         });
@@ -313,4 +315,26 @@ fn stats_clear_and_incomplete_store_preflight_preserve_entries() {
     assert!(quiet.status.success());
     assert!(quiet.stderr.is_empty());
     assert_eq!(server.count(), 5);
+}
+
+// Document cleanup is structured; pure vision and connection probes remain text.
+fn model_content(request: &Value, markdown: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    if !messages.iter().any(|message| {
+        message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("MARKITAI_DOCUMENT_JSON_V1"))
+    }) {
+        return markdown.to_owned();
+    }
+    // Echo protected source spans once and in order; test-specific output still
+    // identifies the model invocation/generation used by the existing assertions.
+    let source = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
 }

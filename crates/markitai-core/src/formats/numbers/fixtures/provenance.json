@@ -1,0 +1,28 @@
+{
+  "repository": "https://github.com/masaccio/numbers-parser",
+  "revision": "726bd6cbbfe1d00ec5449865a51eb7a4a3f472aa",
+  "license": "MIT",
+  "license_file": "LICENSE.rst",
+  "files": {
+    "test-1.numbers": {
+      "upstream_path": "tests/data/test-1.numbers",
+      "bytes": 173690,
+      "sha256": "b9e9772b2d2866c26d773fe46a173c373c7dc1dd3df6cefc7f0253b6ab50d4c3",
+      "url": "https://raw.githubusercontent.com/masaccio/numbers-parser/726bd6cbbfe1d00ec5449865a51eb7a4a3f472aa/tests/data/test-1.numbers"
+    },
+    "test-formats.numbers": {
+      "upstream_path": "tests/data/test-formats.numbers",
+      "bytes": 191313,
+      "sha256": "9b3ba4b52b2eb3ffd1e05602ab7da954abb2da7f37e68b147725d31777e1cda3",
+      "url": "https://raw.githubusercontent.com/masaccio/numbers-parser/726bd6cbbfe1d00ec5449865a51eb7a4a3f472aa/tests/data/test-formats.numbers"
+    },
+    "LICENSE.rst": {
+      "upstream_path": "LICENSE.rst",
+      "bytes": 1050,
+      "sha256": "f2f4dad7ee4a49d1eb4e953dae585e3b9d34e445917843cca6357b06349a31ce",
+      "url": "https://raw.githubusercontent.com/masaccio/numbers-parser/726bd6cbbfe1d00ec5449865a51eb7a4a3f472aa/LICENSE.rst"
+    }
+  },
+  "expected_values_source": "https://github.com/masaccio/numbers-parser/blob/726bd6cbbfe1d00ec5449865a51eb7a4a3f472aa/tests/test_tables.py",
+  "notes": "Unmodified public upstream test fixtures, independent of the iwork decoder. No local Apple application was used to create or inspect them."
+}

@@ -4,9 +4,11 @@ mod html;
 mod markup;
 mod msg;
 mod native;
+mod numbers;
 mod text;
 
 pub use html::extract_html;
+pub(crate) use native::extract_presentation_count;
 #[cfg(test)]
 pub(crate) use native::pdf::extract_pages as extract_pdf_pages;
 pub(crate) use native::pdf::{
@@ -43,6 +45,7 @@ pub fn supports_extension(extension: &str) -> bool {
             | "org"
             | "tex"
             | "latex"
+            | "numbers"
     ) || anydoc::Format::from_extension(&extension).is_some()
 }
 
@@ -55,11 +58,30 @@ pub fn extract(path: &Path) -> Result<Document> {
         .to_ascii_lowercase();
     if !supports_extension(&extension) {
         return Err(Error::Unsupported(format!(
-            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, EML/MSG email, PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Org, RST and TeX. Image OCR is available through the conversion API on supported platforms; the Numbers reader is not implemented yet.",
+            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, EML/MSG email, PDF, Word, PowerPoint, Excel, Numbers, OpenDocument, RTF, EPUB, Org, RST and TeX. Image OCR is available through the conversion API on supported platforms.",
             extension
         )));
     }
-    let bytes = std::fs::read(path)?;
+    let bytes = if extension == "numbers" {
+        use std::io::Read;
+        const LIMIT: u64 = 128 * 1024 * 1024;
+        let file = std::fs::File::open(path)?;
+        if file.metadata()?.len() > LIMIT {
+            return Err(Error::Conversion(
+                "Numbers package exceeds the 128 MiB limit".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > LIMIT {
+            return Err(Error::Conversion(
+                "Numbers package exceeds the 128 MiB limit".into(),
+            ));
+        }
+        bytes
+    } else {
+        std::fs::read(path)?
+    };
     let mut result = match extension.as_str() {
         "txt" | "md" | "markdown" => Document {
             markdown: text::decode(&bytes)?,
@@ -75,6 +97,7 @@ pub fn extract(path: &Path) -> Result<Document> {
         "xml" => text::xml(&text::decode(&bytes)?)?,
         "eml" => text::email(&bytes)?,
         "msg" => msg::extract(&bytes)?,
+        "numbers" => numbers::extract(&bytes)?,
         "rst" | "org" | "tex" | "latex" => markup::extract(&text::decode(&bytes)?, &extension)?,
         _ => native::extract(&bytes, &extension)?,
     };
@@ -95,11 +118,11 @@ mod tests {
     fn format_support_does_not_promise_unimplemented_readers() {
         for extension in [
             ".DOCX", "pdf", "pptx", "xls", "ods", "eml", "markdown", "tsv", "org", "rst", "tex",
-            "latex", "msg",
+            "latex", "msg", "numbers",
         ] {
             assert!(supports_extension(extension), "{extension}");
         }
-        for extension in ["", "exe", "png", "heic", "numbers"] {
+        for extension in ["", "exe", "png", "heic"] {
             assert!(!supports_extension(extension), "{extension}");
         }
     }

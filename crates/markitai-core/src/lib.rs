@@ -11,6 +11,8 @@ pub mod llm_cache;
 mod llm_runtime;
 mod markdown;
 mod ocr;
+mod office_media;
+mod office_render;
 pub mod output;
 mod output_profiles;
 mod pdf_media;
@@ -32,6 +34,10 @@ pub fn local_ocr_available() -> bool {
 
 pub fn pdf_raster_available() -> bool {
     pdf_raster::available()
+}
+
+pub fn office_render_available() -> bool {
+    office_render::available() && pdf_raster::available()
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -126,6 +132,16 @@ pub fn convert_with_publication(
             .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
     let mut pdf_media_requested = pdf_input
         && (config::enabled(&cfg, "/ocr/enabled") || config::enabled(&cfg, "/screenshot/enabled"));
+    let office_kind = if is_url {
+        None
+    } else {
+        input_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .and_then(office_render::kind)
+    };
+    let office_media_requested = office_kind.is_some()
+        && (config::enabled(&cfg, "/ocr/enabled") || config::enabled(&cfg, "/screenshot/enabled"));
     if !is_url {
         let path = &input_path;
         output::check_path(path, config::enabled(&cfg, "/output/allow_symlinks"))?;
@@ -158,6 +174,9 @@ pub fn convert_with_publication(
             "{} is an image file with no text to extract. Enable LLM (llm=True) or OCR (ocr=True) for content extraction.",
             input_path.file_name().unwrap_or_default().to_string_lossy()
         )));
+    }
+    if office_media_requested && office_kind == Some(office_render::OfficeKind::Spreadsheet) {
+        return Err(Error::Unsupported("Spreadsheet page screenshots and OCR are not supported; convert the native tables without screenshot or OCR options".into()));
     }
     let name = if is_url {
         output::url_name(source, &Default::default())
@@ -266,6 +285,19 @@ pub fn convert_with_publication(
     } else {
         formats::extract(&input_path)?
     };
+    if office_media_requested {
+        let (captured, reliable) = office_media::prepare(
+            &mut doc,
+            &input_path,
+            office_kind.expect("Office media requires a known format"),
+            screenshot_prefix(&name, &cfg),
+            output_dir.as_deref(),
+            &cfg,
+            vlm_disabled,
+        )?;
+        screenshots = captured;
+        pdf_has_reliable_text = reliable;
+    }
     let format = doc
         .metadata
         .get("format")
@@ -284,10 +316,7 @@ pub fn convert_with_publication(
             ));
         }
     }
-    if (format == "PDF" && !pdf_media_requested
-        || matches!(format, "PPTX" | "PPT" | "PPTM" | "PPSX" | "PPSM"))
-        && config::enabled(&cfg, "/screenshot/enabled")
-    {
+    if format == "PDF" && !pdf_media_requested && config::enabled(&cfg, "/screenshot/enabled") {
         return Err(Error::Unsupported(
             "Document screenshots are not implemented in this development build".into(),
         ));
@@ -339,11 +368,12 @@ pub fn convert_with_publication(
             name.clone()
         };
         let pure = config::enabled(&cfg, "/llm/pure");
-        let pdf_screenshot_only = pdf_input
+        let pdf_screenshot_only = (pdf_input || office_media_requested)
             && !(is_url && pure)
             && !screenshots.is_empty()
             && config::enabled(&cfg, "/screenshot/screenshot_only");
-        let send_pdf_images = pdf_input && (!pure || pdf_screenshot_only);
+        let send_pdf_images =
+            (pdf_input || office_media_requested) && (!pure || pdf_screenshot_only);
         let input = if pdf_screenshot_only {
             ""
         } else if pure {
@@ -356,6 +386,7 @@ pub fn convert_with_publication(
             usage,
             cache_hit: false,
             warnings: Vec::new(),
+            metadata: None,
         };
         let enhanced = if (is_url && !pure || send_pdf_images) && !screenshots.is_empty() {
             let image_refs: Vec<_> = screenshots
@@ -383,11 +414,12 @@ pub fn convert_with_publication(
                 context.llm_runtime,
             )
             .map(without_cache)
-        } else if !pure && !is_url {
-            llm::enhance_with_cache_and_runtime(
+        } else if !pure {
+            llm::process_document_with_runtime(
                 input,
                 &source_context,
                 source,
+                doc.metadata.get("content_profile").and_then(Value::as_str) == Some("social_post"),
                 &cfg,
                 context.llm_runtime,
             )
@@ -400,17 +432,30 @@ pub fn convert_with_publication(
                 let markdown = enhancement.markdown;
                 result.llm_cache_hit = enhancement.cache_hit;
                 result.warnings.extend(enhancement.warnings);
-                let (meta, body) = output::split_frontmatter(&markdown);
+                let (meta, body) = if enhancement.metadata.is_some() {
+                    // Typed metadata is separate from the document body. Source
+                    // YAML inside cleaned_markdown remains source content.
+                    (serde_json::Map::new(), markdown.as_str())
+                } else {
+                    output::split_frontmatter(&markdown)
+                };
                 if pure {
                     let prefix_len = markdown.len() - body.len();
                     result.pure_llm_prefix =
                         (prefix_len > 0).then(|| markdown[..prefix_len].to_owned());
                     result.frontmatter = meta;
+                } else if let Some(metadata) = enhancement.metadata {
+                    result
+                        .frontmatter
+                        .insert("description".into(), json!(metadata.description));
+                    result
+                        .frontmatter
+                        .insert("tags".into(), json!(metadata.tags));
                 } else {
                     result
                         .frontmatter
                         .extend(meta.into_iter().filter(|(key, _)| {
-                            !["source", "markitai_processed"].contains(&key.as_str())
+                            !["title", "source", "markitai_processed"].contains(&key.as_str())
                         }));
                 }
                 result.llm_markdown = Some(if pure {
@@ -425,10 +470,12 @@ pub fn convert_with_publication(
                         if index > 0 {
                             enhanced.push('\n');
                         }
-                        enhanced.push_str(&formats::pdf_screenshot_reference(
-                            index + 1,
-                            &screenshot.name,
-                        ));
+                        enhanced.push_str(&match office_kind {
+                            Some(kind) => {
+                                office_media::reference(kind, index + 1, &screenshot.name)
+                            }
+                            None => formats::pdf_screenshot_reference(index + 1, &screenshot.name),
+                        });
                     }
                 }
                 result.usage = enhancement.usage;
@@ -438,7 +485,9 @@ pub fn convert_with_publication(
                     return Err(error);
                 }
                 if output_dir.is_none()
-                    && (screenshot_only || pdf_media_requested && !pdf_has_reliable_text)
+                    && (screenshot_only
+                        || (pdf_media_requested || office_media_requested)
+                            && !pdf_has_reliable_text)
                 {
                     // A failed visual-only memory request has no base text or
                     // persistent screenshots that could make fallback useful.
@@ -452,8 +501,8 @@ pub fn convert_with_publication(
                             &name,
                             &mut result,
                             &doc.assets,
-                            if pdf_input {
-                                output::Screenshots::PublishedPdf(&screenshots)
+                            if pdf_input || office_media_requested {
+                                output::Screenshots::PublishedPages(&screenshots)
                             } else {
                                 output::Screenshots::New(&screenshots)
                             },
@@ -491,8 +540,8 @@ pub fn convert_with_publication(
                     &name,
                     &mut result,
                     &doc.assets,
-                    if pdf_input {
-                        output::Screenshots::PublishedPdf(&screenshots)
+                    if pdf_input || office_media_requested {
+                        output::Screenshots::PublishedPages(&screenshots)
                     } else {
                         output::Screenshots::New(&screenshots)
                     },
@@ -509,6 +558,7 @@ pub fn convert_with_publication(
     if let Some(scope) = document_scope {
         result.usage = scope.usage();
         if result.usage.requests > 0 {
+            result.llm_cache_hit = false;
             result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
         }
     }
@@ -519,8 +569,8 @@ pub fn convert_with_publication(
             &name,
             &mut result,
             &doc.assets,
-            if pdf_input {
-                output::Screenshots::PublishedPdf(&screenshots)
+            if pdf_input || office_media_requested {
+                output::Screenshots::PublishedPages(&screenshots)
             } else {
                 output::Screenshots::New(&screenshots)
             },
@@ -530,6 +580,14 @@ pub fn convert_with_publication(
     }
     result.duration = start.elapsed().as_secs_f64();
     Ok(result)
+}
+
+fn screenshot_prefix<'a>(name: &'a str, cfg: &'a Value) -> &'a str {
+    cfg.pointer("/output/filename")
+        .and_then(Value::as_str)
+        .map(|name| name.strip_suffix(".md").unwrap_or(name))
+        .or_else(|| cfg.pointer("/output/reserved_stem").and_then(Value::as_str))
+        .unwrap_or(name)
 }
 
 fn prepare_pdf_media(
@@ -544,12 +602,7 @@ fn prepare_pdf_media(
             "PDF hidden-text removal is not implemented in this development build".into(),
         ));
     }
-    let prefix = cfg
-        .pointer("/output/filename")
-        .and_then(Value::as_str)
-        .map(|name| name.strip_suffix(".md").unwrap_or(name))
-        .or_else(|| cfg.pointer("/output/reserved_stem").and_then(Value::as_str))
-        .unwrap_or(name);
+    let prefix = screenshot_prefix(name, cfg);
     let mut prepared = pdf_media::prepare(bytes, prefix, cfg, vlm_disabled)?;
     let reliable = prepared.has_reliable_text;
     // Freeze capture names before page references or model inputs are assembled.

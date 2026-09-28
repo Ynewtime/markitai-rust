@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 #[path = "office.rs"]
 mod office;
+pub(crate) use office::extract_presentation_count;
 #[path = "office_meta.rs"]
 mod office_meta;
 #[path = "pdf.rs"]

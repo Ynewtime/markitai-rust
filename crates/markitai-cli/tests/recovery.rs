@@ -396,7 +396,7 @@ fn serve(mut stream: TcpStream, shared: Arc<(Mutex<HttpState>, Condvar)>, stop: 
         )
     } else if method == "POST" {
         ("200 OK", "application/json", json!({
-            "choices":[{"message":{"content":format!("# Enhanced\n\n{marker} response.")},"finish_reason":"stop"}],
+            "choices":[{"message":{"content":model_content(&serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap(),&format!("# Enhanced\n\n{marker} response."))},"finish_reason":"stop"}],
             "usage":{"prompt_tokens":7,"completion_tokens":3}
         }).to_string())
     } else {
@@ -1629,4 +1629,26 @@ fn largest_valid_flush_interval_does_not_panic_or_lose_final_state() {
         snapshot(&root.join("out"))["documents"]["note.txt"]["status"],
         "completed"
     );
+}
+
+// Document cleanup is structured; pure vision and connection probes remain text.
+fn model_content(request: &Value, markdown: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    if !messages.iter().any(|message| {
+        message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("MARKITAI_DOCUMENT_JSON_V1"))
+    }) {
+        return markdown.to_owned();
+    }
+    // Echo protected source spans once and in order; test-specific output still
+    // identifies the model invocation/generation used by the existing assertions.
+    let source = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
 }

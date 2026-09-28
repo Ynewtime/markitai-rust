@@ -787,6 +787,43 @@ fn cached_points(node: Option<&Node>) -> Result<BTreeMap<usize, String>> {
     Ok(result)
 }
 
+/// Count the ordered, referenced slides, including hidden and empty slides.
+pub(crate) fn extract_presentation_count(bytes: &[u8]) -> Result<usize> {
+    let mut package = Package::new(bytes)?;
+    let root = package.relationships("")?;
+    let presentation =
+        related(&root, "", "/officeDocument")?.unwrap_or_else(|| "ppt/presentation.xml".into());
+    let tree = package.tree(&presentation)?;
+    let rels = package.relationships(&presentation)?;
+    let list = tree
+        .descendant(Ns::Presentation, "sldIdLst")
+        .ok_or_else(|| error("presentation has no slide list"))?;
+    let mut paths = std::collections::HashSet::new();
+    for node in list
+        .children
+        .iter()
+        .filter(|node| node.is(Ns::Presentation, "sldId"))
+    {
+        let rel = node
+            .relation("id")
+            .and_then(|id| rels.get(id))
+            .filter(|rel| !rel.external && rel.kind.ends_with("/slide"))
+            .ok_or_else(|| error("slide relationship missing or external"))?;
+        let path = resolve(&presentation, &rel.target)?;
+        if !paths.insert(path.clone()) || paths.len() > MAX_SLIDES {
+            return Err(error("duplicate slide reference or slide limit exceeded"));
+        }
+        let slide = package.tree(&path)?;
+        if !slide.is(Ns::Presentation, "sld") {
+            return Err(error("slide relationship does not identify a slide"));
+        }
+    }
+    if paths.is_empty() {
+        return Err(error("presentation has no slides"));
+    }
+    Ok(paths.len())
+}
+
 pub(super) fn extract_presentation(bytes: &[u8]) -> Result<Document> {
     let mut reader = Reader {
         package: Package::new(bytes)?,

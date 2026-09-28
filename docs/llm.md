@@ -119,7 +119,9 @@ so an exhausted budget does not wait needlessly.
 `llm.max_requests_per_document` counts every HTTP attempt, including failed
 requests, transport retries and fallback groups. Zero disables this budget.
 One conversion-scoped counter is shared by document enhancement, image analysis
-and structured-answer fallback calls. Nested conversions restore the caller's
+and structured-answer fallback calls. Parallel document chunks explicitly share an
+`Arc<Mutex>` accounting context; creating a worker does not reset its allowance.
+Nested conversions restore the caller's
 counter on return or unwinding; each independent conversion starts a new budget.
 
 `LlmRuntime` supplies the request capacity for one caller-controlled run. A CLI
@@ -179,25 +181,74 @@ fails with a configuration diagnostic. Default `~/.markitai/...` paths honor
 `MARKITAI_HOME` isolation.
 
 Templates support `{source}`, `{timestamp}`, `{mode_rules}`, `{content}` and
-`{metadata_section}`. The metadata-section placeholder is currently empty.
+`{metadata_section}`. For non-pure text processing the metadata placeholder carries
+the typed JSON contract. The same contract is appended to custom system templates;
+custom prompts do not bypass response validation. Pure and current vision prompts
+retain their existing behavior, including an empty metadata placeholder.
 Document content is inserted last so literal braces inside a document are not
 interpreted as template placeholders. The default user template is exactly
 `{content}`: pure mode sends the supplied Markdown unchanged. Its fresh system
 instructions request byte-preserving frontmatter behavior. Non-pure formatting
 and profile application remain the responsibility of the output pipeline.
 
-Non-pure local document enhancement has a [persistent cache](cache.md). Cache
-identity uses complete Markdown, resolved prompt templates/rules and the enabled
-model pool, with a native version namespace. A hit precedes credential resolution
-and returns zero new usage. `cache.no_cache` and matching source patterns bypass
-reads while still refreshing a successful answer; disabled caching does neither.
-Pure, image and URL enhancement bypass this cache. Database errors do not discard
-a successful model answer and surface as sanitized conversion warnings.
+## Structured documents and complete long text
 
-The old structured-response schema, chunking, placeholder-repair staircase and
-refusal/degeneration detectors are not yet implemented. The native built-ins
-return Markdown; they do not promise the old structured metadata-generation
-output.
+Non-pure text from files and URLs uses a typed document response:
+
+```json
+{"cleaned_markdown":"Faithful Markdown", "frontmatter":{"description":"A concise description", "tags":["topic"]}}
+```
+
+The description and each tag must be nonblank strings. Description whitespace is
+collapsed and values over 150 Unicode characters are shortened to 147 plus `...`.
+Tags remove quotation marks, convert whitespace and colons to hyphens and are
+limited to 30 Unicode characters each. An empty normalized tag collection fails.
+Other model fields are ignored: the application owns title, source and processing
+time. Only enhanced output receives generated description/tags; base metadata is
+retained separately. A source identified as a social post requests metadata while
+preserving its body verbatim.
+
+The native transport currently uses provider-neutral JSON instructions, accepting
+a bare JSON object or a complete Markdown JSON fence. An invalid schema, damaged
+structural marker or implausible cleaning gets at most two validation retries,
+in addition to the established transport retry policy. All HTTP attempts share
+the document budget and paid response usage is retained. Arbitrary plain Markdown
+is not silently promoted into successful structured metadata. This includes
+custom document prompts. Pure text and standalone image analysis keep their
+separate contracts.
+
+Before a request, fenced and indented code, inline code, math, links/images,
+reference definitions and HTML/comment markup are replaced by collision-safe
+source-owned tokens. Their values never become system instructions. The answer
+must retain the tokens exactly once in source order; original bytes are restored
+only after successful validation. An oversized protected code block remains one
+opaque token, so it cannot be truncated or have its internal blank lines changed
+by chunking. This conservative scanner does not claim full CommonMark parsing.
+
+Remaining text is packed at blank-line or line boundaries into at most 32,000
+Unicode scalar values per chunk; an oversized prose line splits at scalar
+boundaries. No tail is dropped. Bounded worker threads process chunks concurrently
+through the same caller runtime and shared document accounting. Results merge in
+source order and only the first chunk supplies metadata. For multi-chunk plans,
+uncached calls plus `ceil(uncached / 5)` retry headroom must fit the remaining
+request allowance before any model request. Zero disables the allowance.
+
+Successful chunks are cached independently. All admitted workers settle before
+an error is returned; no partial enhanced document is published. A retry can reuse
+previously successful chunks. Empty boilerplate chunks are permitted, but the
+merged document must remain nonempty and pass complete-document plausibility:
+for sources of at least 200 non-whitespace characters, keep at least 20% of their
+length and 30% of distinct character bigrams. Chunk checks are more permissive
+when the response's character four-grams substantially come from that chunk.
+These are deletion safeguards, not proof of semantic accuracy.
+
+Both local and ordinary URL text use the [typed persistent cache](cache.md).
+Cache hits require no model request and have zero new usage; bypass controls still
+refresh successful answers. Pure text, standalone image analysis and page/browser
+vision bypass this document cache. Vision still follows its existing Markdown
+response path: structured vision batches, image-aware document caching, the
+reference tool/JSON-schema capability ladder and speculative JSON repair remain
+unimplemented. This delivery does not claim those separate capabilities.
 
 ## Verification
 
@@ -208,13 +259,19 @@ rotation, fallbacks and cycles, quota/authentication short-circuiting, request
 budgets, empty-response usage, Anthropic vision/cached-token accounting, prompt
 precedence, literal document braces and token-limit parameter mapping. Cache
 checks additionally cover credential-independent hits, zero new usage, bypass
-refresh, prompt/content/model invalidation, disabled/pure/URL exclusions, corrupt
+refresh, prompt/content/model invalidation, disabled/pure exclusions, corrupt
 or unwritable state, and rejecting token-truncated or blank cache candidates.
 Shared-runtime tests hold partial HTTP response bodies to check that concurrent
 text and image requests stay within the same cap. They also exercise requests
 during another request's backoff, terminal and budget failures, and a cache hit
 while every permit is occupied. `llm_runtime.rs` tests cloning, independent runs,
 waiting callers, invalid zero capacity and permit release during unwinding.
+
+`tests/conversion/document_processing.rs` adds isolated public-API scenarios for
+typed fields and base separation, Unicode parallel chunk order, literal fidelity,
+URL cache hits without credentials, partial-failure retry, preflight admission,
+shared retry budgets, custom prompts and unchanged pure behavior. Chunk/cache
+unit checks cover typed namespaces, Unicode tails and malformed metadata.
 
 HTTP tests bind loopback listeners, capture request headers and JSON, return
 scripted responses, and use bounded socket timeouts. Retry sleeps are injected

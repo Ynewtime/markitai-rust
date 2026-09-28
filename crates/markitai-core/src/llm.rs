@@ -1,7 +1,10 @@
 //! Native text and image requests with a bounded routing and retry policy.
+mod chunks;
+mod document;
 mod service_probe;
 use crate::{ConversionUsage, Error, LlmRuntime, Result, config, llm_cache};
 use base64::Engine;
+pub(crate) use document::{DocumentMetadata, process_document_with_runtime};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 pub(crate) use service_probe::probe as service_probe;
@@ -10,7 +13,7 @@ use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::io::Read;
 use std::path::Path;
 use std::sync::{
-    OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -62,6 +65,7 @@ pub(crate) struct Enhancement {
     pub usage: ConversionUsage,
     pub cache_hit: bool,
     pub warnings: Vec<String>,
+    pub metadata: Option<DocumentMetadata>,
 }
 
 #[derive(Default)]
@@ -71,19 +75,19 @@ struct DocumentAccounting {
     usage: ConversionUsage,
 }
 thread_local! {
-    static DOCUMENT_ACCOUNTING: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<DocumentAccounting>>>> = const { std::cell::RefCell::new(None) };
+    static DOCUMENT_ACCOUNTING: std::cell::RefCell<Option<Arc<Mutex<DocumentAccounting>>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A synchronous conversion owns its accounting context; nested conversions
 /// restore the previous context even while unwinding. No host environment or
 /// public JSON option is used to identify a document.
 pub(crate) struct DocumentScope {
-    current: std::rc::Rc<std::cell::RefCell<DocumentAccounting>>,
-    previous: Option<std::rc::Rc<std::cell::RefCell<DocumentAccounting>>>,
+    current: Arc<Mutex<DocumentAccounting>>,
+    previous: Option<Arc<Mutex<DocumentAccounting>>>,
 }
 impl DocumentScope {
     pub(crate) fn new(cfg: &Value) -> Self {
-        let current = std::rc::Rc::new(std::cell::RefCell::new(DocumentAccounting {
+        let current = Arc::new(Mutex::new(DocumentAccounting {
             limit: cfg
                 .pointer("/llm/max_requests_per_document")
                 .and_then(Value::as_u64)
@@ -93,8 +97,15 @@ impl DocumentScope {
         let previous = DOCUMENT_ACCOUNTING.with(|slot| slot.replace(Some(current.clone())));
         Self { current, previous }
     }
+    fn shared() -> Option<Arc<Mutex<DocumentAccounting>>> {
+        DOCUMENT_ACCOUNTING.with(|slot| slot.borrow().clone())
+    }
+    fn enter(current: Arc<Mutex<DocumentAccounting>>) -> Self {
+        let previous = DOCUMENT_ACCOUNTING.with(|slot| slot.replace(Some(current.clone())));
+        Self { current, previous }
+    }
     pub(crate) fn usage(&self) -> ConversionUsage {
-        copy_usage(&self.current.borrow().usage)
+        copy_usage(&self.current.lock().unwrap_or_else(|e| e.into_inner()).usage)
     }
 }
 impl Drop for DocumentScope {
@@ -117,13 +128,13 @@ fn document_usage() -> Option<ConversionUsage> {
     DOCUMENT_ACCOUNTING.with(|slot| {
         slot.borrow()
             .as_ref()
-            .map(|state| copy_usage(&state.borrow().usage))
+            .map(|state| copy_usage(&state.lock().unwrap_or_else(|e| e.into_inner()).usage))
     })
 }
 fn admit_document_attempt() -> Result<()> {
     DOCUMENT_ACCOUNTING.with(|slot| {
         if let Some(state) = slot.borrow().as_ref() {
-            let mut state = state.borrow_mut();
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
             if state.limit > 0 && state.attempts >= state.limit {
                 return Err(Error::Conversion(
                     "LLM per-document request budget exhausted".into(),
@@ -137,7 +148,7 @@ fn admit_document_attempt() -> Result<()> {
 fn document_exhausted() -> bool {
     DOCUMENT_ACCOUNTING.with(|slot| {
         slot.borrow().as_ref().is_some_and(|state| {
-            let state = state.borrow();
+            let state = state.lock().unwrap_or_else(|e| e.into_inner());
             state.limit > 0 && state.attempts >= state.limit
         })
     })
@@ -474,7 +485,7 @@ fn enhance_cached(
     if let (Some(cache), Some(key)) = (&cache, &cache_key) {
         match cache.get(key) {
             Ok(Some(markdown)) => return Ok(Enhancement {
-                markdown, usage: ConversionUsage::default(), cache_hit: true, warnings,
+                markdown, usage: ConversionUsage::default(), cache_hit: true, warnings, metadata: None,
             }),
             Ok(None) => (),
             Err(_) => warnings.push("Persistent LLM cache is unavailable; enhancement continued without a cached answer.".into()),
@@ -495,6 +506,7 @@ fn enhance_cached(
         usage,
         cache_hit: false,
         warnings,
+        metadata: None,
     })
 }
 
@@ -1375,7 +1387,10 @@ fn record_usage(usage: &mut ConversionUsage, entry: &Deployment, data: &Value) {
                 model.to_owned(),
                 json!({"requests":1,"input_tokens":input,"output_tokens":output,"cost_usd":0.0}),
             );
-            merge_usage(&mut state.borrow_mut().usage, &delta);
+            merge_usage(
+                &mut state.lock().unwrap_or_else(|e| e.into_inner()).usage,
+                &delta,
+            );
         }
     });
     usage.requests = usage.requests.saturating_add(1);

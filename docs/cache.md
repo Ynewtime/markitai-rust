@@ -1,11 +1,11 @@
 # Persistent LLM cache
 
-The native runtime can reuse a successful non-pure local document enhancement
-across invocations and processes. A hit returns the saved Markdown without an
+The native runtime can reuse successful non-pure local and URL text processing
+across invocations and processes. A hit returns the saved typed Markdown and generated description/tags without an
 HTTP request, retry delay, request-budget charge or new token/cost usage. The
 normal output pipeline still applies current metadata, profiles and output paths.
-Pure enhancement, standalone image vision, URL enhancement and fetched pages do
-not use this cache. There is no process-memory cache in this implementation.
+Pure enhancement, standalone image analysis and page/browser vision do not use
+this cache. Fetched response caching is a separate layer. There is no process-memory cache in this implementation.
 
 ## Configuration and CLI behavior
 
@@ -37,11 +37,15 @@ precede bypass controls. Native conversion honors these controls consistently.
 
 ## Cache identity
 
-A versioned native namespace prevents old structured-response entries from being
-interpreted as Markdown. The key includes:
+The `native-document-v1` key namespace prevents legacy Markdown-only entries from
+being treated as typed document metadata. Existing `native-markdown-v1` rows are
+preserved and remain inspectable; there is no destructive migration. The key includes:
 
-- A SHA-256 digest of the complete input Markdown, including edits in its middle.
-- Resolved system/user prompt templates, prompt category and applicable mode rules.
+- A SHA-256 digest of the complete protected chunk, including edits in its middle.
+  Protection tokens are deterministic for the whole source; changing source text
+  containing protected literals can therefore also invalidate unchanged chunks.
+- Resolved system/user prompt templates, JSON schema instructions, prompt category,
+  applicable mode rules and the chunk/protection format version.
 - The deduplicated, sorted set of model identifiers whose configured weight is
   positive. Automatic model selection uses the same model names as routing.
 
@@ -64,16 +68,25 @@ lookup ordering does not promise that the complete CLI invocation avoids it.
 ## Storage and failure behavior
 
 SQLite is bundled into the native artifact. It uses WAL, normal synchronization
-and a 30-second busy timeout. The table retains the reference fields `key`,
-`value`, `model`, `created_at`, `accessed_at` and `size_bytes`; `value` is a JSON
-string containing Markdown and `model` records the pool fingerprint. The database
+and a 30-second busy timeout. First-use WAL/schema initialization also retries
+BUSY/LOCKED errors against a 30-second deadline, dropping the failed connection
+before retrying. SQLite can bypass its busy handler while upgrading a rollback
+journal read lock, so a busy timeout alone does not cover simultaneous first
+writers. Only idempotent initialization is retried; row transactions are not
+replayed, and corruption or other I/O failures remain explicit cache warnings.
+The table retains the reference fields `key`,
+`value`, `model`, `created_at`, `accessed_at` and `size_bytes`; typed document `value` is a JSON object containing `cleaned_markdown`,
+`description` and `tags`; legacy entries remain JSON strings. `model` records
+the pool fingerprint. The database
 is created only when there is a successful answer to save.
 
 Writes admit the replacement and evict the least recently accessed entries in
 one immediate transaction. Ties use row insertion order. A result larger than the
 configured capacity removes a stale entry for its own key but does not evict
 other answers. An insert failure rolls back both replacement and eviction.
-Empty, whitespace-only, failed and token-truncated answers are not stored.
+Failed, malformed, structurally damaged and token-truncated answers are not
+stored. A validated boilerplate chunk may have an empty body and still carry
+metadata; the merged whole document must remain valid and nonempty.
 Stored answers also have a 100 MiB entry bound. Separate processes can safely
 write the same database; simultaneous cache misses can still issue duplicate
 provider requests because there is no request coalescing.
@@ -87,9 +100,17 @@ Unavailable, malformed or unwritable caches produce a fixed warning and leave a
 successful enhancement intact. Errors do not expose the database path, SQL,
 credentials or cached content. Reads update `accessed_at`; if the database cannot
 accept that update, the call degrades to a cache miss and may contact the model.
-Blank or structurally invalid stored answers are not replayed as successful
-results. Diagnostics describe cache unavailability rather than implying a free
+Typed stored values are schema-checked and their protected markers checked
+against the current chunk before replay. Invalid stored values are ignored with
+a warning; they never count as successful cache hits. Diagnostics describe cache unavailability rather than implying a free
 provider request.
+
+
+Each successful chunk is committed separately, including when a sibling chunk
+later fails. The caller still receives a document-level failure and publishes no
+partial enhanced result. A subsequent attempt requests only missing chunks.
+`llm_cache_hit` is true only for a fully cached item with no new paid LLM usage;
+a cache-backed document followed by image-analysis requests is not a full hit.
 
 ## Inspection
 

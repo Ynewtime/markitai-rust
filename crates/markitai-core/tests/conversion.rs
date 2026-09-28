@@ -19,6 +19,15 @@ mod heif_image;
 #[path = "conversion/image_enrichment.rs"]
 mod image_enrichment;
 
+#[path = "conversion/office_media.rs"]
+mod office_media;
+
+#[path = "conversion/numbers.rs"]
+mod numbers;
+
+#[path = "conversion/document_processing.rs"]
+mod document_processing;
+
 fn options() -> ConvertOptions {
     ConvertOptions {
         config: Some(json!({})),
@@ -130,7 +139,7 @@ fn unrelated_features_do_not_reject_text_or_literal_image_examples() {
     assert!(plain.markdown.contains("![literal]"));
     let (base, server) = llm_server(
         200,
-        r##"{"choices":[{"message":{"content":"# Text\n\nKept example."}}]}"##,
+        r##"{"choices":[{"message":{"content":"{protected_input}\n\nKept example."}}]}"##,
     );
     let mut cfg = cfg;
     cfg["llm"] = json!({"enabled":true,"router_settings":{"num_retries":0},"model_list":[{"model_name":"test","litellm_params":{"model":"openai/test","api_base":base,"api_key":"test"}}]});
@@ -179,6 +188,26 @@ fn llm_server(status: u16, payload: &'static str) -> (String, std::thread::JoinH
                 }
             }
         };
+        let mut payload: Value = serde_json::from_str(payload).unwrap();
+        if status == 200
+            && request["messages"][0]["content"]
+                .as_str()
+                .is_some_and(|system| system.contains("MARKITAI_DOCUMENT_JSON_V1"))
+            && let Some(content) = payload.pointer_mut("/choices/0/message/content")
+            && let Some(markdown) = content.as_str()
+        {
+            let markdown = markdown.replace(
+                "{protected_input}",
+                request["messages"][1]["content"].as_str().unwrap(),
+            );
+            *content = json!(
+                json!({"cleaned_markdown":markdown,"frontmatter":{
+                    "description":"Mock document description", "tags":["mock"]
+                }})
+                .to_string()
+            );
+        }
+        let payload = payload.to_string();
         write!(stream,"HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",payload.len()).unwrap();
         request
     });
@@ -337,7 +366,7 @@ fn profiles_run_after_llm_and_each_retained_file_keeps_its_own_metadata() {
     std::fs::write(&input, "# Base\n\n<!-- Page number: 1 -->\n\nBody").unwrap();
     let (base, server) = llm_server(
         200,
-        r#"{"choices":[{"message":{"content":"---\ntitle: Enhanced\n---\n\n<!-- Page number: 2 -->\n\nNew body"}}]}"#,
+        r#"{"choices":[{"message":{"content":"{protected_input}\n\nNew body"}}]}"#,
     );
     let result = convert(input.to_str().unwrap(), ConvertOptions {
         output_dir: Some(dir.path().join("out")),
@@ -348,15 +377,24 @@ fn profiles_run_after_llm_and_each_retained_file_keeps_its_own_metadata() {
         server.join().unwrap()["messages"][1]["content"]
             .as_str()
             .unwrap()
-            .contains("<!-- Page number: 1 -->")
+            .contains("⟦MKTI:")
     );
-    assert_eq!(result.frontmatter["title"], "Enhanced");
+    assert_eq!(result.frontmatter["title"], "Base");
+    assert_eq!(
+        result.frontmatter["description"],
+        "Mock document description"
+    );
     assert!(result.markdown.contains("<!-- page: 1 -->"));
-    assert!(result.llm_markdown.unwrap().contains("<!-- page: 2 -->"));
+    assert!(result.llm_markdown.unwrap().contains("<!-- page: 1 -->"));
     let base = std::fs::read_to_string(result.output_path.unwrap()).unwrap();
     assert_eq!(
         markitai_core::output::split_frontmatter(&base).0["title"],
         "Base"
+    );
+    assert!(
+        !markitai_core::output::split_frontmatter(&base)
+            .0
+            .contains_key("description")
     );
 }
 

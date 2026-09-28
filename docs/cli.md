@@ -42,7 +42,7 @@ markitai init --local
 - `mcp` 通过标准输入/输出提供 `convert_document`、`convert_url`、`batch_convert`、`job_status` 四个工具。配置与文件输出沿用同一核心，批处理任务保存在当前 MCP 进程内；协议和结果边界见 [MCP 服务](mcp.md)。
 - `--dry-run` 仅枚举输入和目标，不调用转换器、不创建输出目录。
 - `--compress/--no-compress` 映射共享图片处理配置；未启用 LLM/OCR 的独立图片返回 `image_only` 跳过状态，不写空文档。
-- 非 pure 本地文档的 LLM 结果可跨进程复用；`--no-cache` 跳过读取但仍写入成功结果，`--cache` 清除此绕过设置，不强制启用已禁用的缓存。`--no-cache-for` 接受逗号分隔的 glob，JSON 条目的 `cache_hit/llm_cache_hit` 反映实际命中。
+- 非 pure 本地文档及文本 URL 的 LLM 结果可逐块跨进程复用；`--no-cache` 跳过读取但仍写入成功结果，`--cache` 清除此绕过设置，不强制启用已禁用的缓存。`--no-cache-for` 接受逗号分隔的 glob，JSON 条目的 `cache_hit/llm_cache_hit` 反映实际命中。
 - 静态 HTML/文本抓取支持独立页面缓存：无验证头时按 TTL 复用，有 ETag/Last-Modified 时发送条件请求。`fetch_cache_hit` 记录直接复用或 304 命中；`cache_hit/llm_cache_hit` 仍只表示 LLM 缓存。显式 `-s static` 与配置文件中的默认策略使用独立缓存作用域。
 - `cache stats [--json] [-v] [--limit N]` 查看 LLM 与抓取缓存；不存在的数据库不会因查看而创建。LLM 详细列表最多返回 1,000 条。`cache clear [-y]` 清理两个缓存，未给 `-y` 时需要在终端确认。清理前检查两个数据库，后续部分失败会明确报告并退出非零；浏览器域名缓存仍未实现。
 
@@ -52,7 +52,7 @@ markitai init --local
 
 ## 明确的迁移缺口
 
-URL 抓取的其他策略、图片/URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、顶层交互转换选择器、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 页截图、其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取的其他策略、图片/视觉 URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、顶层交互转换选择器、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和视觉 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 演示与文字文档可通过可选的独立 LibreOffice 安装获得全页截图和 OCR 补充，详见 [Office 渲染](office-rendering.md)；表格截图和其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
 
 持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 

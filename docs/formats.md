@@ -24,6 +24,7 @@ network policy and optional model enhancement belong to the orchestration layer.
 | PPTX, PPTM, PPSX, PPSM | bounded ZIP + PresentationML reader | Ordered slide markers, title placeholders, plain text frames, grouped shapes, tables, referenced images, cached chart data and speaker notes |
 | XLS, XLSX, XLSM, XLSB | anydoc document model | Native sheet content; XLS/XLSX/XLSM single-sheet names are recovered from package metadata; exact cell-format compatibility has not been established |
 | ODT, ODS, ODP, RTF | anydoc document model | Native structured documents through the same Markdown renderer |
+| NUMBERS | bounded ZIP/IWA preflight + iwork | Ordered sheets/tables, rectangular saved values and explicit formatting/unsupported-content warnings; see [Numbers](numbers.md) |
 | EPUB | anydoc + OPF metadata | Spine content and the original title/authors/language/publisher/date/description/identifier preamble |
 | PDF | pdf-inspector + lopdf; optional macOS CoreGraphics/Vision | Per-page text/layout, partial recovery and embedded images; explicit local-file page OCR and screenshots through the shared media pipeline |
 
@@ -109,7 +110,12 @@ used by the readers above.
 
 ## Explicit remaining compatibility work
 
-Numbers decoding remains unfinished. macOS HEIF/AVIF primary images use native
+Numbers table decoding is implemented with scoped limits in [Numbers](numbers.md).
+Office presentations and word-processing files can opt into complete page capture
+and local OCR supplements through [isolated LibreOffice export](office-rendering.md);
+this optional installed program is separate from the CLI binary. Native text
+extraction does not launch it. Spreadsheet screenshots are explicitly unsupported.
+macOS HEIF/AVIF primary images use native
 ImageIO decoding, with the scoped limits in [images](images.md); other platforms
 still return an explicit unsupported error. Local and static/automatic URL PDFs support explicit
 page rendering, screenshots and OCR through the [PDF media pipeline](pdf-ocr.md),

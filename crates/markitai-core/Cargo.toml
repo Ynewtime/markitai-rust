@@ -28,6 +28,7 @@ regex = "1"
 globset = "0.4"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 anydoc = "0.2.4"
+iwork = "=0.2.1"
 pdf-inspector = { version = "1.25.1", default-features = false }
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 cfb = "0.14"

@@ -473,6 +473,94 @@ fn recognize_native_pictures(
     Ok(counts)
 }
 
+pub(crate) struct CapturedPages {
+    pub screenshots: Vec<Asset>,
+    pub ocr: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Rasterize an already validated Office export without replacing its native text.
+pub(crate) fn capture_external_pdf(
+    bytes: &[u8],
+    count: usize,
+    prefix: &str,
+    cfg: &Value,
+    screenshots: bool,
+    local_ocr: bool,
+) -> Result<CapturedPages> {
+    validate_name(prefix)?;
+    if count == 0 || count > MAX_PAGES {
+        return Err(failure("documents must contain between 1 and 1000 pages"));
+    }
+    let sends_images = screenshots
+        && config::enabled(cfg, "/llm/enabled")
+        && (!config::enabled(cfg, "/llm/pure")
+            || config::enabled(cfg, "/screenshot/screenshot_only"));
+    let limit = cfg
+        .pointer("/llm/max_vision_pages_per_document")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if sends_images && limit > 0 && count as u64 > limit {
+        return Err(Error::InvalidInput(
+            "Office pages exceed llm.max_vision_pages_per_document; no pages were rendered or sent"
+                .into(),
+        ));
+    }
+    let mut captured = CapturedPages {
+        screenshots: Vec::new(),
+        ocr: Vec::new(),
+        warnings: Vec::new(),
+    };
+    if !screenshots && !local_ocr {
+        return Ok(captured);
+    }
+    let session = PdfRasterSession::open(bytes)?;
+    if session.pages() != count {
+        return Err(failure("renderer and Office export disagree on page count"));
+    }
+    let mut budget = Budget::default();
+    let mut sizes = Vec::with_capacity(count);
+    for page in 1..=count {
+        let size = session.dimensions(page, DPI)?;
+        budget.pixels(size.0, size.1)?;
+        sizes.push(size);
+    }
+    for (index, size) in sizes.into_iter().enumerate() {
+        let page = index + 1;
+        let pixels = session.render(page, DPI)?;
+        if pixels.dimensions() != size {
+            return Err(failure(
+                "rendered dimensions changed after budget validation",
+            ));
+        }
+        if screenshots {
+            let encoded = encode_screenshot(&pixels, cfg, MAX_SHOT_BYTES)?;
+            budget.screenshot(encoded.bytes.len())?;
+            if encoded.fallback {
+                captured.warnings.push(format!(
+                    "Office page {page}: screenshot size required JPEG compression fallback."
+                ));
+            } else if encoded.format == Encoding::Webp && captured.screenshots.is_empty() {
+                captured.warnings.push("Office screenshots use lossless WebP; image.quality does not affect this encoder.".into());
+            }
+            captured.screenshots.push(Asset {
+                name: format!("{prefix}.page{page:04}.{}", encoded.format.extension()),
+                bytes: encoded.bytes,
+            });
+        }
+        if local_ocr {
+            let text = ocr::recognize_rgb(pixels, cfg)?.text;
+            if text.trim().is_empty() {
+                captured.warnings.push(format!(
+                    "Office page {page}: local OCR completed with no recognized text."
+                ));
+            }
+            captured.ocr.push(text);
+        }
+    }
+    Ok(captured)
+}
+
 pub(crate) fn prepare(
     bytes: &[u8],
     prefix: &str,

@@ -103,7 +103,9 @@ impl ModelServer {
                             .unwrap();
                     }
                     std::thread::sleep(Duration::from_millis(75));
-                    let body = json!({"choices":[{"message":{"content":"# Enhanced\n\nConcurrent 世界"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}).to_string();
+                    let split=request.windows(4).position(|s|s==b"\r\n\r\n").unwrap();
+                    let payload:Value=serde_json::from_slice(&request[split+4..]).unwrap();
+                    let body = json!({"choices":[{"message":{"content":model_content(&payload,"# Enhanced\n\nConcurrent 世界")},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}).to_string();
                     // End the observed HTTP work before releasing the full response
                     // to the client, so a correctly reused slot cannot look active.
                     active.fetch_sub(1, Ordering::SeqCst);
@@ -225,4 +227,26 @@ fn directory_workers_share_the_cli_llm_limit() {
 #[test]
 fn url_list_workers_share_the_cli_llm_limit() {
     check_batch(true);
+}
+
+// Document cleanup is structured; pure vision and connection probes remain text.
+fn model_content(request: &Value, markdown: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    if !messages.iter().any(|message| {
+        message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("MARKITAI_DOCUMENT_JSON_V1"))
+    }) {
+        return markdown.to_owned();
+    }
+    // Echo protected source spans once and in order; test-specific output still
+    // identifies the model invocation/generation used by the existing assertions.
+    let source = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
 }

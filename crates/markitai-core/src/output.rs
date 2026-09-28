@@ -426,8 +426,8 @@ pub fn write_with_publication(
 
 pub(crate) enum Screenshots<'a> {
     New(&'a [Asset]),
-    /// PDF documents retain Markdown even when their source is a URL.
-    PublishedPdf(&'a [Asset]),
+    /// Document captures have frozen names and retain their native Markdown.
+    PublishedPages(&'a [Asset]),
 }
 
 pub(crate) fn write_document(
@@ -534,14 +534,14 @@ pub(crate) fn write_document(
     }
     let (screenshots, published) = match screenshots {
         Screenshots::New(shots) => (shots, false),
-        Screenshots::PublishedPdf(shots) => (shots, true),
+        Screenshots::PublishedPages(shots) => (shots, true),
     };
     for screenshot in screenshots {
         let path = if published {
             let path = dir.join(".markitai/screenshots").join(&screenshot.name);
             check_path(&path, allow_symlinks)?;
             if screenshot_matches(&path, &screenshot.bytes)? != Some(true) {
-                return Err(Error::Conversion("A published PDF screenshot changed during conversion; document publication stopped to preserve its references".into()));
+                return Err(Error::Conversion("A published page screenshot changed during conversion; document publication stopped to preserve its references".into()));
             }
             path
         } else {
@@ -754,7 +754,7 @@ mod tests {
             "report.pdf",
             &mut result,
             &[],
-            Screenshots::PublishedPdf(&shots),
+            Screenshots::PublishedPages(&shots),
             &cfg,
             None,
         )

@@ -282,7 +282,7 @@ impl Model {
                         entered.fetch_add(1,Ordering::SeqCst);
                         let mode=mode.load(Ordering::SeqCst);
                         if mode==2{let(lock,notify)=&*gate;let ready=lock.lock().unwrap_or_else(|e|e.into_inner());let(ready,_)=notify.wait_timeout_while(ready,WAIT,|ready|!*ready).unwrap_or_else(|e|e.into_inner());if !*ready{return;}}
-                        let (status,body)=if mode==1{("503 Service Unavailable",json!({"error":{"message":"fixture failure"}}))}else{("200 OK",json!({"choices":[{"message":{"content":"# Enhanced fixture\n\nVerified model output."},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":5}}))};
+                        let (status,body)=if mode==1{("503 Service Unavailable",json!({"error":{"message":"fixture failure"}}))}else{("200 OK",json!({"choices":[{"message":{"content":model_content(&request,"# Enhanced fixture\n\nVerified model output.")},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":5}}))};
                         let body=body.to_string();let response=format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());let _=stream.write_all(response.as_bytes());
                     }));
                     }
@@ -467,4 +467,26 @@ fn retry_metadata_failure_leaves_recovery_material_and_restart_restores_previous
     assert_eq!(std::fs::read(folder.join("out/a.txt.md")).unwrap(), body);
     assert!(!folder.join("out/a.txt.llm.md").exists());
     server.stop();
+}
+
+// Document cleanup is structured; pure vision and connection probes remain text.
+fn model_content(request: &Value, markdown: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    if !messages.iter().any(|message| {
+        message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("MARKITAI_DOCUMENT_JSON_V1"))
+    }) {
+        return markdown.to_owned();
+    }
+    // Echo protected source spans once and in order; test-specific output still
+    // identifies the model invocation/generation used by the existing assertions.
+    let source = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
 }

@@ -74,7 +74,7 @@ impl Server {
                         })
                     });
                 let (status, mime, body) = if request.starts_with("POST ") {
-                    ("200 OK", "application/json", json!({"choices":[{"message":{"content":"# Enhanced\n\nLocal model answer."},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":3}}).to_string())
+                    ("200 OK", "application/json", json!({"choices":[{"message":{"content":model_content(&serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap(),"# Enhanced\n\nLocal model answer.")},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":3}}).to_string())
                 } else if is_hit {
                     ("304 Not Modified", "text/html", String::new())
                 } else {
@@ -333,4 +333,26 @@ fn validators_stats_and_combined_clear_work_across_processes() {
         stats["fetch_cache"]["count"], 1,
         "failed preflight must retain the fetch store"
     );
+}
+
+// Document cleanup is structured; pure vision and connection probes remain text.
+fn model_content(request: &Value, markdown: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    if !messages.iter().any(|message| {
+        message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("MARKITAI_DOCUMENT_JSON_V1"))
+    }) {
+        return markdown.to_owned();
+    }
+    // Echo protected source spans once and in order; test-specific output still
+    // identifies the model invocation/generation used by the existing assertions.
+    let source = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
 }

@@ -162,13 +162,17 @@ impl Server {
                         }
                     }
                 };
-                let echo = serde_json::from_slice::<Value>(&request.body)
-                    .ok()
-                    .and_then(|v| {
-                        v.pointer("/messages/1/content")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    });
+                let parsed = serde_json::from_slice::<Value>(&request.body).ok();
+                let structured = parsed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/messages/0/content"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v.contains("MARKITAI_DOCUMENT_JSON_V1"));
+                let echo = parsed.and_then(|v| {
+                    v.pointer("/messages/1/content")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
                 captured.lock().unwrap().push(request);
                 let reply = replies.pop_front().unwrap_or(Reply {
                     status: 500,
@@ -177,7 +181,12 @@ impl Server {
                     echo: false,
                 });
                 let reply = if reply.echo {
-                    Reply::model(&echo.expect("echo requires a text-model request"))
+                    let text = echo.expect("echo requires a text-model request");
+                    Reply::model(&if structured {
+                        json!({"cleaned_markdown":text,"frontmatter":{"description":"Image document fixture","tags":["fixture"]}}).to_string()
+                    } else {
+                        text
+                    })
                 } else {
                     reply
                 };
@@ -762,4 +771,48 @@ fn ambiguous_eml_content_ids_never_choose_an_arbitrary_image_or_call_vision() {
     assert_eq!(requests(&server).len(), 1);
     assert_eq!(output.usage.requests, 1);
     assert!(!dir.path().join("out/.markitai/assets/images.json").exists());
+}
+
+#[test]
+fn cached_main_document_with_new_image_analysis_is_not_a_full_cache_hit() {
+    if isolated("cached_main_document_with_new_image_analysis_is_not_a_full_cache_hit") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = png();
+    std::fs::write(dir.path().join("figure.png"), &bytes).unwrap();
+    let source = dir.path().join("report.md");
+    std::fs::write(
+        &source,
+        "# Cached report\n\nOriginal introduction.\n\n![Author figure](figure.png)\n\nOriginal conclusion.\n",
+    )
+    .unwrap();
+    let server = Server::new(vec![Reply::echo(), analysis(), analysis()]);
+    let mut config = cfg(&server);
+    config["cache"]["enabled"] = json!(true);
+    config["cache"]["global_dir"] = json!(dir.path().join("private-cache"));
+    let first = run(source.to_str().unwrap(), config.clone(), None).unwrap();
+    assert_eq!(first.usage.requests, 2);
+    assert!(!first.llm_cache_hit());
+    let second = run(source.to_str().unwrap(), config, None).unwrap();
+    assert_eq!(second.usage.requests, 1);
+    assert_eq!(second.usage.input_tokens, 7);
+    assert_eq!(second.usage.output_tokens, 5);
+    assert!(!second.llm_cache_hit());
+    assert_eq!(second.images.len(), 1);
+    assert_eq!(body(&second), body(&first));
+    assert!(body(&second).contains("Original introduction."));
+    assert!(body(&second).contains("Original conclusion."));
+    assert!(body(&second).contains("![A \\[safe\\] chart]"));
+    assert_eq!(second.frontmatter["description"], "Image document fixture");
+    let calls = requests(&server);
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("MARKITAI_DOCUMENT_JSON_V1")
+    );
+    assert_eq!(vision_bytes(&calls[1]), vec![bytes.clone()]);
+    assert_eq!(vision_bytes(&calls[2]), vec![bytes]);
 }

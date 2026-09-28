@@ -4,6 +4,10 @@
 
 ### Added
 
+- Bounded native Numbers table extraction with saved formula values and preserved sheet/table order.
+- Optional isolated LibreOffice page export for presentations and word-processing documents, complete page screenshots and local OCR supplements.
+- Typed document descriptions/tags, protected-literal Unicode chunking, shared request accounting and persistent per-chunk caching for local documents and text URLs.
+
 - Rust rewrite project, architecture, compatibility audit, and development control center.
 - Initial native conversion core, CLI, and Node.js/Python/Go adapters.
 - Isolated contract tests, format differential audit, and reproducible CLI measurements.
@@ -46,6 +50,8 @@
 - Bounded native model discovery with credential-scoped caching, plus single-model connection probes without document conversion.
 
 ### Fixed
+
+- Concurrent first-time SQLite cache initialization retries bounded WAL/schema lock contention without replaying stored-row transactions.
 
 - PDF page-number cleanup preserves substantive Page N paragraphs; nonpainting text modes persist across text blocks and nested Forms without changing glyph positions.
 - VLM OCR opt-out selects local recognition; explicit PDF screenshot enhancement remains an independent request and reports when it sends page images.

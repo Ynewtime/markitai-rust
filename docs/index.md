@@ -5,6 +5,8 @@
 - [Compatibility](compatibility.md): contracts against the reference release.
 - [Development](development.md): build, test isolation, and recovery.
 - [Formats](formats.md): native readers and fidelity gaps.
+- [Numbers](numbers.md): bounded native table decoding and saved-value limits.
+- [Office page rendering](office-rendering.md): isolated optional LibreOffice export, full-page capture and OCR supplements.
 - [Local image OCR](ocr.md): native macOS recognition, language selection and limits.
 - [Browser fetching and screenshots](browser.md): isolated optional Chromium and CDP.
 - [Images](images.md): raster/SVG inputs, shared compression and resource boundaries.

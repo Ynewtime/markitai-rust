@@ -1,0 +1,35 @@
+{
+  "provenance": "Original fixtures authored for Markitai Rust; project license applies. Generated with Python standard library ZIP/XML only.",
+  "files": {
+    "blank-middle-three.docx": {
+      "bytes": 907,
+      "sha256": "1f5c8a3162c3565883aac5de2c500ae689e2899337765d8af0f76b726e442d5e"
+    },
+    "hidden-blank-three.pptx": {
+      "bytes": 2831,
+      "sha256": "74cebbc5d8b01a5b4953ef801bb461f34e1773d6cf10e53e2ad7a6cdb391f179"
+    }
+  },
+  "expected": {
+    "hidden-blank-three.pptx": {
+      "pages": 3,
+      "size_points": [
+        720,
+        540
+      ],
+      "slide_1": "VISIBLE FIRST plus red/green/blue/yellow corners",
+      "slide_2": "hidden source slide, HIDDEN SECOND plus cyan/magenta/green/red corners",
+      "slide_3": "blank white"
+    },
+    "blank-middle-three.docx": {
+      "pages": 3,
+      "size_points": [
+        612,
+        792
+      ],
+      "page_1": "WORD FIRST PAGE",
+      "page_2": "blank",
+      "page_3": "WORD THIRD PAGE"
+    }
+  }
+}

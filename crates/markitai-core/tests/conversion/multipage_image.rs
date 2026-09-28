@@ -285,7 +285,7 @@ fn vlm_optout_sends_all_recognized_text_without_image_blocks() {
     let path = tiff_file(directory.path(), "letters.tif", &text_pages()[..2]);
     let (base, server) = llm_server(
         200,
-        r#"{"choices":[{"message":{"content":"Both local OCR pages enhanced."}}]}"#,
+        r#"{"choices":[{"message":{"content":"{protected_input}"}}]}"#,
     );
     let mut config = cfg(directory.path());
     model(&mut config, &base);
@@ -297,7 +297,15 @@ fn vlm_optout_sends_all_recognized_text_without_image_blocks() {
     assert!(content.is_string(), "{content}");
     let text = content.as_str().unwrap();
     assert_eq!(text.matches("MARKITAI OCR").count(), 2);
-    assert!(text.contains("<!-- Page number: 2 -->"));
+    assert!(text.contains("⟦MKTI:"));
+    assert!(
+        result
+            .llm_markdown
+            .as_deref()
+            .unwrap()
+            .contains("<!-- Page number: 2 -->")
+    );
+    assert_eq!(result.usage.requests, 1);
     assert!(!request.to_string().contains("data:image/"));
     assert!(
         result

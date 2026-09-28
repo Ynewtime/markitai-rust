@@ -167,7 +167,7 @@ fn heic_local_ocr_and_optout_use_original_resolution_without_image_upload() {
     assert_eq!((png.width(), png.height()), (819, 301));
     let (base, server) = llm_server(
         200,
-        r#"{"choices":[{"message":{"content":"Native OCR enhanced."}}]}"#,
+        r#"{"choices":[{"message":{"content":"{protected_input}"}}]}"#,
     );
     model(&mut config, &base);
     let enhanced = convert(

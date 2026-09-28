@@ -4,12 +4,15 @@ An implementation checkpoint is reproducible only when it records the command,
 source revision, test inputs, build profile, and platform. Passing new unit
 tests establishes specific contracts; it does not imply reference parity.
 
-Latest: [round twenty-one](service-ui-round21.md), embedded web workspace,
-revisioned settings, discovery/probes and actual release-browser workflows.
-The full arm64 gate passes with 990 Rust executions, 31 Python checks and five
-additional JavaScript tests. Installed bindings remain verified at
-[round twenty](media-cli-round20.md). Scoped x86_64 execution retains a Rosetta OCR failure;
-remote CI, exact OCR quality and the complete migration remain unfinished.
+Latest: [round twenty-two](media-llm-round22.md), bounded Numbers tables,
+isolated Office full-page capture, typed document metadata, complete Unicode
+chunks and concurrent first-write cache recovery. The unchanged-source gate
+passes 1,033 Rust executions, 31 Python harness checks, formatting and strict
+Clippy, followed by six actual Office renderer/API tests. Release CLI and
+refreshed installed binding acceptance are pending this round. The prior actual
+web workspace/browser record is [round twenty-one](service-ui-round21.md).
+Scoped x86_64 execution retains a Rosetta OCR failure; remote CI, exact OCR
+quality and the complete migration remain unfinished.
 
 ## Local checks
 

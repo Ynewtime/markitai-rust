@@ -28,7 +28,12 @@ required document type and generator identity; generated timestamps use UTC `Z`.
 Pure model requests receive the complete original reader Markdown, including any
 input YAML. API metadata is parsed from the output actually retained. Normal LLM
 output is normalized separately; a retained base file keeps its own metadata.
-Profiles run after enhancement on both outputs so model-produced page markers and
+Normal text enhancement validates a structured description and tags, which are
+merged into the enhanced frontmatter. The source title, source identity and
+processing timestamp remain application-owned. Protected code, links and page
+markers are restored before final output; pure and visual requests retain their
+separate request contracts. See [document processing](llm.md).
+Profiles run after enhancement on both outputs so restored page markers and
 image references receive the same transformations as reader-produced content.
 
 ## Files and assets

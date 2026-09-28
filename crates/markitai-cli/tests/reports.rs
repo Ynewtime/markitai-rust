@@ -286,7 +286,7 @@ impl Server {
                 let request = String::from_utf8(bytes).unwrap();
                 let (status, mime, body) = if request.starts_with("POST ") {
                     post_count.fetch_add(1, Ordering::SeqCst);
-                    ("200 OK", "application/json", json!({"choices":[{"message":{"content":"# Enhanced\n\nLocal fixture answer."},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}).to_string())
+                    ("200 OK", "application/json", json!({"choices":[{"message":{"content":model_content(&serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap(),"# Enhanced\n\nLocal fixture answer.")},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}).to_string())
                 } else {
                     get_count.fetch_add(1, Ordering::SeqCst);
                     if request.starts_with("GET /missing") {
@@ -1196,4 +1196,26 @@ fn nonzero_png_attachment_report_matches_persisted_asset_and_markdown_reference(
     assert!(markdown.contains(&format!("[Attachment 1]({target})")));
     assert!(!markdown.contains(".markitai/assets/email-1-pixel.png"));
     zero_usage(&saved["llm_usage"]);
+}
+
+// Document cleanup is structured; pure vision and connection probes remain text.
+fn model_content(request: &Value, markdown: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    if !messages.iter().any(|message| {
+        message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("MARKITAI_DOCUMENT_JSON_V1"))
+    }) {
+        return markdown.to_owned();
+    }
+    // Echo protected source spans once and in order; test-specific output still
+    // identifies the model invocation/generation used by the existing assertions.
+    let source = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
 }
