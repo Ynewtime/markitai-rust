@@ -62,6 +62,10 @@ at `age >= TTL`. Reads update access time, not creation time; a 304 does not
 replace saved validators or restart the TTL. An unsolicited 304 is an error.
 Expired rows remain visible in cache statistics until replaced or evicted.
 
+This application cache does not apply HTTP `Cache-Control`, `Expires` or `Vary`
+directives, including `no-store`. Set `cache.enabled=false` when fetched content
+must not be persisted; `--no-cache` still saves admissible fresh results.
+
 Empty content, failed extraction and recognized HTML challenges cannot replace
 a good row. Challenge checks examine HTML structure and visible non-code text;
 literal vendor names in plain text, HTML code examples or an ordinary CAPTCHA
@@ -94,6 +98,9 @@ Fetch and LLM stores each have their own capacity; this is not a combined disk
 quota. The store bounds row allocation and lazily creates the database only
 when saving an admissible page. Cache errors add a fixed warning to successful
 content instead of exposing paths, SQL, headers, URLs or page data.
+Conversion reads require writable access to update `accessed_at`. If opening the
+store or updating that timestamp fails, even an otherwise reusable page becomes
+a cache miss and fetching continues over the network.
 
 The database is plaintext. It stores original/final URLs and metadata as well
 as Markdown; URL credentials and query tokens can therefore be stored. A

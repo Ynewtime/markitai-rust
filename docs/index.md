@@ -15,8 +15,9 @@
 - [Output](output.md): ordinary/pure content and metadata assembly.
 - [CLI](cli.md) and [bindings](bindings.md): current user interfaces.
 - [Validation](validation/README.md): differential checks and measured evidence.
+- [Performance plan](performance-plan.md): profile tradeoffs, binding costs and long-lived memory checks.
 - Decisions: [native core](decisions/0001-native-core.md),
   [document LLM cache](decisions/0002-persistent-llm-cache.md), and
-  [planned fetch cache](decisions/0003-persistent-fetch-cache.md).
+  [static-page fetch cache](decisions/0003-persistent-fetch-cache.md).
 
 Documentation describes verified behavior separately from planned behavior.

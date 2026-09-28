@@ -957,7 +957,57 @@ fn generic_note_section(element: ElementRef<'_>) -> bool {
             .is_some_and(label)
 }
 
-fn note_has_content(element: ElementRef<'_>, markers: &[ElementRef<'_>], depth: usize) -> bool {
+fn generic_continuation(element: ElementRef<'_>) -> bool {
+    if !matches!(
+        element.value().name(),
+        "p" | "ul" | "ol" | "blockquote" | "pre"
+    ) || element.value().attr("id").is_some()
+        || element.select(&selector("[id],a[name]")).next().is_some()
+        || element
+            .value()
+            .classes()
+            .any(|class| matches!(class, "seealso" | "see-also" | "related" | "notetitle"))
+    {
+        return false;
+    }
+    let text = plain(element).to_ascii_lowercase();
+    if ["see also:", "related:", "update:"]
+        .iter()
+        .any(|label| text.starts_with(label))
+    {
+        return false;
+    }
+    !first_content(element).is_some_and(|first| {
+        matches!(first.value().name(), "b" | "strong")
+            && plain(first).to_ascii_lowercase().starts_with("update")
+    })
+}
+
+fn numeric_text_marker(element: ElementRef<'_>, number: &str) -> Option<String> {
+    for child in element.children() {
+        match child.value() {
+            scraper::Node::Comment(_) => continue,
+            scraper::Node::Text(text) if text.trim().is_empty() => continue,
+            scraper::Node::Text(text) => {
+                let tail = text.trim_start().strip_prefix(number)?.strip_prefix('.')?;
+                if !tail.is_empty() && !tail.chars().next().is_some_and(char::is_whitespace) {
+                    return None;
+                }
+                let length = text.len() - tail.trim_start().len();
+                return Some(text[..length].to_owned());
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn note_has_content(
+    element: ElementRef<'_>,
+    markers: &[ElementRef<'_>],
+    mut text_marker: Option<&str>,
+    depth: usize,
+) -> bool {
     if depth > 256 {
         return true;
     } // The serializer reports the nesting error.
@@ -1022,8 +1072,16 @@ fn note_has_content(element: ElementRef<'_>, markers: &[ElementRef<'_>], depth: 
     }
     element.children().any(|child| {
         if let Some(child) = ElementRef::wrap(child) {
-            note_has_content(child, markers, depth + 1)
+            note_has_content(child, markers, None, depth + 1)
         } else if let scraper::Node::Text(text) = child.value() {
+            let text = if let Some(prefix) = text_marker
+                && let Some(rest) = text.strip_prefix(prefix)
+            {
+                text_marker = None;
+                rest
+            } else {
+                text.as_ref()
+            };
             !text.trim().is_empty()
         } else {
             false
@@ -1036,6 +1094,7 @@ struct Footnote<'a> {
     aliases: Vec<String>,
     markers: Vec<ElementRef<'a>>,
     references: Vec<ElementRef<'a>>,
+    text_marker: Option<String>,
 }
 
 #[derive(Default)]
@@ -1044,6 +1103,7 @@ struct Footnotes<'a> {
     references: HashMap<usize, usize>,
     removed: HashSet<usize>,
     markers: HashSet<usize>,
+    text_markers: HashMap<usize, String>,
 }
 
 impl<'a> Footnotes<'a> {
@@ -1057,7 +1117,7 @@ impl<'a> Footnotes<'a> {
         if nodes.is_empty()
             || !nodes
                 .iter()
-                .any(|node| note_has_content(*node, &markers, 0))
+                .any(|node| note_has_content(*node, &markers, None, 0))
             || self.definitions.iter().any(|note| {
                 note.nodes
                     .iter()
@@ -1071,6 +1131,7 @@ impl<'a> Footnotes<'a> {
             aliases,
             markers,
             references,
+            text_marker: None,
         });
     }
 
@@ -1387,7 +1448,28 @@ impl<'a> Footnotes<'a> {
                 {
                     markers.push(*target);
                 }
-                notes.add(vec![*node], vec![id.clone()], markers, vec![]);
+                let mut nodes = vec![*node];
+                for sibling in node.next_siblings().filter_map(ElementRef::wrap) {
+                    if generic.iter().any(|(_, target, _)| *target == sibling)
+                        || !generic_continuation(sibling)
+                    {
+                        break;
+                    }
+                    if !is_hidden(sibling) {
+                        nodes.push(sibling);
+                    }
+                }
+                let before = notes.definitions.len();
+                notes.add(nodes, vec![id.clone()], markers, vec![]);
+                if notes.definitions.len() > before
+                    && let Some(number) = numeric_references
+                        .get(id)
+                        .and_then(|links| links.first())
+                        .and_then(|link| note_number(&plain(*link)))
+                {
+                    notes.definitions.last_mut().unwrap().text_marker =
+                        numeric_text_marker(*node, &number);
+                }
             }
         }
 
@@ -1449,7 +1531,9 @@ impl<'a> Footnotes<'a> {
                         {
                             break;
                         }
-                        nodes.push(*sibling);
+                        if !is_hidden(*sibling) {
+                            nodes.push(*sibling);
+                        }
                     }
                 }
                 notes.add(nodes, vec![format!("num:{number}")], vec![*marker], vec![]);
@@ -1544,11 +1628,25 @@ impl<'a> Footnotes<'a> {
             }
         }
         notes.definitions.retain(|note| {
-            note.nodes
-                .iter()
-                .any(|node| note_has_content(*node, &note.markers, 0))
+            note.nodes.iter().enumerate().any(|(index, node)| {
+                note_has_content(
+                    *node,
+                    &note.markers,
+                    if index == 0 {
+                        note.text_marker.as_deref()
+                    } else {
+                        None
+                    },
+                    0,
+                )
+            })
         });
         for (index, note) in notes.definitions.iter().enumerate() {
+            if let Some(prefix) = &note.text_marker {
+                notes
+                    .text_markers
+                    .insert(element_key(note.nodes[0]), prefix.clone());
+            }
             for reference in &note.references {
                 notes.references.insert(element_key(*reference), index + 1);
             }
@@ -1649,9 +1747,29 @@ fn serialize_clean(
     }
     let key = element_key(element);
     if !definition && let Some(number) = notes.references.get(&key) {
+        let visible_text = element
+            .descendants()
+            .filter_map(|node| {
+                let scraper::Node::Text(text) = node.value() else {
+                    return None;
+                };
+                (!node
+                    .ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .take_while(|parent| *parent != element)
+                    .any(|parent| {
+                        notes.removed.contains(&element_key(parent)) || !visible_reference(parent)
+                    }))
+                .then_some(&**text)
+            })
+            .collect::<String>();
+        let start = visible_text.len() - visible_text.trim_start().len();
+        let end = visible_text.trim_end().len();
+        escaped_text(&visible_text[..start], output);
         output.push_str(&format!(
             "<markitai-footnote data-number=\"{number}\"></markitai-footnote>"
         ));
+        escaped_text(&visible_text[end..], output);
         return Ok(());
     }
     if (notes.removed.contains(&key) && !(definition && depth == 0))
@@ -1753,10 +1871,23 @@ fn serialize_clean(
         }
     }
     output.push('>');
+    let mut text_marker = if definition && depth == 0 {
+        notes.text_markers.get(&key).map(String::as_str)
+    } else {
+        None
+    };
     for child in element.children() {
         if let Some(child) = ElementRef::wrap(child) {
             serialize_clean(child, base, output, depth + 1, notes, definition)?;
         } else if let scraper::Node::Text(text) = child.value() {
+            let text = if let Some(prefix) = text_marker
+                && let Some(rest) = text.strip_prefix(prefix)
+            {
+                text_marker = None;
+                rest
+            } else {
+                text.as_ref()
+            };
             if preformatted {
                 escaped(text, output);
             } else {
@@ -1772,11 +1903,7 @@ fn serialize_clean(
                 let trim_end = next.map_or(block_tag(name), |node| {
                     ElementRef::wrap(node).is_some_and(|element| block_tag(element.value().name()))
                 });
-                let text = if trim_start {
-                    text.trim_start()
-                } else {
-                    text.as_ref()
-                };
+                let text = if trim_start { text.trim_start() } else { text };
                 let text = if trim_end { text.trim_end() } else { text };
                 escaped_text(text, output);
             }
@@ -3129,5 +3256,134 @@ mod tests {
             assert!(doc.markdown.starts_with("Formula $x^2$."));
             assert_eq!(doc.markdown.matches("Unused two.").count(), 1);
         }
+    }
+
+    #[test]
+    fn generic_footnote_continuations_remain_with_their_definition() {
+        let doc = extract_html(
+            r##"<article><p>Claims <a href="#first">1</a> and <a href="#second">2</a>.</p>
+            <div class="note"><p id="first">1. First evidence.</p><p>Continuation paragraph.</p>
+            <ul><li>Supporting detail.</li></ul><blockquote>Quoted detail.</blockquote>
+            <pre><code>literal x &lt; y</code></pre><p>Final continuation.</p>
+            <p id="second">2. Second evidence.</p><p class="seealso">See also: another topic.</p>
+            <p>Keep this with the related section.</p></div><p>Outside the notes.</p></article>"##,
+            None,
+        )
+        .unwrap();
+        assert!(doc.markdown.contains("Claims [^1] and [^2]."));
+        let definition = doc.markdown.find("[^1]: First evidence.").unwrap();
+        for text in [
+            "Continuation paragraph.",
+            "Supporting detail.",
+            "Quoted detail.",
+            "literal x < y",
+            "Final continuation.",
+        ] {
+            assert_eq!(
+                doc.markdown.matches(text).count(),
+                1,
+                "{text}: {}",
+                doc.markdown
+            );
+            assert!(doc.markdown.find(text).unwrap() > definition);
+        }
+        assert!(
+            doc.markdown
+                .contains("\n\n    Continuation paragraph.\n\n    *   Supporting detail.")
+        );
+        assert!(doc.markdown.contains("\n    literal x < y\n"));
+        assert!(doc.markdown.find("See also: another topic.").unwrap() < definition);
+        assert!(doc.markdown.find("Outside the notes.").unwrap() < definition);
+        assert!(doc.markdown.ends_with("[^2]: Second evidence."));
+    }
+
+    #[test]
+    fn generic_footnotes_stop_at_section_id_and_update_boundaries() {
+        for boundary in [
+            "<h3>Next section</h3>",
+            "<p id=\"new-section\">Next section</p>",
+            "<p><a name=\"new-section\"></a>Next section</p>",
+            "<p><b>Update today:</b> Next section</p>",
+        ] {
+            let source = format!(
+                r##"<article><p><a href="#a">1</a> and <a href="#b">2</a>.</p><div class="notes"><p id="a">1. First.</p><p id="b">2. Second.</p>{boundary}<p>Independent content.</p></div></article>"##
+            );
+            let doc = extract_html(&source, None).unwrap();
+            assert!(
+                doc.markdown.find("Independent content.").unwrap()
+                    < doc.markdown.find("[^1]:").unwrap(),
+                "{}",
+                doc.markdown
+            );
+            assert!(doc.markdown.ends_with("[^1]: First.\n\n[^2]: Second."));
+        }
+    }
+
+    #[test]
+    fn hidden_continuations_are_never_promoted_to_visible_definition_roots() {
+        for hidden in [
+            "hidden",
+            "style=\"display:none\"",
+            "style=\"visibility:hidden\"",
+        ] {
+            for notes in [
+                format!(
+                    r##"<p><a href="#a">1</a> and <a href="#b">2</a>.</p><div class="notes"><p id="a">1. First.</p><p {hidden}>SECRET</p><p>Visible continuation.</p><p id="b">2. Second.</p></div>"##
+                ),
+                format!(
+                    r#"<p>A<sup>1</sup> B<sup>2</sup>.</p><hr><p><sup>1</sup>First.</p><p {hidden}>SECRET</p><p>Visible continuation.</p><p><sup>2</sup>Second.</p>"#
+                ),
+            ] {
+                let doc = extract_html(&format!("<article>{notes}</article>"), None).unwrap();
+                assert!(!doc.markdown.contains("SECRET"), "{}", doc.markdown);
+                assert!(
+                    doc.markdown
+                        .contains("[^1]: First.\n\n    Visible continuation.")
+                );
+                assert!(doc.markdown.ends_with("[^2]: Second."));
+            }
+        }
+    }
+
+    #[test]
+    fn generic_numeric_prefix_removal_requires_the_actual_reference_number() {
+        let doc = extract_html(r##"<article><p><a href="#a">1</a>, <a href="#b">2</a>, <a href="#c">3</a>.</p>
+            <div class="notes"><p id="a">1. <em>First evidence.</em></p><p id="b">2024. A historical date.</p><p id="c">3.5 is a decimal value.</p></div></article>"##, None).unwrap();
+        assert!(
+            doc.markdown.contains("[^1]: *First evidence.*"),
+            "{}",
+            doc.markdown
+        );
+        assert!(doc.markdown.contains("[^2]: 2024\\. A historical date."));
+        assert!(doc.markdown.ends_with("[^3]: 3.5 is a decimal value."));
+    }
+
+    #[test]
+    fn numeric_prefix_and_backlink_only_definition_is_not_emitted() {
+        let doc = extract_html(r##"<article><p><a id="ref-a" href="#a">1</a> and <a href="#b">2</a>.</p>
+            <div class="notes"><p id="a">1. <a href="#ref-a">Back</a></p><p id="b">2. Real content.</p></div></article>"##, None).unwrap();
+        assert!(
+            doc.markdown.starts_with("[1](#a) and [^1]."),
+            "{}",
+            doc.markdown
+        );
+        assert!(doc.markdown.ends_with("[^1]: Real content."));
+        assert!(!doc.markdown.contains("[^2]"));
+    }
+
+    #[test]
+    fn replacement_references_preserve_only_visible_wrapper_edge_whitespace() {
+        let doc = extract_html(
+            r##"<article><p><span>Word<span class="reference"> <sup>1</sup> </span></span>Next.</p>
+            <ol class="footnotes"><li id="fn-1">Definition.</li></ol></article>"##,
+            None,
+        )
+        .unwrap();
+        assert_eq!(doc.markdown, "Word [^1] Next.\n\n[^1]: Definition.");
+        let inline = extract_html(r#"<article><p>Before<span class="inline-footnote">1<span class="footnoteContent" hidden>  Hidden definition.  </span></span>After.</p></article>"#, None).unwrap();
+        assert_eq!(
+            inline.markdown,
+            "Before[^1]After.\n\n[^1]: Hidden definition."
+        );
     }
 }

@@ -92,7 +92,9 @@ source code blocks are kept separate from math interpretation.
 The reader collects references and definitions from the immutable DOM before
 sanitization, then emits numeric Markdown references and a definition section.
 Repeated references share one definition. Numbering follows definition order in
-the document, including inline notes. Ordinary link labels remain links; numeric
+the document, including inline notes. Replacing a reference wrapper preserves its
+visible leading/trailing whitespace; hidden popover text cannot supply whitespace
+to the surrounding article. Ordinary link labels remain links; numeric
 markers and explicit footnote semantics establish a reference.
 
 Supported structures include footnote/reference lists, `doc-footnote` and
@@ -115,6 +117,12 @@ numbered paragraphs require at least two corroborating body superscripts; an
 explicit footnote class can identify a single definition. Section delimiters
 allow continuation paragraphs/lists to move with the definition; otherwise only
 the numbered paragraph moves and following updates remain in the article.
+Generic named/ID definitions adopt only adjacent paragraphs, lists, quotes and
+code blocks under the same parent. Another target, an explicit identifier/named
+anchor, a section boundary, or a related/update label stops adoption. Hidden
+continuation blocks are never promoted to visible definition roots. A plain
+leading `N.` label is removed only when it exactly matches the resolved source
+reference number; years, decimal values and unmatched prose prefixes are kept.
 
 Only resolved definitions with readable content after backlink removal are
 removed from their original positions. Missing targets, unreferenced definitions

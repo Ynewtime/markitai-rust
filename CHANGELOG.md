@@ -24,4 +24,5 @@
 - HTML metadata precedence, quotes, soft line breaks and safe URL spelling.
 - CSS custom properties, quoted strings and comments no longer hide visible HTML content.
 - Source line breaks preserve separating spaces after inline links, code and footnote references.
+- Footnote detection preserves hidden-content, mathematical, navigation and continuation boundaries.
 - CLI paired flags use their last occurrence; image-only skips and compression controls preserve their existing behavior.
