@@ -25,10 +25,12 @@ markitai -c isolated.json --config-json '{"output":{"on_conflict":"skip"}}' note
 - `doctor [--json]` 报告当前开发版原生能力；诊断 JSON 暂为 Rust 新 schema，尚未与旧 doctor 逐字段对齐。
 - `--dry-run` 仅枚举输入和目标，不调用转换器、不创建输出目录。
 - `--compress/--no-compress` 映射共享图片处理配置；未启用 LLM/OCR 的独立图片返回 `image_only` 跳过状态，不写空文档。
+- 非 pure 本地文档的 LLM 结果可跨进程复用；`--no-cache` 跳过读取但仍写入成功结果，`--cache` 清除此绕过设置，不强制启用已禁用的缓存。`--no-cache-for` 接受逗号分隔的 glob，JSON 条目的 `cache_hit/llm_cache_hit` 反映实际命中。
+- `cache stats [--json] [-v] [--limit N]` 查看 LLM 缓存；不存在的数据库不会因查看而创建。详细列表最多返回 1,000 条。`cache clear [-y]` 清理本地 LLM 缓存，未给 `-y` 时需要在终端确认。若存在尚未支持的 URL 抓取缓存，清理会在修改前明确拒绝；浏览器域名缓存仍未实现。
 
 ## 明确的迁移缺口
 
-持久缓存、历史、断点恢复、Batch API、交互配置、订阅登录、serve、MCP、文件日志尚未在 CLI 实现。对应开关/命令请求会失败并说明原因。`--no-cache` 可用，因为当前每次请求均重新执行，不存在缓存命中。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取、图片与 pure 模式的缓存、历史、断点恢复、Batch API、交互配置、订阅登录、serve、MCP、文件日志仍有迁移缺口。pure 按参考行为不缓存；图片和 URL 当前每次重新处理，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
 
 目录批量当前有 stdout JSON 汇总，没有旧格式的持久 report/state 文件；这属于尚未完成的兼容项。同一目录内混合文件/URL 当前共享批量并发上限，尚未分别应用两类限制。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 

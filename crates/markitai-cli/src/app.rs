@@ -134,10 +134,10 @@ enum Command {
         #[arg(long)]
         suggest_extras: bool,
     },
-    /// Cache management (not yet implemented).
+    /// Inspect and clear persistent document enhancement cache.
     Cache {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: CacheCommand,
     },
     /// Provider authentication (not yet implemented).
     Auth {
@@ -151,6 +151,31 @@ enum Command {
     },
     /// MCP service (not yet implemented).
     Mcp,
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheCommand {
+    Stats {
+        #[arg(long)]
+        json: bool,
+        #[arg(short, long)]
+        verbose: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    Clear {
+        #[arg(short, long)]
+        yes: bool,
+        #[arg(long)]
+        include_spa_domains: bool,
+    },
+    /// Learned browser domains (not yet implemented).
+    SpaDomains {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -257,8 +282,6 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             "LLM Batch API",
         ),
         (cli.record_history, "--record-history"),
-        (cli.cache, "--cache"),
-        (cli.no_cache_for.is_some(), "--no-cache-for"),
         (cli.log_level.is_some(), "--log-level"),
     ] {
         if requested {
@@ -344,8 +367,21 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     if config::enabled(&cfg, "/output/report") {
         return Err(unsupported("Persistent conversion reports"));
     }
-    if cli.no_cache {
-        cfg["cache"]["no_cache"] = json!(true);
+    if let Some(bypass) = tri(cli.no_cache, cli.cache) {
+        cfg["cache"]["no_cache"] = json!(bypass);
+    }
+    if let Some(patterns) = cli
+        .no_cache_for
+        .as_ref()
+        .filter(|patterns| !patterns.is_empty())
+    {
+        cfg["cache"]["no_cache_patterns"] = json!(
+            patterns
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+        );
     }
     if let Some(profile) = &cli.profile {
         cfg["output"]["profile"] = json!(profile.to_lowercase());
@@ -503,6 +539,19 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             emit_json(&items, None);
         } else {
             for item in &items {
+                if !cli.quiet {
+                    for warning in item["warnings"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        eprintln!(
+                            "Warning: {}: {warning}",
+                            item["source"].as_str().unwrap_or("")
+                        );
+                    }
+                }
                 if item["status"] == "failed" {
                     eprintln!(
                         "Error: {}: {}",
@@ -665,6 +714,8 @@ fn outcome(task: &Task, result: &Result<ConversionOutput, String>) -> Value {
             item["cost_usd"] = json!(round(result.usage.cost_usd, 1_000_000.0));
             item["duration_s"] = json!(round(result.duration, 1000.0));
             item["llm_usage"] = json!(result.usage.by_model);
+            item["llm_cache_hit"] = json!(result.llm_cache_hit());
+            item["cache_hit"] = json!(result.llm_cache_hit());
             if is_url(&task.source) {
                 item["fetch_strategy"] = result
                     .frontmatter
@@ -1017,7 +1068,7 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 ));
             }
             config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
-            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":false,"screenshots":false,"browser":false,"cache":false,"serve":false,"mcp":false},"status":"development"});
+            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":false,"screenshots":false,"browser":false,"cache":true,"serve":false,"mcp":false},"status":"development"});
             if *as_json {
                 println!(
                     "{}",
@@ -1025,17 +1076,93 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 );
             } else {
                 println!(
-                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM\nNot available: OCR, screenshots, browser, persistent cache, serve, MCP",
+                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache\nNot available: OCR, screenshots, browser, fetch cache, serve, MCP",
                     markitai_core::VERSION
                 );
             }
         }
-        Command::Cache { .. } => return Err(unsupported("Persistent cache management")),
+        Command::Cache { command } => {
+            let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
+            return cache_command(command, &cfg);
+        }
         Command::Auth { .. } => return Err(unsupported("Provider authentication commands")),
         Command::Serve { .. } => return Err(unsupported("Web server")),
         Command::Mcp => return Err(unsupported("MCP server")),
     }
     Ok(0)
+}
+fn cache_command(command: &CacheCommand, cfg: &Value) -> CliResult<i32> {
+    match command {
+        CacheCommand::Stats {
+            json: as_json,
+            verbose,
+            limit,
+        } => {
+            let stats = markitai_core::llm_cache::stats(cfg, *verbose, *limit).map_err(runtime)?;
+            let failed = ["cache", "fetch_cache"]
+                .iter()
+                .any(|name| stats[name].get("error").is_some());
+            if *as_json {
+                println!("{}", serde_json::to_string_pretty(&stats).map_err(runtime)?);
+            } else {
+                println!("Cache enabled: {}", stats["enabled"]);
+                if let Some(error) = stats["cache"].get("error") {
+                    println!("LLM cache: {}", error.as_str().unwrap_or("unavailable"));
+                } else {
+                    println!(
+                        "LLM cache: {} entries ({} bytes)",
+                        stats["cache"]["count"].as_u64().unwrap_or(0),
+                        stats["cache"]["size_bytes"].as_u64().unwrap_or(0)
+                    );
+                    if *verbose && !stats["cache"].is_null() {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&stats["cache"]).map_err(runtime)?
+                        );
+                    }
+                }
+                if let Some(error) = stats["fetch_cache"].get("error") {
+                    println!(
+                        "URL fetch cache: {}",
+                        error.as_str().unwrap_or("unavailable")
+                    );
+                }
+            }
+            Ok(i32::from(failed))
+        }
+        CacheCommand::Clear {
+            yes,
+            include_spa_domains,
+        } => {
+            let dir = config::state_path(Path::new(
+                cfg["cache"]["global_dir"].as_str().unwrap_or("~/.markitai"),
+            ));
+            // Check unsupported stores before changing any cache. A partially
+            // completed clear must not be reported as a complete clear.
+            if *include_spa_domains {
+                return Err(unsupported("Learned browser-domain cache management"));
+            }
+            if dir.join("fetch_cache.db").try_exists().map_err(runtime)? {
+                return Err(unsupported("Existing URL fetch cache management"));
+            }
+            if !yes {
+                print!("Clear LLM + URL fetch caches ({})? [y/N]: ", dir.display());
+                io::stdout().flush().map_err(runtime)?;
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer).map_err(runtime)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    println!("Aborted");
+                    return Ok(0);
+                }
+            }
+            let count = markitai_core::llm_cache::clear(cfg).map_err(runtime)?;
+            println!("Cleared {count} cache entries");
+            Ok(0)
+        }
+        CacheCommand::SpaDomains { .. } => {
+            Err(unsupported("Learned browser-domain cache management"))
+        }
+    }
 }
 fn key_pointer(key: &str) -> CliResult<String> {
     config::key_pointer(key).map_err(runtime)

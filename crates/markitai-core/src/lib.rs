@@ -3,6 +3,7 @@ mod fetch;
 pub mod formats;
 mod images;
 mod llm;
+pub mod llm_cache;
 mod markdown;
 pub mod output;
 mod output_profiles;
@@ -205,13 +206,25 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         } else {
             &result.markdown
         };
+        let without_cache = |(markdown, usage)| llm::Enhancement {
+            markdown,
+            usage,
+            cache_hit: false,
+            warnings: Vec::new(),
+        };
         let enhanced = if let Some(image) = &vision {
             llm::enhance_image_with_source(input, &source_context, image.mime, &image.bytes, &cfg)
+                .map(without_cache)
+        } else if !pure && !is_url {
+            llm::enhance_with_cache(input, &source_context, source, &cfg)
         } else {
-            llm::enhance_with_source(input, &source_context, &cfg)
+            llm::enhance_with_source(input, &source_context, &cfg).map(without_cache)
         };
         match enhanced {
-            Ok((markdown, usage)) => {
+            Ok(enhancement) => {
+                let markdown = enhancement.markdown;
+                result.llm_cache_hit = enhancement.cache_hit;
+                result.warnings.extend(enhancement.warnings);
                 let (meta, body) = output::split_frontmatter(&markdown);
                 if pure {
                     let prefix_len = markdown.len() - body.len();
@@ -230,8 +243,10 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
                 } else {
                     crate::markdown::normalize(body)
                 });
-                result.usage = usage;
-                result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
+                result.usage = enhancement.usage;
+                if !result.llm_cache_hit {
+                    result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
+                }
             }
             Err(error) => {
                 if matches!(error, Error::NoModelConfigured | Error::Unsupported(_)) {

@@ -159,10 +159,18 @@ interpreted as template placeholders. The default user template is exactly
 instructions request byte-preserving frontmatter behavior. Non-pure formatting
 and profile application remain the responsibility of the output pipeline.
 
-The old structured-response schema, chunking, placeholder-repair staircase,
-refusal/degeneration detectors and persistent prompt-result cache are not yet
-implemented. The native built-ins return Markdown; they do not promise the old
-structured metadata-generation output.
+Non-pure local document enhancement has a [persistent cache](cache.md). Cache
+identity uses complete Markdown, resolved prompt templates/rules and the enabled
+model pool, with a native version namespace. A hit precedes credential resolution
+and returns zero new usage. `cache.no_cache` and matching source patterns bypass
+reads while still refreshing a successful answer; disabled caching does neither.
+Pure, image and URL enhancement bypass this cache. Database errors do not discard
+a successful model answer and surface as sanitized conversion warnings.
+
+The old structured-response schema, chunking, placeholder-repair staircase and
+refusal/degeneration detectors are not yet implemented. The native built-ins
+return Markdown; they do not promise the old structured metadata-generation
+output.
 
 ## Verification
 
@@ -171,7 +179,10 @@ automatic pooling and explicit-model precedence, disabled/missing-environment
 filtering, saved-provider credentials, Azure request parameters, deployment
 rotation, fallbacks and cycles, quota/authentication short-circuiting, request
 budgets, empty-response usage, Anthropic vision/cached-token accounting, prompt
-precedence, literal document braces and token-limit parameter mapping.
+precedence, literal document braces and token-limit parameter mapping. Cache
+checks additionally cover credential-independent hits, zero new usage, bypass
+refresh, prompt/content/model invalidation, disabled/pure/URL exclusions, corrupt
+or unwritable state, and rejecting token-truncated or blank cache candidates.
 
 HTTP tests bind loopback listeners, capture request headers and JSON, return
 scripted responses, and use bounded socket timeouts. Retry sleeps are injected

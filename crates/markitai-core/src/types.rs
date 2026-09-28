@@ -113,4 +113,14 @@ pub struct ConversionOutput {
     pub(crate) pure_llm_prefix: Option<String>,
     #[serde(skip)]
     pub(crate) base_frontmatter: Option<Map<String, Value>>,
+    #[serde(skip)]
+    pub(crate) llm_cache_hit: bool,
+}
+
+impl ConversionOutput {
+    /// Whether this conversion reused an existing document enhancement.
+    /// Host JSON remains compatible; the CLI has separate cache-status fields.
+    pub fn llm_cache_hit(&self) -> bool {
+        self.llm_cache_hit
+    }
 }

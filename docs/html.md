@@ -56,10 +56,70 @@ escaped property names, external stylesheets or the browser's complete cascade.
 The correction follows the r1 corpus audit; that historical artifact and its
 two recorded conversion errors remain unchanged.
 
+## Mathematical content
+
+Mathematics is recovered as TeX data before ordinary script removal. Only an
+exact `math/tex` script MIME type is recognized, with optional `mode=display`.
+JavaScript and other executable script types are still discarded. No script,
+TeX engine, browser or external renderer is executed.
+
+The reader recognizes KaTeX, MathJax, MediaWiki and Temml wrappers. It prefers
+explicit `data-latex`, `data-math`, `data-entry` or `alttext` values, then TeX
+annotations, then presentation MathML structure. A recognized wrapper can read
+its hidden assistive MathML without unhiding unrelated content. The wrapper is
+replaced once, preventing duplicate visual glyphs, fallback images and accessible
+math from appearing together. MathJax v2 preview siblings are discarded only
+when their parent also contains a nonempty TeX-source script.
+Structural traversal and text collection discard active script/style elements
+and XML annotations, including those nested inside MathML text elements.
+
+Structural MathML handles nested rows, fractions, roots, sub/superscripts,
+under/overscripts, common accents and Greek/operators, fenced expressions and
+tables. Display math uses `$$…$$`, inline math `$…$`; TeX source is preserved
+without Markdown backslash escaping. Literal angle brackets in a math source
+become TeX comparison commands so annotations cannot emit raw HTML. MathML depth
+is bounded at 64 elements, with an explicit conversion error beyond that limit.
+
+This is not a complete MathML or TeX renderer. Raw dollar/backslash-delimited
+math in ordinary text, visual-only MathJax CHTML/SVG reconstruction, TeX image
+services, arbitrary MathML layout/variants, multiscripts and exact tagged-equation
+layout remain outside this round. Unknown presentation elements retain their
+child text/structure where possible; specialized layout can differ. Existing
+source code blocks are kept separate from math interpretation.
+
+## Structured BBCode announcements
+
+`data-partnereventstore` JSON can contain the primary article in
+`announcement_body.body`. The reader reconstructs the first nonempty readable
+announcement from an array or object and uses its headline and timestamp;
+`data-groupvanityinfo` can supply the group/author. Invalid JSON falls back to
+ordinary HTML extraction. No JavaScript state is evaluated.
+
+The BBCode reader builds a bounded nesting tree. It supports paragraphs, headings,
+bold/italic/strike markup, quoted blocks, nested ordered/unordered lists
+with implicit `[*]` item endings, links, images, literal code blocks and YouTube
+preview identifiers. Raw HTML text retains entity escaping in the final Markdown,
+after intermediate HTML decoding; code blocks keep their fenced literal contents.
+Body text, headings, link labels and quote attribution share this protection.
+Generated images have an empty alt label; their destinations are validated.
+Link/image targets use the same URL validation as HTML. Legacy slash/quote escapes are normalized in tag arguments
+without rewriting literal code contents. Unknown tags remain visible as text,
+and nesting beyond 64 tags fails explicitly.
+
+The reader does not select among announcements by page/event ID, implement every
+BBCode dialect, resolve arbitrary embeds or fetch media. Underlined text is
+retained without underline styling. Ordered list marker
+styles and complex malformed-tag recovery can differ from upstream renderers.
+In the r2 corpus, the source **local file API** returns empty Markdown for the
+BBCode fixture, while its upstream **URL extraction** expectation contains the
+announcement. Rust intentionally recovers that body and metadata; this remains
+a strict local-API difference rather than an exact parity pass. URL-expectation
+quality must be checked separately. Historical audit reports are unchanged.
+
 The generic reader is not yet the source's complete web extraction pipeline.
-It does not replicate its site resolvers, browser/CSS visibility model, adaptive
-content scoring, schema-body fallback, full footnotes, callouts, shadow roots,
-or math standardization. Static input can therefore retain site chrome, omit
+It does not replicate its full site resolvers, browser/CSS visibility model,
+adaptive content scoring, schema-body fallback, full footnotes, callouts, shadow
+roots or complete math standardization. Static input can therefore retain site chrome, omit
 content outside the selected article, or differ in headings, tables and images.
 Those differences must be measured rather than inferred from successful parsing.
 

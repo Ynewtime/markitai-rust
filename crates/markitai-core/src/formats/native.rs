@@ -2,6 +2,8 @@ use crate::{Asset, Document, Error, Result};
 use anydoc::model::{Block, CellSlot, ImageSource, Inline, LinkTarget};
 use std::collections::BTreeSet;
 
+#[path = "office.rs"]
+mod office;
 #[path = "office_meta.rs"]
 mod office_meta;
 #[path = "pdf.rs"]
@@ -357,6 +359,9 @@ pub(super) fn extract(bytes: &[u8], extension: &str) -> Result<Document> {
         .ok_or_else(|| Error::Unsupported(format!("Unsupported format: {extension}")))?;
     if format == anydoc::Format::Pdf {
         return pdf::extract(bytes);
+    }
+    if format == anydoc::Format::Pptx {
+        return office::extract_presentation(bytes);
     }
     let mut parsed = anydoc::to_document(bytes, format).map_err(conversion_error)?;
     let metadata = office_meta::read(bytes, extension);

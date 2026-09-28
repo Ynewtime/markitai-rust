@@ -68,7 +68,7 @@ fn image_api_requires_extraction_and_vision_uses_binary_content() {
         r##"{"choices":[{"message":{"content":"# 图像\n\nRead text from image."}}]}"##,
     );
     let output = convert(path.to_str().unwrap(), ConvertOptions {
-        config: Some(json!({"image":{"compress":false},"llm":{"enabled":true,"router_settings":{"num_retries":0},"model_list":[{"model_name":"vision","litellm_params":{"model":"openai/test-vision","api_base":base,"api_key":"test-key"},"model_info":{"supports_vision":true}}]}})),
+        config: Some(json!({"cache":{"enabled":false},"image":{"compress":false},"llm":{"enabled":true,"router_settings":{"num_retries":0},"model_list":[{"model_name":"vision","litellm_params":{"model":"openai/test-vision","api_base":base,"api_key":"test-key"},"model_info":{"supports_vision":true}}]}})),
         output_dir: Some(dir.path().join("output")),
         ..Default::default()
     }).unwrap();
@@ -102,7 +102,7 @@ fn unrelated_features_do_not_reject_text_or_literal_image_examples() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("example.md");
     std::fs::write(&input, "# Text\n\n`![literal](not-an-image.png)`\n").unwrap();
-    let cfg = json!({"security":{"pdf_sanitize":"remove"},"ocr":{"enabled":true},"screenshot":{"enabled":true},"image":{"alt_enabled":true,"desc_enabled":true}});
+    let cfg = json!({"cache":{"enabled":false},"security":{"pdf_sanitize":"remove"},"ocr":{"enabled":true},"screenshot":{"enabled":true},"image":{"alt_enabled":true,"desc_enabled":true}});
     let plain = convert(
         input.to_str().unwrap(),
         ConvertOptions {
@@ -184,7 +184,7 @@ fn llm_native_http_contract_usage_and_failure_policy() {
         (500, r#"{"error":{"message":"unavailable"}}"#, "fail"),
     ] {
         let (base, server) = llm_server(status, payload);
-        let cfg = json!({"llm":{"enabled":true,"on_failure":policy,"model_list":[{"model_name":"test","litellm_params":{"model":"openai/test-model","api_base":base,"api_key":"test-key"}}]}});
+        let cfg = json!({"cache":{"enabled":false},"llm":{"enabled":true,"on_failure":policy,"model_list":[{"model_name":"test","litellm_params":{"model":"openai/test-model","api_base":base,"api_key":"test-key"}}]}});
         let result = convert(
             input.to_str().unwrap(),
             ConvertOptions {
@@ -219,6 +219,50 @@ fn llm_native_http_contract_usage_and_failure_policy() {
 }
 
 #[test]
+fn persistent_document_cache_keeps_host_json_stable_and_new_usage_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.md");
+    std::fs::write(&input, "# Original\n\nCache contract.\n").unwrap();
+    let (base, server) = llm_server(
+        200,
+        r##"{"choices":[{"message":{"content":"# Enhanced\n\nCached body."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":8}}"##,
+    );
+    let mut cfg = json!({"cache":{"enabled":true,"global_dir":dir.path().join("state")},"llm":{"enabled":true,"on_failure":"fail","router_settings":{"num_retries":0},"model_list":[{"model_name":"cache","litellm_params":{"model":"openai/cache-contract","api_base":base,"api_key":"local-mock"}}]}});
+    let first = convert(
+        input.to_str().unwrap(),
+        ConvertOptions {
+            config: Some(cfg.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert!(!first.llm_cache_hit());
+    assert_eq!(first.usage.requests, 1);
+    cfg["llm"]["model_list"][0]["litellm_params"]["api_key"] =
+        json!("os.environ/MARKITAI_MISSING_CACHE_CONTRACT_KEY");
+    let second = convert(
+        input.to_str().unwrap(),
+        ConvertOptions {
+            config: Some(cfg.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(second.llm_cache_hit());
+    assert_eq!(first.llm_markdown, second.llm_markdown);
+    assert_eq!(second.usage.requests, 0);
+    assert_eq!(second.usage.input_tokens, 0);
+    assert!(second.usage.by_model.is_empty());
+    let request = json!({"source":input,"options":{"config":cfg}}).to_string();
+    let response: Value = serde_json::from_str(&convert_json(&request)).unwrap();
+    assert_eq!(response["ok"], true);
+    assert!(response["result"].get("llm_cache_hit").is_none());
+    assert!(response["result"].get("cache_hit").is_none());
+    assert_eq!(response["result"]["usage"]["requests"], 0);
+}
+
+#[test]
 fn pure_llm_preserves_raw_input_and_uses_metadata_from_retained_outputs() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.md");
@@ -247,7 +291,7 @@ fn pure_llm_preserves_raw_input_and_uses_metadata_from_retained_outputs() {
         let (base, server) = llm_server(200, payload);
         let result = convert(input.to_str().unwrap(), ConvertOptions {
             output_dir: Some(dir.path().join(format!("out-{index}"))),
-            config: Some(json!({"llm":{"enabled":true,"pure":true,"keep_base":keep_base,"model_list":[{"model_name":"mock","litellm_params":{"model":"openai/mock","api_base":base}}]}})),
+            config: Some(json!({"cache":{"enabled":false},"llm":{"enabled":true,"pure":true,"keep_base":keep_base,"model_list":[{"model_name":"mock","litellm_params":{"model":"openai/mock","api_base":base}}]}})),
             ..Default::default()
         }).unwrap();
         let request = server.join().unwrap();
@@ -281,7 +325,7 @@ fn profiles_run_after_llm_and_each_retained_file_keeps_its_own_metadata() {
     );
     let result = convert(input.to_str().unwrap(), ConvertOptions {
         output_dir: Some(dir.path().join("out")),
-        config: Some(json!({"output":{"profile":"rag"},"llm":{"enabled":true,"keep_base":true,"model_list":[{"model_name":"mock","litellm_params":{"model":"openai/mock","api_base":base}}]}})),
+        config: Some(json!({"cache":{"enabled":false},"output":{"profile":"rag"},"llm":{"enabled":true,"keep_base":true,"model_list":[{"model_name":"mock","litellm_params":{"model":"openai/mock","api_base":base}}]}})),
         ..Default::default()
     }).unwrap();
     assert!(

@@ -12,6 +12,8 @@
 - Native Outlook MSG extraction, raster asset processing and standalone model vision.
 - Weighted LLM routing, fallback groups, retries, request budgets and custom prompts.
 - Complete 209-fixture HTML audit harness with separate compatibility and quality diagnostics.
+- Bundled SQLite document LLM cache with cross-process reuse, bypass controls and CLI statistics/clearing.
+- Native HTML math-source and structured BBCode recovery, plus presentation slide boundaries and shape-aware extraction.
 
 ### Fixed
 

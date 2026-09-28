@@ -20,7 +20,8 @@ network policy and optional model enhancement belong to the orchestration layer.
 | RST, Org, TeX | native markup readers | Structured sections, lists, code, math, links and tables; unsupported constructs retained with warnings |
 | JPEG, PNG, GIF, BMP, TIFF, WebP | image + native LLM transport | Standalone vision inputs and shared raster assets; local OCR remains unavailable |
 | DOC, DOCX, DOCM | anydoc document model | Headings, styled text, lists, tables, links, formulas, notes and embedded assets |
-| PPT, PPS, POT, PPTX, PPTM, PPSX, PPSM | anydoc document model | Native presentation content through the same Markdown renderer |
+| PPT, PPS, POT | anydoc document model | Legacy presentation content through the shared Markdown renderer |
+| PPTX, PPTM, PPSX, PPSM | bounded ZIP + PresentationML reader | Ordered slide markers, title placeholders, plain text frames, grouped shapes, tables, referenced images, cached chart data and speaker notes |
 | XLS, XLSX, XLSM, XLSB | anydoc document model | Native sheet content; XLS/XLSX/XLSM single-sheet names are recovered from package metadata; exact cell-format compatibility has not been established |
 | ODT, ODS, ODP, RTF | anydoc document model | Native structured documents through the same Markdown renderer |
 | EPUB | anydoc + OPF metadata | Spine content and the original title/authors/language/publisher/date/description/identifier preamble |
@@ -31,6 +32,44 @@ embedded bytes. Shared image preparation then applies configured filtering and
 compression. Unreferenced archive images are omitted. References use `.markitai/assets/{name}` until the output layer assigns
 final paths. A merged table's origin contains its content; covered cells are
 empty, and a warning records this Markdown representation.
+
+OOXML presentations have a separate reader because the generic document model
+flattens slide boundaries. The package's presentation relationships and
+`sldIdLst` determine slide order, including empty slides; filename sorting and
+heading counts do not determine boundaries. Every slide receives
+`<!-- Slide number: N -->`. Shapes are stably ordered by their effective top/left
+coordinates, with layout/master placeholder coordinates used when missing.
+Group children are ordered within their group. As in the reference reader, the
+first top-level placeholder with index zero supplies the first-level title;
+its type need not literally be `title`. Grouped or later placeholders do not
+turn the remainder of the slide into headings. Body text retains paragraph boundaries and does not
+acquire extra list markers from master styles, matching the reference's plain
+text-frame contract. Shared normal-mode cleanup remains responsible for repeated
+footers; pure output keeps the extracted text.
+
+Presentation tables use their first row as the Markdown header. Images remain
+at their shape position, keep normalized description text, and return their
+original embedded bytes; shared image processing owns encoding. Repeated
+references to the same package image share one asset. Cached chart category and
+series values become a table; linked workbooks are never opened or recalculated.
+Speaker notes follow their slide under `### Notes:`. Missing or malformed slides
+retain their numbered marker with a warning, while readable slides survive; a
+package with no readable slide fails. Unknown shapes retain available DrawingML
+text with a warning, and unsupported charts are explicitly identified. These
+fallbacks do not imply complete drawing, chart-type or SmartArt support.
+
+The presentation reader limits packages to 16,384 entries and 10,000 slides,
+each XML part to 16 MiB, each asset to 64 MiB and total decompressed parts to
+256 MiB. XML has per-part limits of 200,000 nodes and 127 nested elements.
+The layout/master cache retains at most 8 MiB of source XML and 50,000 parsed
+nodes; larger individual parts can be read within the part limits without being
+cached. This avoids accumulating expanded layout trees across large decks.
+Document types, escaping package paths, duplicate relationship IDs and malformed
+XML are rejected. Internal targets are resolved inside the archive; external
+image HTTP(S) URLs may remain references but are not fetched. Failed optional
+notes, layouts, charts or images are named in warnings without discarding the
+remaining slide content. These limits cover this reader's explicit passes, not
+every allocation inside ZIP/XML libraries.
 
 PDF pages with unreliable or missing native text retain their numbered marker
 and emit a warning naming the page and the parser's OCR reason. Other pages are
@@ -94,7 +133,7 @@ when its body data occupies only three; this differs from the reference's
 three-column rendering of the ODS fixture. RTF heading bold markers are omitted while other emphasis is
 retained. Hidden XLS/XLSX worksheets are currently omitted by the upstream parser
 and reported explicitly. XLSB sheet metadata, older XLS code pages other than
-Windows-1252, slide-boundary markers, exact presentation image encoding, PDF table
+Windows-1252, legacy/ODP slide-boundary markers, exact presentation image encoding, PDF table
 layout and PDF image placement require further compatibility work.
 
 ## Error and output principles
@@ -145,7 +184,10 @@ only after a case's content and asset checks pass.
 
 The native Office parser dependency is [anydoc](https://github.com/firecrawl/anydoc),
 whose Rust API exposes both Markdown and a structured document with embedded
-assets. It already backed legacy DOC/PPT in the reference implementation. Its
+assets. It already backed legacy DOC/PPT in the reference implementation. OOXML
+presentations now use their own bounded package reader to retain slide identity
+and the reference text-frame contract; other Office formats keep the shared
+renderer. Its
 native PDF reader cannot do OCR. This project adds its own Office renderer to
 avoid discarding embedded images and to control Markitai's output contract. The
 PDF adapter calls pdf-inspector's per-page API directly so that one OCR-required

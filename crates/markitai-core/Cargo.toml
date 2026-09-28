@@ -22,6 +22,8 @@ serde_yaml = "0.9"
 dotenvy = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 regex = "1"
+globset = "0.4"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 anydoc = "0.2.4"
 pdf-inspector = { version = "1.25.1", default-features = false }
 zip = { version = "8.6", default-features = false, features = ["deflate"] }

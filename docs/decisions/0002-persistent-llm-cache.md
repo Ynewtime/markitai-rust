@@ -1,10 +1,11 @@
 # Persistent document LLM cache
 
-Status: planned, not implemented. Contract reviewed at native source `21bf8f5`
-against reference `ba374322f884b0e720b45466cc1196f4574a3da5`.
+Status: implemented and covered by the round-four Rust integration checks.
+Contract reviewed against reference `ba374322f884b0e720b45466cc1196f4574a3da5`;
+release artifact verification is tracked in `CONTROL.md`.
 
 Repeated document enhancement should reuse a successful result across processes
-before spending a model request. The next implementation starts with non-pure
+before spending a model request. The initial implementation covers non-pure
 local documents; pure enhancement explicitly bypasses caching. Image, URL,
 process-memory and fetch caches require their own contracts.
 
@@ -26,10 +27,10 @@ process-memory and fetch caches require their own contracts.
   unavailability must not discard an otherwise successful conversion.
 
 Use a native cache-version namespace to avoid reading incompatible legacy
-structured responses as Markdown. Bundled SQLite is the proposed storage engine:
+structured responses as Markdown. Bundled SQLite is the selected storage engine:
 WAL and transactional admission/eviction provide a bounded shared cache while
 keeping the CLI independent of a system SQLite installation. Measure and record
-its binary-size cost before accepting the dependency. A single oversized result
+its binary-size cost with release validation. A single oversized result
 must be rejected without evicting existing useful entries.
 
 The reference processor currently omits some public enabled/size wiring, and its
@@ -39,12 +40,19 @@ configuration and document these corrections.
 
 ## Integration and validation
 
-An internal enhancement outcome should carry cache-hit state into the existing
+An internal enhancement outcome carries cache-hit state into the existing
 CLI `cache_hit` and `llm_cache_hit` fields without adding fields to the bindings'
-JSON contract. CLI bypass controls, statistics and clearing need real cache
-behavior before their unsupported guards are removed.
+JSON contract. CLI bypass controls, statistics and clearing use the same persistent store;
+unsupported guards remain for the other cache categories.
 
-Local mock-server checks must demonstrate cross-process reuse with zero second
+The implementation uses `rusqlite 0.40.2` with default features disabled and its
+`bundled` feature, pinned with `libsqlite3-sys 0.38.2` in Cargo.lock. See the
+[upstream SQLite binding documentation](https://docs.rs/rusqlite/0.40.2/rusqlite/).
+The runtime contract and remaining cache categories are described in
+[cache.md](../cache.md). Existing URL-fetch stores and SPA-domain clearing still
+receive explicit errors before a combined clear changes any entries.
+
+Local mock-server and storage checks demonstrate cross-process reuse with zero second
 request; no new usage on a hit; bypass-refresh-reuse; no database when disabled;
 content/prompt/model invalidation and filename-independent hits; concurrent
 writes; capacity eviction; and successful conversion with a damaged or unwritable
