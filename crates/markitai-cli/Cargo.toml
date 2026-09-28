@@ -25,6 +25,7 @@ serde_yaml = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 md-5 = "0.11"
 uuid = { version = "1", features = ["v4"] }
+indexmap = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 tempfile.workspace = true

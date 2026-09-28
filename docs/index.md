@@ -14,6 +14,7 @@
 - [Configuration](configuration.md): normalization, file selection, and isolated state.
 - [Output](output.md): ordinary/pure content and metadata assembly.
 - [Reports](reports.md): four CLI report formats, publication and validation limits.
+- [Recovery storage](state-storage.md): checkpoint codec, journal, replay and durability boundaries.
 - [CLI](cli.md) and [bindings](bindings.md): current user interfaces.
 - [Validation](validation/README.md): differential checks and measured evidence.
 - [Performance plan](performance-plan.md): profile tradeoffs, binding costs and long-lived memory checks.

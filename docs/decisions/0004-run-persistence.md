@@ -1,6 +1,7 @@
 # Run reports, resume state and history
 
-Status: **reports implemented; resume and history planned**. The CLI publishes
+Status: **reports and recovery storage implemented; CLI resume and
+history pending**. The CLI publishes
 all four report projections, including mixed file/URL directories. Source-level
 acceptance tests and a four-success-case clean-release differential audit pass
 at `0ab59a0`; rebuilt host packages also pass their scoped checks. See
@@ -65,8 +66,8 @@ Sources: `cli/main.py:950,1429`, `runs/report.py:209`,
 
 ## Identity and physical paths
 
-Reports belong to the output directory. The two state paths below are reserved
-for the planned recovery stage and are not currently created:
+Reports belong to the output directory. The state paths below are implemented
+by the internal store but are not yet created by CLI dispatch:
 
 ```text
 <output>/.markitai/reports/markitai.<hash>.report.json
@@ -103,7 +104,7 @@ the other modes use UUID names. At most 64 fallback candidates are attempted.
 Native report `skip` preserves existing bytes, correcting the reference's
 overwrite behavior. These differences are explicit acceptance targets.
 
-Planned state always has one stable base and sidecar. Write checkpoints by atomic
+State always has one stable base and sidecar. Write checkpoints by atomic
 replacement, never version renaming.
 
 File keys are relative to input. URL state keys are the bare URL, or
@@ -159,7 +160,7 @@ skip reasons, so a resumed report must not fabricate those values.
 Sources: `runs/report.py:19,31,58,82,164`, `json_order.py:161,242,268,329`,
 `batch.py:338,1288,1330,1635`, `cli/processors/url.py:1193,1370`.
 
-## Recovery journal and scheduler (planned)
+## Recovery journal and planned scheduler
 
 Base state contains `version,options,documents,urls`. A file entry always has
 `status`; a URL entry additionally has `source_file`. Completed entries retain
@@ -208,7 +209,7 @@ spans provider billing and the filesystem.
 
 ### Native replay fence and staged implementation
 
-This is a planned native state extension. Keep the reference `"1.0"` envelope
+The internal store implements this native state extension. Keep the reference `"1.0"` envelope
 and entry fields, and add namespaced checkpoint metadata containing a generation,
 applied sequence and validated run scope. Native journal events retain
 `type,key,data` plus the same generation and their sequence. Every mutation,
@@ -229,7 +230,7 @@ untagged events. The Python reader ignores added keys but does not implement thi
 fence, so native crash guarantees do not apply to reopening these files in Python.
 No state filename/discovery change is intended.
 
-The next implementation checkpoint is an unreachable-from-CLI codec/store with
+The storage implementation is an unreachable-from-CLI codec/store with
 authored legacy fixtures, bounded reads, scope checks, an OS-backed process lock
 and deterministic crash/failure tests around claim sync, base rename and journal
 cleanup. Keep the lock inode stable rather than deleting a held lock file. A
@@ -334,10 +335,15 @@ output containment/symlink policy before every publication.
    matches four successful reference report schemas, values and recursive key
    order, with empty model usage. Nonzero usage has native mock/unit coverage;
    neither it nor multiple-model ordering has reference differential evidence
-   from this run. This is not clean-source release validation or differential
-   coverage of all failure, mixed-input and model-usage branches; resume/history
-   guards remain in place.
-3. **Recovery and scheduling — planned:** read Python-shaped base/sidecar fixtures; test
+   from this run. R4 subsequently validated the same four pairs using the clean
+   release binary; host packages also passed their scoped checks. See the
+   [release evidence](../validation/reports-round7.md). This does not establish
+   differential coverage of all failure, mixed-input and model-usage branches;
+   resume/history guards remain in place.
+3. **Recovery storage — scoped checks passed; scheduling pending:** the internal
+   codec/store passes 57 shared tests and 13 authored reference snapshot/replay
+   pairs; see [storage validation](../validation/state-round8.md). Remaining process
+   gates must test
    failure-only retries, already-completed runs, mixed file/URL collisions,
    custom-name identities, legacy adoption, changed cwd, corrupt/oversized and
    truncated journals, claim ownership, interruption, merge-before-work and
@@ -367,7 +373,8 @@ Reference test anchors, relative to `packages/markitai/tests/unit/`:
 | History schema and asset collisions | `runs/test_history.py:40,123,150,171,191,216,224,242,272,288,326,372,407` |
 
 Each stage needs fresh source/artifact provenance and its own passing tests before
-the corresponding unsupported guard is removed. Report source tests and the
-limited development differential check have passed; clean-source release evidence
-is pending. Recovery and history remain design work and have no runtime
-validation claim. The [control center](../CONTROL.md) tracks subsequent checkpoints.
+the corresponding unsupported guard is removed. Report source tests, four
+clean-release differential cases and installed host checks have passed. The
+[state storage](../state-storage.md) implementation is validated separately from
+CLI scheduling. Recovery dispatch and history have no runtime validation claim.
+The [control center](../CONTROL.md) tracks subsequent checkpoints.

@@ -17,6 +17,7 @@
 - Native HTML math-source and structured BBCode recovery, plus presentation slide boundaries and shape-aware extraction.
 - Structured HTML footnotes with repeated-reference handling, safe definitions and preserved multi-block note content.
 - Persisted CLI reports for files, URLs, directories and URL lists, with mode-specific schemas, stable task hashes and atomic conflict handling.
+- Internal recovery-state codec and durable store with legacy ordering, process locks, bounded journals and crash replay fences; CLI resume integration remains pending.
 
 ### Fixed
 

@@ -128,3 +128,9 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   history/resume and complete runtime parity remain unfinished.
 - [Build identities](reports-round7-build.json), [reference report comparison](reports-round7-r4.json)
   and [package/log records](reports-round7-artifacts.json) preserve exact evidence.
+
+## Round-eight recovery storage
+
+- [Storage validation](state-round8.md): 410 Rust executions /330 distinct,
+  26 harness tests and 13 matching authored legacy state/replay pairs.
+  The store remains internal; CLI resume, scheduling and history are pending.
