@@ -235,3 +235,7 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   records the 22.42 MiB CLI and actual REST/MCP smoke tests. The increase from
   round twelve is explicit; no new performance or installed-binding claim is
   made. [Executed drivers](drivers/round13/README.md) retain exact provenance.
+
+## Round-nineteen evidence
+
+- [Native images and persistent service operations](image-workflows-round19.md): complete TIFF pages, image analysis/shared budgets and metadata publication, REST retry/enhance/deletion, source gate and clean release workflows.
