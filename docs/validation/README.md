@@ -115,3 +115,7 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
 - Eighteen Python harness tests pass, including 14 new regression tests against
   damaged or incomplete comparison evidence. These are harness checks, separate
   from the frozen artifact's Rust tests and native conversion gates.
+- [Full-LTO speed-optimized follow-up](profile-fat-speed.md): dist-opt3 at clean
+  `ab6b141` is a 6.14%-smaller CLI candidate with broadly similar measured timings
+  on six inputs. New paired measurements and all equivalence gates are recorded;
+  candidate package validation remains open and the default is unchanged.
