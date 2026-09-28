@@ -4,9 +4,11 @@ An implementation checkpoint is reproducible only when it records the command,
 source revision, test inputs, build profile, and platform. Passing new unit
 tests establishes specific contracts; it does not imply reference parity.
 
-Latest: [round twenty](media-cli-round20.md), native HEIF/AVIF, MIME images,
-CLI operation and rebuilt/installed bindings. The full arm64 gate and actual
-release workflows pass. Scoped x86_64 execution retains a Rosetta OCR failure;
+Latest: [round twenty-one](service-ui-round21.md), embedded web workspace,
+revisioned settings, discovery/probes and actual release-browser workflows.
+The full arm64 gate passes with 990 Rust executions, 31 Python checks and five
+additional JavaScript tests. Installed bindings remain verified at
+[round twenty](media-cli-round20.md). Scoped x86_64 execution retains a Rosetta OCR failure;
 remote CI, exact OCR quality and the complete migration remain unfinished.
 
 ## Local checks

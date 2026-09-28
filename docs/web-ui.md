@@ -88,9 +88,9 @@ with `node --test crates/markitai-cli/src/server/web/api.test.mjs`; Node is only
 development test tool. Syntax checks use `node --input-type=module --check` with
 each authored JS file on stdin.
 
-These are authored tests until the coordinator's gate executes them. Actual
-visual layout, DOM sanitization and complete click workflows require the separate
-real-browser acceptance; this document does not claim that acceptance before it
-runs. Current scope excludes OAuth login, print-to-PDF, source editing, embedded
+These tests and actual release-browser acceptance passed in
+[round twenty-one](validation/service-ui-round21.md), including mixed file/URL
+jobs, sanitization, downloads, two-tab revision conflicts and mobile layout.
+Current scope excludes OAuth login, print-to-PDF, source editing, embedded
 video/audio playback, external-image preview and the reference React UI's exact
 appearance. Model responses remain untrusted document content.
