@@ -33,6 +33,8 @@ def main():
     args = parser.parse_args()
     if args.iterations < 3:
         parser.error('At least 3 measured iterations are required')
+    if args.output.exists():
+        parser.error('Use a new output path to preserve previous measurements')
     binary, reference = args.binary.resolve(), args.reference.resolve()
     old = reference / '.venv/bin/python'
     if not binary.is_file() or not old.is_file():
@@ -41,6 +43,8 @@ def main():
               'platform':platform.platform(), 'machine':platform.machine(),
               'iterations':args.iterations, 'warmup':1,
               'measurement':'fresh CLI process, buffered stdout; OS filesystem cache warm',
+              'script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              'native_revision':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
               'reference_sha':subprocess.check_output(['git','rev-parse','HEAD'],cwd=reference,text=True).strip(),
               'binary':{'bytes':binary.stat().st_size,
                         'gzip_bytes':len(gzip.compress(binary.read_bytes(),mtime=0)),
@@ -54,6 +58,7 @@ def main():
         environment = {k:v for k,v in os.environ.items() if k in {'PATH','SYSTEMROOT','TMPDIR','LANG','LC_ALL'}}
         environment.update(MARKITAI_HOME=str(work/'state'),MARKITAI_CONFIG=str(config),
                            MARKITAI_LOG_DIR=str(work/'logs'),PYTHONDONTWRITEBYTECODE='1',
+                           PYTHONNOUSERSITE='1',PYTHON_DOTENV_DISABLED='1',
                            LITELLM_LOCAL_MODEL_COST_MAP='True')
         cases = {
             'startup_version':None,
@@ -70,22 +75,32 @@ def main():
             commands = {'rust':[str(binary),*args_tail], 'python':[str(old),'-m','markitai',*args_tail]}
             measurements, payloads = {}, {}
             for label,command in commands.items():
-                run(command,environment,work)
-                samples=[]
-                for _ in range(args.iterations):
+                _,payloads[label]=run(command,environment,work)
+                measurements[label]={'samples_ms':[]}
+            for iteration in range(args.iterations):
+                order = list(commands) if iteration % 2 == 0 else list(reversed(commands))
+                for label in order:
+                    command=commands[label]
                     elapsed,payload=run(command,environment,work)
-                    samples.append(elapsed)
-                payloads[label]=payload
+                    if payload != payloads[label]:
+                        raise RuntimeError(f'{name}/{label}: stdout changed between calls')
+                    measurements[label]['samples_ms'].append(elapsed)
+            for label in commands:
+                samples=measurements[label]['samples_ms']
                 measurements[label]={'median_ms':round(statistics.median(samples),3),
                                      'min_ms':round(min(samples),3),'max_ms':round(max(samples),3),
                                      'samples_ms':[round(n,3) for n in samples],
-                                     'stdout_bytes':len(payload)}
+                                     'stdout_bytes':len(payloads[label]),
+                                     'stdout_sha256':hashlib.sha256(payloads[label]).hexdigest()}
+            exact=payloads['rust']==payloads['python'] if fixture else None
             report['cases'].append({'name':name, 'measurements':measurements,
-                'stdout_exact_match':payloads['rust']==payloads['python'] if fixture else None,
-                'median_ratio_python_over_rust':round(measurements['python']['median_ms']/measurements['rust']['median_ms'],2)})
+                'stdout_exact_match':exact,
+                'median_ratio_python_over_rust':round(measurements['python']['median_ms']/measurements['rust']['median_ms'],2) if exact is not False else None})
             print(f"{name}: Rust {measurements['rust']['median_ms']} ms; Python {measurements['python']['median_ms']} ms",flush=True)
     report['limitations']=['Small synthetic warm-filesystem cases; not broad document throughput.',
         'Each measurement includes process startup, parsing, and buffered stdout.',
+        'Engine order alternates each measured iteration; every stdout must match its warmup.',
+        'Explicit config and PYTHON_DOTENV_DISABLED isolate configuration; this is not an OS network or filesystem sandbox.',
         'Nonmatching output cases are not equivalent-quality speedup evidence.',
         'No installed Python package-size comparison: reference .venv contains development dependencies.',
         'No peak RSS or cold filesystem measurement in this initial run.']

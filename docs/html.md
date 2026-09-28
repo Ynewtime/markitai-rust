@@ -45,6 +45,17 @@ dispatcher must preserve the reader's title so normal output can use it.
   hidden and navigation content is excluded. A hidden ancestor also disqualifies
   an article candidate. DOM serialization stops with an error beyond 256 levels.
 
+Inline visibility uses parsed CSS declarations rather than substring matching.
+Only the actual `display` and `visibility` property names affect this check;
+custom properties such as `--footer-display: none` do not hide content. Quoted
+strings, comments and nested function/block values cannot introduce declarations.
+Recognized keyword declarations honor order and `!important`; `display: none`
+and `visibility: hidden` or `collapse` hide the element. The HTML `hidden`
+attribute still applies independently. This does not compute CSS variables,
+escaped property names, external stylesheets or the browser's complete cascade.
+The correction follows the r1 corpus audit; that historical artifact and its
+two recorded conversion errors remain unchanged.
+
 The generic reader is not yet the source's complete web extraction pipeline.
 It does not replicate its site resolvers, browser/CSS visibility model, adaptive
 content scoring, schema-body fallback, full footnotes, callouts, shadow roots,

@@ -16,6 +16,7 @@ import statistics
 import subprocess
 import sys
 import time
+import uuid
 
 
 def sha256(data: bytes) -> str:
@@ -42,19 +43,75 @@ def configuration(state: Path) -> dict:
     }
 
 
-def worker(request: dict) -> dict:
-    def block_python_network(event, _args):
-        if event in {"socket.connect", "socket.getaddrinfo", "socket.sendto"}:
-            raise RuntimeError("Network access is disabled in this benchmark")
+class ProtectedStateAccess(PermissionError):
+    """A Python operation attempted to access real user state."""
 
-    sys.addaudithook(block_python_network)
+
+def install_python_guards() -> dict:
+    # Capture both spellings before registering the hook; do not change HOME.
+    protected = Path.home() / ".markitai"
+    roots = {os.path.abspath(protected), os.path.realpath(protected)}
+    path_events = {
+        "open": (0,), "os.listdir": (0,), "os.scandir": (0,), "os.chdir": (0,),
+        "os.mkdir": (0,), "os.remove": (0,), "os.rmdir": (0,),
+        "os.chmod": (0,), "os.chown": (0,), "os.utime": (0,),
+        "os.rename": (0, 1), "os.link": (0, 1), "os.symlink": (0, 1),
+    }
+    state = {"protected_paths": sorted(roots), "self_tests": {},
+             "blocked_state_events": [], "blocked_network_events": [],
+             "scope": "Python path audit events only; not metadata/descriptor syscalls, native FFI or an OS sandbox"}
+    testing = True
+
+    def guard(event, args):
+        if event in {"socket.connect", "socket.getaddrinfo", "socket.sendto"}:
+            state["blocked_network_events"].append(event)
+            raise RuntimeError("Network access is disabled in this benchmark")
+        for index in path_events.get(event, ()):
+            path = args[index]
+            if isinstance(path, int):
+                continue  # Descriptor-only operations are outside this path guard.
+            absolute = os.path.abspath(os.fsdecode(path) if path is not None else ".")
+            candidates = (absolute, os.path.realpath(absolute))
+            if any(candidate == root or candidate.startswith(root + os.sep)
+                   for candidate in candidates for root in roots):
+                if not testing:
+                    state["blocked_state_events"].append({"event": event, "path": absolute})
+                raise ProtectedStateAccess(f"Benchmark blocked {event} on protected user state: {absolute}")
+
+    sys.addaudithook(guard)
+    # No directory is created. The random missing parent also makes accidental
+    # fall-through fail without writing a probe into the user's existing state.
+    probe = protected / ("__benchmark_guard_probe_" + uuid.uuid4().hex) / "blocked"
+    operations = {
+        "read": lambda: open(probe, "rb"),
+        "write": lambda: open(probe, "wb"),
+        "listdir": lambda: os.listdir(probe),
+        "scandir": lambda: os.scandir(probe),
+    }
+    for name, operation in operations.items():
+        try:
+            result = operation()
+        except ProtectedStateAccess:
+            state["self_tests"][name] = "blocked"
+        else:
+            if hasattr(result, "close"):
+                result.close()
+            raise RuntimeError(f"Protected-state guard did not block {name}")
+    testing = False
+    return state
+
+
+def worker(request: dict) -> dict:
+    isolation = install_python_guards()
     cfg = request["config"]
     options = dict(llm=False, ocr=False, screenshot=False, alt=False, desc=False)
     if request["engine"] == "reference":
         sys.path.insert(0, str(Path(request["reference"]) / "packages/markitai/src"))
         from markitai import convert
         from markitai.config import MarkitaiConfig
+        from loguru import logger
 
+        logger.remove()
         config = MarkitaiConfig.model_validate(cfg)
 
         def call():
@@ -92,6 +149,8 @@ def worker(request: dict) -> dict:
     # Imports, caller configuration and request construction are outside the timer.
     imported_peak = peak_rss_bytes()
     warmup = call()
+    if isolation["blocked_state_events"] or isolation["blocked_network_events"]:
+        raise RuntimeError(f"Warmup attempted forbidden access: {isolation}")
     expected, assets, skip_reason, warnings = fields(warmup)
     if assets or skip_reason:
         raise RuntimeError("Synthetic fixture unexpectedly produced assets or was skipped")
@@ -110,6 +169,8 @@ def worker(request: dict) -> dict:
             raise RuntimeError("Repeated calls changed their output, assets, skip reason or warnings")
         samples.append(elapsed / 1_000_000)
         del result, markdown
+    if isolation["blocked_state_events"] or isolation["blocked_network_events"]:
+        raise RuntimeError(f"Timed calls attempted forbidden access: {isolation}")
     return {
         "ok": True, "engine": request["engine"], "pid": os.getpid(),
         "python": sys.version, "python_executable": sys.executable,
@@ -118,7 +179,7 @@ def worker(request: dict) -> dict:
         "peak_rss_bytes": peak_rss_bytes(), "post_import_peak_rss_bytes": imported_peak,
         "ru_maxrss_unit": "bytes" if sys.platform == "darwin" else "KiB",
         "markdown_sha256": expected_hash, "markdown_bytes": len(expected_bytes),
-        "warnings": warnings,
+        "warnings": warnings, "python_isolation": isolation,
     }
 
 
@@ -138,6 +199,7 @@ def run_worker(python: Path, request: dict, directory: Path, timeout: int) -> di
     environment = {
         "PATH": os.defpath, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+        "PYTHON_DOTENV_DISABLED": "1",
         "MARKITAI_HOME": str(state), "MARKITAI_CONFIG": str(config_path),
         "MARKITAI_LOG_DIR": str(state / "logs"), "TMPDIR": str(temporary),
         "LITELLM_LOCAL_MODEL_COST_MAP": "True",
@@ -147,11 +209,13 @@ def run_worker(python: Path, request: dict, directory: Path, timeout: int) -> di
     with (directory / "worker.log").open("w") as log:
         completed = subprocess.run(command, env=environment, cwd=directory,
                                    stdout=log, stderr=log, timeout=timeout, check=False)
-    if completed.returncode or not response_path.is_file():
+    if not response_path.is_file():
         raise RuntimeError(f"Worker failed; inspect {directory / 'worker.log'}")
     response = json.loads(response_path.read_text(encoding="utf-8"))
     if not response.get("ok"):
         raise RuntimeError(f"Worker failed in {directory}: {response.get('error')}")
+    if completed.returncode:
+        raise RuntimeError(f"Worker exited {completed.returncode}; inspect {directory / 'worker.log'}")
     return response
 
 
@@ -203,7 +267,7 @@ def main() -> int:
         "platform": platform.platform(), "machine": platform.machine(),
         "python_entrypoint": str(python), "processes_per_engine_per_case": args.processes,
         "timed_calls_per_process": args.iterations, "warmup_calls_per_process": 1,
-        "measurement": "Python-hosted public API calls; native includes ctypes + JSON decode + response free",
+        "measurement": "Native C ABI with prebuilt JSON request + ctypes + JSON response decode/free versus reference Python public API; excludes new Python binding request encoding and dataclass construction",
         "rss_scope": "Fresh Python worker peak, including imports, configuration, warmup and timed calls; not bare Rust or CLI RSS",
         "library": {"source": str(library), "frozen": str(frozen), "bytes": frozen.stat().st_size,
                     "sha256": sha256(frozen.read_bytes()), "declared_build_profile": args.build_profile},

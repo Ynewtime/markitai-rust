@@ -18,4 +18,5 @@
 - Ordinary and pure output assembly, structured-data title fallbacks, XML prose, and email dates.
 - PDF page failures retain readable pages and report incomplete extraction explicitly.
 - HTML metadata precedence, quotes, soft line breaks and safe URL spelling.
+- CSS custom properties, quoted strings and comments no longer hide visible HTML content.
 - CLI paired flags use their last occurrence; image-only skips and compression controls preserve their existing behavior.

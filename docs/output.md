@@ -41,7 +41,11 @@ The public result contains only durable asset paths when an output directory was
 provided. Asset remapping recognizes inline images/links, wiki references,
 reference definitions, and HTML `img`/`a` destinations, including multiline tags.
 It preserves titles and other attributes while leaving code and literal examples
-untouched. Filtered reference images are removed together with their definitions;
+untouched for fenced/indented code, same-line code spans and comments, and
+line-start literal HTML blocks. Inline code spans crossing line boundaries and
+literal HTML/comments beginning inside a paragraph still need broader parsing.
+Reference definition destinations and optional titles must share one physical
+line. Filtered reference images are removed together with their definitions;
 download-link labels remain readable.
 
 The current implementation serializes file reservations and writing within one

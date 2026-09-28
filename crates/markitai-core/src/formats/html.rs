@@ -264,16 +264,106 @@ fn escaped_text(value: &str, output: &mut String) {
     );
 }
 
+fn hidden_inline_style(style: &str) -> bool {
+    // Parse declaration boundaries before inspecting property names. Semicolons
+    // inside strings, comments or function/block values are not separators.
+    fn record(declaration: &str, properties: &mut [Option<(bool, bool)>; 2]) {
+        let Some((property, value)) = declaration.split_once(':') else {
+            return;
+        };
+        let property = property.trim();
+        let index = if property.eq_ignore_ascii_case("display") {
+            0
+        } else if property.eq_ignore_ascii_case("visibility") {
+            1
+        } else {
+            return;
+        };
+        let value = value.trim();
+        let (value, important) = value
+            .rsplit_once('!')
+            .filter(|(_, priority)| priority.trim().eq_ignore_ascii_case("important"))
+            .map_or((value, false), |(value, _)| (value.trim(), true));
+        // Strings and other invalid keyword values cannot create a hiding rule
+        // or override an earlier valid declaration. CSS variable evaluation and
+        // stylesheets belong to a browser's computed-style model.
+        let keyword = value.to_ascii_lowercase();
+        let hidden = match (index, keyword.as_str()) {
+            (0, "none") | (1, "hidden" | "collapse") => true,
+            (
+                0,
+                "block" | "inline" | "inline-block" | "flow-root" | "flex" | "inline-flex" | "grid"
+                | "inline-grid" | "table" | "inline-table" | "table-row" | "table-cell"
+                | "table-caption" | "table-column" | "table-column-group" | "table-row-group"
+                | "table-header-group" | "table-footer-group" | "list-item" | "contents",
+            )
+            | (1, "visible")
+            | (_, "initial" | "inherit" | "unset" | "revert" | "revert-layer") => false,
+            _ => return,
+        };
+        if properties[index].is_none_or(|(_, previous_important)| important || !previous_important)
+        {
+            properties[index] = Some((hidden, important));
+        }
+    }
+
+    let mut properties = [None; 2];
+    let mut declaration = String::new();
+    let mut quote = None;
+    let mut nesting = 0usize;
+    let mut characters = style.chars().peekable();
+    while let Some(character) = characters.next() {
+        if let Some(delimiter) = quote {
+            declaration.push(character);
+            if character == '\\' {
+                if let Some(escaped) = characters.next() {
+                    declaration.push(escaped);
+                }
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if character == '/' && characters.peek() == Some(&'*') {
+            characters.next();
+            while let Some(comment) = characters.next() {
+                if comment == '*' && characters.peek() == Some(&'/') {
+                    characters.next();
+                    break;
+                }
+            }
+            declaration.push(' ');
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' | '[' | '{' => nesting += 1,
+            ')' | ']' | '}' => nesting = nesting.saturating_sub(1),
+            ';' if nesting == 0 => {
+                record(&declaration, &mut properties);
+                declaration.clear();
+                continue;
+            }
+            '\\' => {
+                declaration.push(character);
+                if let Some(escaped) = characters.next() {
+                    declaration.push(escaped);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        declaration.push(character);
+    }
+    if quote.is_none() && nesting == 0 {
+        record(&declaration, &mut properties);
+    }
+    properties.into_iter().flatten().any(|(hidden, _)| hidden)
+}
+
 fn is_hidden(element: ElementRef<'_>) -> bool {
     let value = element.value();
-    let style = value
-        .attr("style")
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .replace(char::is_whitespace, "");
-    value.attr("hidden").is_some()
-        || style.contains("display:none")
-        || style.contains("visibility:hidden")
+    value.attr("hidden").is_some() || value.attr("style").is_some_and(hidden_inline_style)
 }
 
 fn serialize_clean(
@@ -723,6 +813,62 @@ mod tests {
     #[test]
     fn candidate_inside_hidden_ancestor_cannot_become_article() {
         let doc = extract_html("<div hidden><article><p>Hidden text that outweighs the visible article by length.</p></article></div><main><p>Visible</p></main>", None).unwrap();
+        assert_eq!(doc.markdown, "Visible");
+    }
+
+    #[test]
+    fn css_custom_properties_preserve_visible_article_content() {
+        let doc = extract_html(r#"<div style="--footer-display: none; --graph-controls-display: none;"><article><h1>开发者</h1><p>如果你熟悉 TypeScript 或 CSS，可以开发插件。</p></article></div>"#, None).unwrap();
+        assert!(doc.markdown.contains("开发者"));
+        assert!(doc.markdown.contains("可以开发插件"));
+    }
+
+    #[test]
+    fn hidden_style_checks_property_tokens_not_embedded_strings_or_comments() {
+        for style in [
+            "--foo-display:none; --foo-visibility:hidden",
+            "content: 'display:none; visibility:hidden'",
+            r#"content: "escaped \"; display:none"; color: red"#,
+            "/* display:none; visibility:hidden */ color:red",
+            "background:url('x;display:none'); color:red",
+            "--theme: { display:none; visibility:hidden }; color:red",
+            "display:'none'; visibility:\"hidden\"",
+            "dis/**/play:none; visibility:hiddenish",
+            "content: 'unfinished; display:none",
+            "color:red; /* unfinished comment; display:none",
+        ] {
+            assert!(!hidden_inline_style(style), "unexpectedly hidden: {style}");
+        }
+        for style in [
+            "DISPLAY : NoNe",
+            "display: /* explanation */ none ! IMPORTANT",
+            "/* declaration */ visibility: hidden",
+            "visibility:collapse",
+            "content:'display:block;'; display:none",
+            "--theme:{display:block;}; visibility:hidden",
+        ] {
+            assert!(hidden_inline_style(style), "expected hidden: {style}");
+        }
+    }
+
+    #[test]
+    fn inline_hidden_properties_follow_order_and_importance() {
+        for style in [
+            "display:none; display:block",
+            "visibility:hidden!important; visibility:visible!important",
+            "display:none; display:block!important; display:none",
+        ] {
+            assert!(!hidden_inline_style(style), "unexpectedly hidden: {style}");
+        }
+        for style in [
+            "display:block; display:none",
+            "display:none!important; display:block",
+            "visibility:hidden; display:block",
+            "display:none; display:'block'",
+        ] {
+            assert!(hidden_inline_style(style), "expected hidden: {style}");
+        }
+        let doc = extract_html(r#"<main><p style="content:'display:none'">Visible</p><p style="display:/* comment */none">Hidden</p><p hidden style="display:block">Also hidden</p></main>"#, None).unwrap();
         assert_eq!(doc.markdown, "Visible");
     }
 }
