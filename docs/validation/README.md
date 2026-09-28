@@ -8,8 +8,8 @@ Latest: [round twenty-two](media-llm-round22.md), bounded Numbers tables,
 isolated Office full-page capture, typed document metadata, complete Unicode
 chunks and concurrent first-write cache recovery. The unchanged-source gate
 passes 1,033 Rust executions, 31 Python harness checks, formatting and strict
-Clippy, followed by six actual Office renderer/API tests. Release CLI and
-refreshed installed binding acceptance are pending this round. The prior actual
+Clippy, followed by six actual Office renderer/API tests. Release CLI passes ten workflows and 119 assertions; refreshed installed Node
+(three tests), Python (16 tests) and Go race acceptance pass. The prior actual
 web workspace/browser record is [round twenty-one](service-ui-round21.md).
 Scoped x86_64 execution retains a Rosetta OCR failure; remote CI, exact OCR
 quality and the complete migration remain unfinished.

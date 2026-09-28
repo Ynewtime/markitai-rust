@@ -92,3 +92,9 @@ page. The authored generator and fixture now use those explicit paragraph
 boundaries. The production PDF filter and three-page assertions were retained;
 the original failed fixture and six comparative exports remain in the round's
 investigation evidence.
+
+The retained round-22 release CLI also passes full-page PPTX, legacy PPT and Word
+acceptance, including hidden/blank pages and full-frame pixel checks. Refreshed
+installed Node/Python/Go packages pass their binding tests against this core. See
+[round-22 evidence](validation/media-llm-round22.md); these authored samples do not
+establish Microsoft Office layout equivalence or other-host support.
