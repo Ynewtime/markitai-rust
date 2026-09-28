@@ -3,6 +3,7 @@
 use crate::VERSION;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde_json::{Map, Value, json};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cfg: &Value) {
@@ -38,6 +39,10 @@ pub(crate) fn rewrite_asset_references(
 ) -> String {
     if replacements.is_empty() {
         return source.to_owned();
+    }
+    if replacements.len() == 1 {
+        let (previous, next) = replacements.iter().next().unwrap();
+        return rewrite_asset_target(source, previous, next);
     }
     transform(
         source,
@@ -87,30 +92,15 @@ impl TargetSyntax {
                     index += 1 + next.len_utf8();
                     continue;
                 }
-            } else if matches!(self, Self::Html) && character == '&' {
-                // Stop at another '&' or non-entity character, so an unmatched
-                // prefix cannot repeatedly scan the remainder of a long tag.
-                let mut end = None;
-                for (offset, byte) in rest.bytes().enumerate().skip(1) {
-                    if byte == b';' {
-                        end = Some(offset);
-                        break;
-                    }
-                    if !byte.is_ascii_alphanumeric() && byte != b'#' {
-                        break;
-                    }
+            } else if matches!(self, Self::Html)
+                && character == '&'
+                && let Some((consumed, chars)) = html_entity(rest)
+            {
+                if matches!(chars[0], '#' | '?') {
+                    return index;
                 }
-                if let Some(end) = end {
-                    let entity = &rest[..=end];
-                    let decoded = html_unescape(entity);
-                    if matches!(decoded.as_str(), "#" | "?") {
-                        return index;
-                    }
-                    if decoded != entity {
-                        index += entity.len();
-                        continue;
-                    }
-                }
+                index += consumed;
+                continue;
             }
             index += character.len_utf8();
         }
@@ -134,7 +124,7 @@ impl TargetRewrite<'_, '_> {
     }
 
     fn html(self) -> String {
-        let mut result = html_escape(&uri_file_path(self.path, false));
+        let mut result = html_escape(&html_file_path(self.path));
         // This span came from the same parsed attribute and retains its entity
         // escaping and percent escapes. Escaping it again changes URI data.
         result.push_str(self.suffix);
@@ -163,6 +153,27 @@ fn uri_file_path(value: &str, wiki: bool) -> String {
                 write!(result, "%{:02X}", character as u32).unwrap();
             }
             character => result.push(character),
+        }
+    }
+    result
+}
+
+fn html_file_path(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    for (index, character) in value.char_indices() {
+        if character.is_ascii_control()
+            || character == '\\'
+            || character == ' ' && (index == 0 || index + 1 == value.len())
+        {
+            use std::fmt::Write;
+            write!(result, "%{:02X}", character as u32).unwrap();
+        } else {
+            match character {
+                '%' => result.push_str("%25"),
+                '#' => result.push_str("%23"),
+                '?' => result.push_str("%3F"),
+                character => result.push(character),
+            }
         }
     }
     result
@@ -234,7 +245,7 @@ fn next_content<'a>(
             .map_or(source.len(), |end| offset + end + 1)
     };
     let mut end = end_of_line(start);
-    let literal = context.literal(&source[start..end]);
+    let literal = context.markdown_literal(&source[start..end]);
     if !literal {
         let mut index = start;
         while index < end {
@@ -454,8 +465,9 @@ fn html_literal_end(text: &str) -> Option<usize> {
         {
             let closing = format!("</{tag}>");
             return Some(
-                text.to_ascii_lowercase()
-                    .find(&closing)
+                text.as_bytes()
+                    .windows(closing.len())
+                    .position(|window| window.eq_ignore_ascii_case(closing.as_bytes()))
                     .map_or(text.len(), |end| end + closing.len()),
             );
         }
@@ -463,96 +475,171 @@ fn html_literal_end(text: &str) -> Option<usize> {
     None
 }
 
-struct HtmlReference<'a> {
-    target: &'a str,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HtmlAttributeKind {
+    Src,
+    Href,
+    Poster,
+    Srcset,
+}
+
+struct HtmlAttribute {
+    kind: HtmlAttributeKind,
+    active: bool,
     start: usize,
     end: usize,
+    value: std::ops::Range<usize>,
+}
+
+struct HtmlReference<'a> {
+    name: &'a str,
+    attributes: Vec<HtmlAttribute>,
     tag_end: usize,
-    attribute_start: usize,
-    attribute_end: usize,
-    image: bool,
+}
+
+impl HtmlReference<'_> {
+    fn image_attribute(&self, kind: HtmlAttributeKind) -> bool {
+        (self.name.eq_ignore_ascii_case("img") && kind != HtmlAttributeKind::Href)
+            || kind == HtmlAttributeKind::Srcset
+            || kind == HtmlAttributeKind::Poster
+    }
+
+    fn has_image(&self, source: &str) -> bool {
+        self.attributes.iter().any(|attribute| {
+            if !attribute.active || !self.image_attribute(attribute.kind) {
+                return false;
+            }
+            let value = DecodedHtml::decode(&source[attribute.value.clone()], false);
+            if attribute.kind == HtmlAttributeKind::Srcset {
+                srcset_candidates(&value.text).any(|candidate| candidate.valid)
+            } else {
+                !value.text.trim_matches(html_space).is_empty()
+            }
+        })
+    }
+}
+
+fn html_space(character: char) -> bool {
+    matches!(character, '\t' | '\n' | '\u{c}' | '\r' | ' ')
 }
 
 fn html_reference(text: &str) -> Option<HtmlReference<'_>> {
-    if !text.starts_with('<') {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'<') {
         return None;
     }
-    let bytes = text.as_bytes();
     let mut index = 1;
     while bytes.get(index).is_some_and(u8::is_ascii_alphanumeric) {
         index += 1;
     }
-    let image = text[1..index].eq_ignore_ascii_case("img");
-    if !image && !text[1..index].eq_ignore_ascii_case("a") {
+    let name = &text[1..index];
+    let kinds: &[(&str, HtmlAttributeKind)] =
+        if name.eq_ignore_ascii_case("img") || name.eq_ignore_ascii_case("source") {
+            &[
+                ("src", HtmlAttributeKind::Src),
+                ("srcset", HtmlAttributeKind::Srcset),
+            ]
+        } else if name.eq_ignore_ascii_case("video") {
+            &[
+                ("src", HtmlAttributeKind::Src),
+                ("poster", HtmlAttributeKind::Poster),
+            ]
+        } else if name.eq_ignore_ascii_case("audio") || name.eq_ignore_ascii_case("track") {
+            &[("src", HtmlAttributeKind::Src)]
+        } else if name.eq_ignore_ascii_case("a") {
+            &[("href", HtmlAttributeKind::Href)]
+        } else {
+            return None;
+        };
+    if !bytes
+        .get(index)
+        .is_some_and(|byte| html_space(*byte as char) || b"/>".contains(byte))
+    {
         return None;
     }
-    let wanted = if image { "src" } else { "href" };
-    let mut destination = None;
+    let mut attributes: Vec<HtmlAttribute> = Vec::new();
+    let mut seen = 0u8;
     while index < bytes.len() {
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| html_space(*byte as char))
+        {
             index += 1;
         }
         if text[index..].starts_with("/>") {
             index += 1;
         }
         if bytes.get(index) == Some(&b'>') {
-            let (start, end, attribute_start, attribute_end) = destination?;
             return Some(HtmlReference {
-                target: &text[start..end],
-                start,
-                end,
+                name,
+                attributes,
                 tag_end: index + 1,
-                attribute_start,
-                attribute_end,
-                image,
             });
         }
         let name_start = index;
         while bytes
             .get(index)
-            .is_some_and(|byte| !byte.is_ascii_whitespace() && !b"=<>/\"'".contains(byte))
+            .is_some_and(|byte| !html_space(*byte as char) && !b"=<>/\"'".contains(byte))
         {
             index += 1;
         }
         if index == name_start {
             return None;
         }
-        let name = &text[name_start..index];
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        if bytes.get(index) != Some(&b'=') {
-            continue;
-        }
-        index += 1;
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        let quote = bytes
+        let attribute_name = &text[name_start..index];
+        while bytes
             .get(index)
-            .copied()
-            .filter(|byte| matches!(byte, b'\'' | b'"'));
-        if quote.is_some() {
+            .is_some_and(|byte| html_space(*byte as char))
+        {
             index += 1;
         }
-        let start = index;
-        while let Some(byte) = bytes.get(index) {
-            if quote == Some(*byte)
-                || quote.is_none() && (byte.is_ascii_whitespace() || *byte == b'>')
+        let mut value = index..index;
+        if bytes.get(index) == Some(&b'=') {
+            index += 1;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| html_space(*byte as char))
             {
-                break;
+                index += 1;
             }
-            index += 1;
-        }
-        let end = index;
-        if quote.is_some() {
-            if bytes.get(index).copied() != quote {
-                return None;
+            let quote = bytes
+                .get(index)
+                .copied()
+                .filter(|byte| matches!(byte, b'\'' | b'"'));
+            if quote.is_some() {
+                index += 1;
             }
-            index += 1;
+            let start = index;
+            while let Some(byte) = bytes.get(index) {
+                if quote == Some(*byte)
+                    || quote.is_none() && (html_space(*byte as char) || *byte == b'>')
+                {
+                    break;
+                }
+                index += 1;
+            }
+            value = start..index;
+            if quote.is_some() {
+                if bytes.get(index).copied() != quote {
+                    return None;
+                }
+                index += 1;
+            }
         }
-        if name.eq_ignore_ascii_case(wanted) && destination.is_none() {
-            destination = Some((start, end, name_start, index));
+        if let Some((_, kind)) = kinds
+            .iter()
+            .find(|(wanted, _)| wanted.eq_ignore_ascii_case(attribute_name))
+        {
+            let bit = 1u8 << (*kind as u8);
+            let active = seen & bit == 0;
+            seen |= bit;
+            attributes.push(HtmlAttribute {
+                kind: *kind,
+                active,
+                start: name_start,
+                end: index,
+                value,
+            });
         }
     }
     None
@@ -581,40 +668,447 @@ fn html_tag_end(text: &str) -> Option<usize> {
     None
 }
 
-fn html_unescape(value: &str) -> String {
-    let mut result = String::new();
-    let mut rest = value;
-    while let Some(start) = rest.find('&') {
-        result.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let Some(end) = rest.find(';') else {
+/// Decode one HTML character reference in attribute context. The shared HTML
+/// table bounds named lookup; a malformed ampersand never scans the whole tail.
+fn html_entity(value: &str) -> Option<(usize, [char; 2])> {
+    let rest = value.strip_prefix('&')?;
+    if let Some(numeric) = rest.strip_prefix('#') {
+        let (digits, radix, prefix) = if let Some(hex) = numeric.strip_prefix(['x', 'X']) {
+            (hex, 16, 3)
+        } else {
+            (numeric, 10, 2)
+        };
+        let mut number = 0u32;
+        let mut count = 0;
+        for character in digits.chars() {
+            let Some(digit) = character.to_digit(radix) else {
+                break;
+            };
+            number = number.saturating_mul(radix).saturating_add(digit);
+            count += character.len_utf8();
+        }
+        if count == 0 {
+            return None;
+        }
+        let end = prefix + count;
+        let consumed = end + usize::from(value.as_bytes().get(end) == Some(&b';'));
+        let character = if number == 0 {
+            '\u{fffd}'
+        } else {
+            char::from_u32(number).unwrap_or('\u{fffd}')
+        };
+        let character = if (0x80..=0x9f).contains(&number) {
+            markup5ever::data::C1_REPLACEMENTS[(number - 0x80) as usize].unwrap_or(character)
+        } else {
+            character
+        };
+        return Some((consumed, [character, '\0']));
+    }
+    let mut matched = None;
+    for (index, character) in rest.char_indices() {
+        if !character.is_ascii_alphanumeric() && character != ';' {
+            break;
+        }
+        let end = index + character.len_utf8();
+        let Some(&(first, second)) = markup5ever::data::NAMED_ENTITIES.get(&rest[..end]) else {
             break;
         };
-        let entity = &rest[1..end];
-        let decoded = match entity {
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "num" => Some('#'),
-            "quest" => Some('?'),
-            _ => entity
-                .strip_prefix("#x")
-                .or_else(|| entity.strip_prefix("#X"))
-                .and_then(|n| u32::from_str_radix(n, 16).ok())
-                .or_else(|| entity.strip_prefix('#').and_then(|n| n.parse().ok()))
-                .and_then(char::from_u32),
-        };
-        if let Some(ch) = decoded {
-            result.push(ch);
-            rest = &rest[end + 1..];
-        } else {
-            result.push('&');
-            rest = &rest[1..];
+        if first != 0 {
+            matched = Some((end, first, second));
         }
     }
-    result.push_str(rest);
+    let (end, first, second) = matched?;
+    if !rest[..end].ends_with(';')
+        && rest
+            .as_bytes()
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'=')
+    {
+        return None;
+    }
+    Some((end + 1, [char::from_u32(first)?, char::from_u32(second)?]))
+}
+
+/// Attribute decoding can introduce srcset separators. Keep offsets into the
+/// original spelling so replacing a URL leaves entities and descriptors intact.
+struct DecodedHtml<'a> {
+    text: Cow<'a, str>,
+    offsets: Option<Vec<(usize, usize)>>,
+}
+
+impl<'a> DecodedHtml<'a> {
+    fn new(source: &'a str) -> Self {
+        Self::decode(source, true)
+    }
+
+    fn decode(source: &'a str, track_offsets: bool) -> Self {
+        if !source.contains(['&', '\r', '\0']) {
+            return Self {
+                text: Cow::Borrowed(source),
+                offsets: None,
+            };
+        }
+        let mut text = String::with_capacity(source.len());
+        let mut offsets = track_offsets.then(Vec::new);
+        let mut index = 0;
+        while index < source.len() {
+            let rest = &source[index..];
+            let character = rest.chars().next().unwrap();
+            let (consumed, characters) = html_entity(rest).unwrap_or_else(|| {
+                if character == '\r' {
+                    (if rest.starts_with("\r\n") { 2 } else { 1 }, ['\n', '\0'])
+                } else {
+                    (
+                        character.len_utf8(),
+                        [
+                            if character == '\0' {
+                                '\u{fffd}'
+                            } else {
+                                character
+                            },
+                            '\0',
+                        ],
+                    )
+                }
+            });
+            let start = text.len();
+            for character in characters
+                .into_iter()
+                .filter(|character| *character != '\0')
+            {
+                text.push(character);
+            }
+            index += consumed;
+            // Record only length changes. Srcset token boundaries cannot split
+            // an entity's multiple code points: none of those expansions contain
+            // ASCII whitespace or comma. Ordinary bytes need no offset table.
+            if text.len() - start != consumed
+                && let Some(offsets) = &mut offsets
+            {
+                offsets.push((text.len(), index));
+            }
+        }
+        Self {
+            text: Cow::Owned(text),
+            offsets,
+        }
+    }
+
+    fn raw_offset(&self, index: usize) -> usize {
+        let Some(offsets) = &self.offsets else {
+            return index;
+        };
+        let count = offsets.partition_point(|(decoded, _)| *decoded <= index);
+        if count == 0 {
+            index
+        } else {
+            let (decoded, raw) = offsets[count - 1];
+            raw + (index - decoded)
+        }
+    }
+}
+
+fn html_unescape(value: &str) -> String {
+    DecodedHtml::decode(value, false).text.into_owned()
+}
+
+struct SrcsetCandidate {
+    url: std::ops::Range<usize>,
+    end: usize,
+    valid: bool,
+}
+
+/// Follow the HTML srcset token boundaries, including commas within URLs and
+/// parentheses within descriptors. Invalid candidates retain their source text.
+fn srcset_candidates(value: &str) -> impl Iterator<Item = SrcsetCandidate> + '_ {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    std::iter::from_fn(move || {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| html_space(*byte as char) || *byte == b',')
+        {
+            index += 1;
+        }
+        if index == bytes.len() {
+            return None;
+        }
+        let start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| !html_space(*byte as char))
+        {
+            index += 1;
+        }
+        let mut end = index;
+        let mut descriptors = [""; 3];
+        let mut descriptor_count = 0;
+        if bytes.get(end.wrapping_sub(1)) == Some(&b',') {
+            while end > start && bytes[end - 1] == b',' {
+                end -= 1;
+            }
+        } else {
+            let mut descriptor_start = index;
+            let mut in_parens = false;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                if !in_parens && (html_space(byte as char) || byte == b',') {
+                    if descriptor_start < index && descriptor_count < descriptors.len() {
+                        descriptors[descriptor_count] = &value[descriptor_start..index];
+                        descriptor_count += 1;
+                    }
+                    index += 1;
+                    descriptor_start = index;
+                    if byte == b',' {
+                        break;
+                    }
+                    continue;
+                }
+                if byte == b'(' {
+                    in_parens = true;
+                }
+                if byte == b')' {
+                    in_parens = false;
+                }
+                index += 1;
+            }
+            if descriptor_start < index
+                && bytes.get(index - 1) != Some(&b',')
+                && descriptor_count < descriptors.len()
+            {
+                descriptors[descriptor_count] = &value[descriptor_start..index];
+                descriptor_count += 1;
+            }
+        }
+        Some(SrcsetCandidate {
+            url: start..end,
+            end: index,
+            valid: end > start && srcset_descriptors_valid(&descriptors[..descriptor_count]),
+        })
+    })
+}
+
+fn srcset_descriptors_valid(descriptors: &[&str]) -> bool {
+    let (mut width, mut density, mut height) = (false, false, false);
+    for descriptor in descriptors {
+        let Some((suffix, number)) = descriptor
+            .chars()
+            .next_back()
+            .map(|last| (last, &descriptor[..descriptor.len() - last.len_utf8()]))
+        else {
+            return false;
+        };
+        let positive_integer = || {
+            !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && number.bytes().any(|byte| byte != b'0')
+        };
+        match suffix {
+            'w' if !width && !density && positive_integer() => width = true,
+            'h' if !height && !density && positive_integer() => height = true,
+            'x' if !width && !density && !height && valid_density(number) => density = true,
+            _ => return false,
+        }
+    }
+    !height || width
+}
+
+fn valid_density(value: &str) -> bool {
+    // HTML's floating point grammar excludes leading '+', trailing '.', NaN,
+    // and infinity even though Rust's float parser accepts some of them.
+    let bytes = value.as_bytes();
+    let mut index = usize::from(bytes.first() == Some(&b'-'));
+    let start = index;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    let integer = index > start;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let fraction = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == fraction {
+            return false;
+        }
+    } else if !integer {
+        return false;
+    }
+    if bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+    {
+        index += 1;
+        if bytes
+            .get(index)
+            .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+        {
+            index += 1;
+        }
+        let exponent = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent {
+            return false;
+        }
+    }
+    index == bytes.len() && value.parse::<f64>().is_ok_and(|number| number >= 0.0)
+}
+
+fn srcset_destination(target: TargetRewrite<'_, '_>) -> String {
+    let mut path = String::new();
+    for character in html_file_path(target.path).chars() {
+        if character.is_ascii_whitespace() || character == ',' {
+            use std::fmt::Write;
+            write!(path, "%{:02X}", character as u32).unwrap();
+        } else {
+            path.push(character);
+        }
+    }
+    let mut result = html_escape(&path);
+    result.push_str(target.suffix);
+    result
+}
+
+enum AttributeEdit {
+    Keep,
+    Value(String),
+    Remove,
+}
+
+fn html_target_edit(
+    target: &str,
+    replacement: Replacements<'_>,
+    visible: bool,
+    srcset: bool,
+) -> AttributeEdit {
+    if target.is_empty() {
+        return AttributeEdit::Keep;
+    }
+    let render = |next: TargetRewrite<'_, '_>| {
+        if next.path.is_empty() {
+            AttributeEdit::Remove
+        } else {
+            AttributeEdit::Value(if srcset {
+                srcset_destination(next)
+            } else {
+                next.html()
+            })
+        }
+    };
+    if let Some(next) = replacement.decoded(target, TargetSyntax::Html) {
+        return render(next);
+    }
+    if visible {
+        let split = TargetSyntax::Html.suffix_start(target);
+        if let Some(path) = visible_target(&html_unescape(&target[..split])) {
+            // A profile changes only the prefix of an existing URI; its percent
+            // escapes already represent URI data, unlike a replacement filename.
+            let mut next = html_escape(&path);
+            next.push_str(&target[split..]);
+            return AttributeEdit::Value(next);
+        }
+    }
+    AttributeEdit::Keep
+}
+
+fn srcset_edit(
+    target: &str,
+    replacement: Replacements<'_>,
+    visible: bool,
+) -> (AttributeEdit, bool) {
+    let decoded = DecodedHtml::new(target);
+    let candidates = srcset_candidates(&decoded.text);
+    let mut output = String::new();
+    let mut cursor = 0;
+    let mut changed = false;
+    let mut surviving = false;
+    let mut retained_invalid = false;
+    for candidate in candidates {
+        if !candidate.valid {
+            retained_invalid = true;
+            continue;
+        }
+        let start = decoded.raw_offset(candidate.url.start);
+        let end = decoded.raw_offset(candidate.url.end);
+        match html_target_edit(&target[start..end], replacement, visible, true) {
+            AttributeEdit::Keep => surviving = true,
+            AttributeEdit::Value(next) => {
+                output.push_str(&target[cursor..start]);
+                output.push_str(&next);
+                cursor = end;
+                changed = true;
+                surviving = true;
+            }
+            AttributeEdit::Remove => {
+                output.push_str(&target[cursor..start]);
+                cursor = decoded.raw_offset(candidate.end);
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        (AttributeEdit::Keep, surviving)
+    } else if !surviving && !retained_invalid {
+        (AttributeEdit::Remove, false)
+    } else {
+        output.push_str(&target[cursor..]);
+        (AttributeEdit::Value(output), surviving)
+    }
+}
+
+fn rewrite_html_reference(
+    source: &str,
+    reference: &HtmlReference<'_>,
+    replacement: Replacements<'_>,
+    visible: bool,
+) -> String {
+    let mut edits = Vec::new();
+    let mut removed = Vec::new();
+    let mut surviving_image = false;
+    for attribute in &reference.attributes {
+        if !attribute.active {
+            continue;
+        }
+        let target = &source[attribute.value.clone()];
+        let (edit, surviving) = if attribute.kind == HtmlAttributeKind::Srcset {
+            srcset_edit(target, replacement, visible)
+        } else {
+            let edit = html_target_edit(target, replacement, visible, false);
+            let surviving = !matches!(edit, AttributeEdit::Remove)
+                && !html_unescape(target).trim_matches(html_space).is_empty();
+            (edit, surviving)
+        };
+        surviving_image |= reference.image_attribute(attribute.kind) && surviving;
+        if matches!(edit, AttributeEdit::Remove) {
+            removed.push(attribute.kind);
+        }
+        edits.push((attribute, edit));
+    }
+    if reference.name.eq_ignore_ascii_case("img") && !removed.is_empty() && !surviving_image {
+        return String::new();
+    }
+    let mut result = String::with_capacity(reference.tag_end);
+    let mut cursor = 0;
+    for attribute in &reference.attributes {
+        // Removing only the effective attribute would activate a later duplicate.
+        // Remove its duplicate spellings as well; remapping leaves them untouched.
+        if removed.contains(&attribute.kind) {
+            result.push_str(&source[cursor..attribute.start]);
+            cursor = attribute.end;
+        } else if attribute.active
+            && let Some((_, AttributeEdit::Value(next))) = edits
+                .iter()
+                .find(|(candidate, _)| candidate.start == attribute.start)
+        {
+            result.push_str(&source[cursor..attribute.value.start]);
+            result.push_str(next);
+            cursor = attribute.value.end;
+        }
+    }
+    result.push_str(&source[cursor..reference.tag_end]);
     result
 }
 
@@ -676,7 +1170,7 @@ fn inline_has_images_nested(
         } else if let Some(end) = html_literal_end(tail) {
             index += end;
         } else if let Some(reference) = html_reference(tail) {
-            if reference.image && !reference.target.is_empty() {
+            if reference.has_image(tail) {
                 return true;
             }
             index += reference.tag_end;
@@ -754,17 +1248,25 @@ struct LiteralContext {
 impl LiteralContext {
     /// Opening and closing fence lines themselves are literal too.
     fn literal(&mut self, line: &str) -> bool {
+        self.literal_with_html(line, true)
+    }
+
+    fn markdown_literal(&mut self, line: &str) -> bool {
+        self.literal_with_html(line, false)
+    }
+
+    fn literal_with_html(&mut self, line: &str, protect_html_lines: bool) -> bool {
         let mut content = line.trim_start_matches([' ', '\t']);
         while let Some(rest) = content.strip_prefix('>') {
             content = rest.trim_start_matches(' ');
         }
-        if let Some(tag) = self.html {
+        if protect_html_lines && let Some(tag) = self.html {
             if content.to_ascii_lowercase().contains(&format!("</{tag}>")) {
                 self.html = None;
             }
             return true;
         }
-        if self.fence.is_none() {
+        if protect_html_lines && self.fence.is_none() {
             let lower = content.to_ascii_lowercase();
             for tag in ["pre", "code", "script", "style"] {
                 if lower.starts_with(&format!("<{tag}")) {
@@ -1393,35 +1895,12 @@ fn inline_nested(
             continue;
         }
         if let Some(reference) = html_reference(tail) {
-            let replaced = replacement.decoded(reference.target, TargetSyntax::Html);
-            let next = replaced
-                .map(|next| {
-                    if next.path.is_empty() {
-                        String::new()
-                    } else {
-                        next.html()
-                    }
-                })
-                .or_else(|| {
-                    visible
-                        .then(|| visible_target(&html_unescape(reference.target)))
-                        .flatten()
-                        .map(|next| html_escape(&next))
-                });
-            if let Some(next) = next {
-                if next.is_empty() {
-                    if !reference.image {
-                        output.push_str(&tail[..reference.attribute_start]);
-                        output.push_str(&tail[reference.attribute_end..reference.tag_end]);
-                    }
-                } else {
-                    output.push_str(&tail[..reference.start]);
-                    output.push_str(&next);
-                    output.push_str(&tail[reference.end..reference.tag_end]);
-                }
-            } else {
-                output.push_str(&tail[..reference.tag_end]);
-            }
+            output.push_str(&rewrite_html_reference(
+                tail,
+                &reference,
+                replacement,
+                visible,
+            ));
             index += reference.tag_end;
             continue;
         }
@@ -1621,6 +2100,288 @@ mod tests {
             .iter()
             .map(|(from, to)| ((*from).into(), (*to).into()))
             .collect()
+    }
+
+    #[test]
+    fn html_media_attributes_rewrite_together_without_rewriting_other_attributes() {
+        let mapping = paths(&[
+            ("assets/a.png", "assets/b.png"),
+            ("assets/b.png", "assets/c.png"),
+        ]);
+        let source = "<IMG SRC='assets/a.png?v=1&amp;x=2#f' srcset=\"assets/a.png 1x, assets/b.png 2x\" data-src='assets/a.png'>\n<source src='assets/a.png' srcset='assets/b.png 640w'>\n<video src='assets/a.png' poster='assets/b.png'></video><audio src=assets/a.png></audio><track src='assets/a.png'><a href='assets/b.png'>link</a>";
+        let expected = "<IMG SRC='assets/b.png?v=1&amp;x=2#f' srcset=\"assets/b.png 1x, assets/c.png 2x\" data-src='assets/a.png'>\n<source src='assets/b.png' srcset='assets/c.png 640w'>\n<video src='assets/b.png' poster='assets/c.png'></video><audio src=assets/b.png></audio><track src='assets/b.png'><a href='assets/c.png'>link</a>";
+        assert_eq!(rewrite_asset_references(source, &mapping), expected);
+    }
+
+    #[test]
+    fn srcset_commas_are_url_data_until_the_html_candidate_boundary() {
+        let mapping = paths(&[
+            ("assets/a,b.png", "assets/new,copy.png"),
+            ("assets/b.png", "assets/new.png"),
+        ]);
+        let source = "<img srcset='data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, assets/a,b.png 2x, https://example.test/a,b.png 3x, assets/b.png, assets/a,b.png'>";
+        let expected = "<img srcset='data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, assets/new%2Ccopy.png 2x, https://example.test/a,b.png 3x, assets/new.png, assets/new%2Ccopy.png'>";
+        assert_eq!(rewrite_asset_references(source, &mapping), expected);
+        // No intervening whitespace means this is one URL, not two candidates.
+        let one_url = "<source srcset='assets/b.png,assets/b.png'>";
+        assert_eq!(rewrite_asset_references(one_url, &mapping), one_url);
+    }
+
+    #[test]
+    fn srcset_entities_create_boundaries_but_percent_data_and_suffixes_stay_distinct() {
+        let mapping = paths(&[
+            ("assets/a#b.png", "assets/new#?.png"),
+            ("assets/a&num;b.png", "assets/literal.png"),
+            ("assets/a,b.png", "assets/comma.png"),
+        ]);
+        let source = "<img srcset='assets/a%23b.png&#35;v?x=1&amp;y=2&#32;1x&#44; assets/a&amp;num;b.png&Tab;2x, assets/a&comma;b.png 3x'>";
+        let expected = "<img srcset='assets/new%23%3F.png&#35;v?x=1&amp;y=2&#32;1x&#44; assets/literal.png&Tab;2x, assets/comma.png 3x'>";
+        assert_eq!(rewrite_asset_references(source, &mapping), expected);
+        assert_eq!(
+            rewrite_asset_target(
+                "<img srcset='assets/a%2520b.png 1x'>",
+                "assets/a%20b.png",
+                "assets/p%20q.png"
+            ),
+            "<img srcset='assets/p%2520q.png 1x'>"
+        );
+    }
+
+    #[test]
+    fn replacement_names_are_safe_in_unquoted_media_and_srcset_attributes() {
+        let source = "<img srcset=assets/a.png><video src=assets/a.png></video>";
+        let result = rewrite_asset_target(source, "assets/a.png", "assets/a b,%.png");
+        assert_eq!(
+            result,
+            "<img srcset=assets/a%20b%2C%25.png><video src=assets/a&#32;b,%25.png></video>"
+        );
+        let document = scraper::Html::parse_fragment(&result);
+        let selector = scraper::Selector::parse("img,video").unwrap();
+        let attributes: Vec<_> = document
+            .select(&selector)
+            .map(|element| {
+                (
+                    element.value().name(),
+                    element.value().attrs().collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            attributes,
+            vec![
+                ("img", vec![("srcset", "assets/a%20b%2C%25.png")]),
+                ("video", vec![("src", "assets/a b,%25.png")])
+            ]
+        );
+    }
+
+    #[test]
+    fn html_replacement_filenames_keep_url_significant_controls_and_backslashes() {
+        let result = rewrite_asset_target(
+            "<video src='assets/a.png' poster='assets/a.png'><img srcset='assets/a.png 1x'>",
+            "assets/a.png",
+            "assets/a\\b\tc\nd\re.png ",
+        );
+        assert_eq!(
+            result,
+            "<video src='assets/a%5Cb%09c%0Ad%0De.png%20' poster='assets/a%5Cb%09c%0Ad%0De.png%20'><img srcset='assets/a%5Cb%09c%0Ad%0De.png%20 1x'>"
+        );
+        let parsed = url::Url::parse("file:///tmp/out/")
+            .unwrap()
+            .join("assets/a%5Cb%09c%0Ad%0De.png%20")
+            .unwrap();
+        assert_eq!(unquote(parsed.path()), "/tmp/out/assets/a\\b\tc\nd\re.png ");
+    }
+
+    #[test]
+    fn srcset_invalid_descriptors_remain_literal_and_valid_ones_remap() {
+        for descriptor in [
+            "", "1x", "0x", "-0x", ".5x", "1e+2x", "20w", "20w 30h", "30h 20w",
+        ] {
+            let source = format!("<img srcset='assets/a.png {descriptor}'>");
+            let expected = format!("<img srcset='assets/b.png {descriptor}'>");
+            assert_eq!(
+                rewrite_asset_target(&source, "assets/a.png", "assets/b.png"),
+                expected,
+                "{descriptor}"
+            );
+            assert!(has_image_references(&source), "{descriptor}");
+        }
+        for descriptor in [
+            "+1x",
+            "NaNx",
+            "infx",
+            "1.x",
+            "-1x",
+            "0w",
+            "1x 2x",
+            "1w 1x",
+            "2h",
+            "1.5w",
+            "future(a,b)",
+        ] {
+            let source = format!("<img srcset='assets/a.png {descriptor}'>");
+            assert_eq!(
+                rewrite_asset_target(&source, "assets/a.png", "assets/b.png"),
+                source,
+                "{descriptor}"
+            );
+            assert!(!has_image_references(&source), "{descriptor}");
+        }
+        assert_eq!(
+            rewrite_asset_target(
+                "<img srcset='assets/a.png future(a,b), assets/a.png 2x'>",
+                "assets/a.png",
+                "assets/b.png"
+            ),
+            "<img srcset='assets/a.png future(a,b), assets/b.png 2x'>"
+        );
+    }
+
+    #[test]
+    fn first_html_attribute_wins_even_when_bare_empty_or_differently_cased() {
+        for source in [
+            "<img src SRC='assets/a.png'>",
+            "<img src='' src='assets/a.png'>",
+            "<img SRCSET srcset='assets/a.png 1x'>",
+            "<video poster='' POSTER='assets/a.png'></video>",
+        ] {
+            assert_eq!(
+                rewrite_asset_target(source, "assets/a.png", "assets/b.png"),
+                source
+            );
+            assert!(!has_image_references(source), "{source}");
+        }
+        assert_eq!(
+            rewrite_asset_target(
+                "<img src='assets/a.png' SRC='assets/a.png' srcset='assets/a.png 2x'>",
+                "assets/a.png",
+                "assets/b.png"
+            ),
+            "<img src='assets/b.png' SRC='assets/a.png' srcset='assets/b.png 2x'>"
+        );
+    }
+
+    #[test]
+    fn filtering_one_html_source_keeps_other_candidates_and_media_elements() {
+        assert_eq!(
+            rewrite_asset_target(
+                "<img src='assets/a.png' srcset='assets/a.png 1x, assets/b.png 2x'>",
+                "assets/a.png",
+                ""
+            ),
+            "<img  srcset=' assets/b.png 2x'>"
+        );
+        assert_eq!(
+            rewrite_asset_target(
+                "<img src='assets/b.png' srcset='assets/a.png 1x, assets/a.png 2x'>",
+                "assets/a.png",
+                ""
+            ),
+            "<img src='assets/b.png' >"
+        );
+        assert_eq!(
+            rewrite_asset_target(
+                "<img src='assets/a.png' srcset='assets/a.png 2x'>",
+                "assets/a.png",
+                ""
+            ),
+            ""
+        );
+        let result = rewrite_asset_target(
+            "<video src='assets/a.png' SRC='assets/resurrect.mp4' poster='assets/b.png' controls></video><source srcset='assets/a.png 1x'><track src='assets/a.png' label='keep'>",
+            "assets/a.png",
+            "",
+        );
+        assert_eq!(
+            result,
+            "<video   poster='assets/b.png' controls></video><source ><track  label='keep'>"
+        );
+        assert!(has_image_references(&result));
+    }
+
+    #[test]
+    fn image_enrichment_distinguishes_posters_and_srcset_from_audio_video_and_tracks() {
+        for source in [
+            "<audio src='assets/a.png'>",
+            "<video src='assets/a.png'>",
+            "<source src='assets/a.png'>",
+            "<track src='assets/a.png'>",
+            "<img data-src='assets/a.png'>",
+        ] {
+            assert!(!has_image_references(source), "{source}");
+        }
+        for source in [
+            "<video poster='assets/a.png'>",
+            "<source srcset='assets/a.png 2x'>",
+            "<img srcset='assets/a.png'>",
+        ] {
+            assert!(has_image_references(source), "{source}");
+        }
+        assert!(has_image_references("<img srcset='assets/a.png\u{b}1x'>"));
+    }
+
+    #[test]
+    fn media_rewriting_keeps_code_comments_frontmatter_and_unrelated_attributes() {
+        let source = "---\nexample: |\n  <img srcset='assets/a.png 1x'>\nquoted: \"<video src='assets/a.png'>\"\n---\n`<source srcset='assets/a.png 1x'>`\n```html\n<img srcset='assets/a.png 1x'>\n```\n    <audio src='assets/a.png'>\n<!-- <img srcset='assets/a.png 1x'> -->\n<pre><video poster='assets/a.png'></pre>\n<script>\"<img srcset='assets/a.png 1x'>\"</script>\n<style>body { background: url(assets/a.png); }</style>\n<div title=\"<img srcset='assets/a.png 1x'>\" style='background:url(assets/a.png)'></div>\n";
+        assert_eq!(
+            rewrite_asset_target(source, "assets/a.png", "assets/b.png"),
+            source
+        );
+        let source = "<StYlE>url(assets/a.png)</sTyLe><img srcset='assets/a.png 1x'>";
+        assert_eq!(
+            rewrite_asset_target(source, "assets/a.png", "assets/b.png"),
+            "<StYlE>url(assets/a.png)</sTyLe><img srcset='assets/b.png 1x'>"
+        );
+        let source =
+            "<CoDe>\n<img srcset='assets/a.png 1x'>\n</cOdE><source srcset='assets/a.png 2x'>";
+        assert_eq!(
+            rewrite_asset_target(source, "assets/a.png", "assets/b.png"),
+            "<CoDe>\n<img srcset='assets/a.png 1x'>\n</cOdE><source srcset='assets/b.png 2x'>"
+        );
+        assert!(has_image_references(source));
+    }
+
+    #[test]
+    fn media_identity_and_visible_profiles_preserve_existing_uri_spelling() {
+        let source = "<img srcset='assets/%61.png?x=1&amp;y=2#f 1x'><source src=assets/%61.png>";
+        assert_eq!(
+            rewrite_asset_references(source, &paths(&[("assets/a.png", "assets/a.png")])),
+            source
+        );
+        let source = "<img srcset='.markitai/assets/a%20b.png 1x, .markitai/assets/a%2520b.png 2x'><video src='.markitai/assets/a%23b.png?v=%20&amp;a=1'>";
+        assert_eq!(
+            profile(source, "rag", false),
+            "<img srcset='assets/a%20b.png 1x, assets/a%2520b.png 2x'><video src='assets/a%23b.png?v=%20&amp;a=1'>"
+        );
+    }
+
+    #[test]
+    fn html_character_references_match_attribute_context_without_redecoding() {
+        for source in [
+            "a&amp;num;b",
+            "a&amp=1",
+            "a&amp!",
+            "a&#35b",
+            "a&#x80;",
+            "a&fjlig;b",
+            "a&NotEqualTilde;b",
+            "a&#0;b",
+            "a&#xD800;b",
+            "a&#9999999999999999999999;b",
+            "a\r\nb",
+        ] {
+            let html = scraper::Html::parse_fragment(&format!("<img src='{source}'>"));
+            let selector = scraper::Selector::parse("img").unwrap();
+            let decoded = html
+                .select(&selector)
+                .next()
+                .unwrap()
+                .value()
+                .attr("src")
+                .unwrap();
+            assert_eq!(html_unescape(source), decoded, "{source}");
+        }
     }
 
     #[test]

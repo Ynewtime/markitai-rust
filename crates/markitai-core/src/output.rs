@@ -2,6 +2,7 @@ use crate::{Asset, ConversionOutput, Document, Error, Result, config};
 use chrono::{Local, SecondsFormat};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Component, Path};
 use std::sync::Mutex;
@@ -449,6 +450,7 @@ pub fn write_with_publication(
     } else {
         ".markitai/assets"
     };
+    let mut replacements = HashMap::with_capacity(assets.len());
     for asset in assets {
         let extension = Path::new(&asset.name)
             .extension()
@@ -467,14 +469,15 @@ pub fn write_with_publication(
         crate::asset_store::insert_or_verify(&path, &asset.bytes)?;
         let before = format!("{asset_prefix}/{}", asset.name);
         let after = format!("{asset_prefix}/{filename}");
-        let replace =
-            |text: &str| crate::output_profiles::rewrite_asset_target(text, &before, &after);
-        result.markdown = replace(&result.markdown);
-        if let Some(md) = &mut result.llm_markdown {
-            *md = replace(md);
-        }
+        replacements.entry(before).or_insert(after);
         if !result.assets.contains(&path) {
             result.assets.push(path);
+        }
+    }
+    if !replacements.is_empty() {
+        result.markdown = rewrite_asset_references(&result.markdown, &replacements);
+        if let Some(md) = &mut result.llm_markdown {
+            *md = rewrite_asset_references(md, &replacements);
         }
     }
     if result.llm_markdown.is_none() || config::enabled(cfg, "/llm/keep_base") {
@@ -507,6 +510,72 @@ pub fn write_with_publication(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn asset_publication_rewrites_original_paths_once_in_base_and_enhanced_outputs() {
+        let first = b"first asset".to_vec();
+        let second = b"different asset".to_vec();
+        let first_digest = format!("{:x}", Sha256::digest(&first));
+        let second_digest = format!("{:x}", Sha256::digest(&second));
+        let first_name = format!("{}.bin", &first_digest[..24]);
+        let second_name = format!("{}.bin", &second_digest[..24]);
+        for profile in ["default", "rag", "obsidian"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut cfg = config::defaults();
+            cfg["output"]["profile"] = json!(profile);
+            cfg["llm"]["keep_base"] = json!(true);
+            cfg["llm"]["pure"] = json!(true);
+            let prefix = if profile == "default" {
+                ".markitai/assets"
+            } else {
+                "assets"
+            };
+            let source = format!(
+                "[first]({prefix}/first.bin)\n[second]({prefix}/{first_name})\n[duplicate]({prefix}/duplicate.bin)\n`[literal]({prefix}/first.bin)`\n"
+            );
+            let expected = format!(
+                "[first]({prefix}/{first_name})\n[second]({prefix}/{second_name})\n[duplicate]({prefix}/{first_name})\n`[literal]({prefix}/first.bin)`\n"
+            );
+            let mut result = ConversionOutput {
+                markdown: source.clone(),
+                llm_markdown: Some(source),
+                ..Default::default()
+            };
+            let assets = [
+                Asset {
+                    name: "first.bin".into(),
+                    bytes: first.clone(),
+                },
+                Asset {
+                    name: first_name.clone(),
+                    bytes: second.clone(),
+                },
+                Asset {
+                    name: "duplicate.bin".into(),
+                    bytes: first.clone(),
+                },
+                Asset {
+                    name: "first.bin".into(),
+                    bytes: second.clone(),
+                },
+            ];
+            write(root.path(), "document", &mut result, &assets, &cfg).unwrap();
+            assert_eq!(result.markdown, expected);
+            assert_eq!(result.llm_markdown.as_deref(), Some(expected.as_str()));
+            assert_eq!(result.assets.len(), 2);
+            assert_eq!(
+                std::fs::read(root.path().join(prefix).join(&first_name)).unwrap(),
+                first
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(prefix).join(&second_name)).unwrap(),
+                second
+            );
+            for path in [result.output_path.unwrap(), result.llm_output_path.unwrap()] {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+            }
+        }
+    }
+
     #[test]
     fn local_output_uses_workflow_title_and_preserves_original_frontmatter_as_body() {
         let input = "---\ntitle: Existing\ncustom: kept\n---\n\n# Heading\nBody  ";

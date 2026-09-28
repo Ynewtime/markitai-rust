@@ -1262,3 +1262,161 @@ fn resumed_failed_file_removed_from_discovery_is_still_an_observed_history_failu
     assert_eq!(meta["dir_size_bytes"], 0);
     assert_eq!(files(&first), preserved);
 }
+
+#[test]
+fn skipped_media_outputs_relocate_each_roots_assets_into_an_independent_archive() {
+    const LITERALS: &str = concat!(
+        "\n`<img src=\".markitai/assets/poster.png\" srcset=\".markitai/assets/poster.png 2x\">`\n",
+        "```html\n<video src='.markitai/assets/clip.mp4' poster='.markitai/assets/poster.png'></video>\n```\n",
+        "<!-- <source srcset=\".markitai/assets/poster.png 1x, .markitai/assets/shared.png 2x\"> -->\n",
+        "<pre><audio src='.markitai/assets/audio.ogg'></audio></pre>\n",
+        "<script type=\"text/plain\">const example = '<track src=\".markitai/assets/captions.vtt\">';</script>\n",
+        "<style>.example { background-image: url(.markitai/assets/poster.png); }</style>\n",
+        "<p data-src=\".markitai/assets/poster.png\" title=\".markitai/assets/clip.mp4\" style=\"background-image: url(.markitai/assets/poster.png)\">Literal .markitai/assets/poster.png</p>\n",
+    );
+    fn document(suffix: &str) -> String {
+        format!(
+            concat!(
+                "# Saved media output\n\n",
+                "<img src=\".markitai/assets/poster{suffix}.png?size=1&amp;theme=dark#preview\" srcset=\".markitai/assets/poster{suffix}.png 1x, .markitai/assets/shared.png 2x, https://example.invalid/remote.png 3x\" alt=\".markitai/assets/poster.png\" data-src=\".markitai/assets/poster.png\">\n",
+                "<picture>\n",
+                "  <source media=\"(min-width: 900px)\" srcset=\"data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, .markitai/assets/poster{suffix}.png 2x\">\n",
+                "  <source srcset='.markitai/assets/poster{suffix}.png 320w, .markitai/assets/shared.png 640w'>\n",
+                "  <img src='.markitai/assets/%73hared.png' srcset='.markitai/assets/shared.png, .markitai/assets/poster{suffix}.png 2x'>\n",
+                "</picture>\n",
+                "<video src=\".markitai/assets/clip{suffix}.mp4#t=2\" poster='.markitai/assets/poster{suffix}.png'>\n",
+                "  <source src=.markitai/assets/clip{suffix}.mp4 type=video/mp4>\n",
+                "  <track src=\".markitai/assets/captions{suffix}.vtt?lang=en&amp;mode=cc#cue\" kind=captions>\n",
+                "</video>\n",
+                "<audio src='.markitai/assets/audio{suffix}.ogg'><source src=\".markitai/assets/audio{suffix}.ogg\"></audio>\n",
+                "{literals}",
+            ),
+            suffix = suffix,
+            literals = LITERALS,
+        )
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let mut cfg = configure(root.path());
+    cfg["output"]["on_conflict"] = json!("skip");
+    save(root.path(), &cfg);
+    let original = document("");
+    let shared = b"One identical asset used by both saved outputs.\n";
+    let mut expected_assets = BTreeMap::new();
+    for (folder, suffix) in [("a", ""), ("b", "-2")] {
+        write(
+            root.path(),
+            &format!("input/{folder}/page.txt"),
+            "Conversion must skip this input and archive the pre-existing output.\n",
+        );
+        write(root.path(), &format!("out/{folder}/page.txt.md"), &original);
+        for (stem, extension) in [
+            ("poster", "png"),
+            ("clip", "mp4"),
+            ("audio", "ogg"),
+            ("captions", "vtt"),
+        ] {
+            // These are opaque saved assets: the skip path must copy their
+            // exact bytes without trying to decode media or reconvert inputs.
+            let bytes = format!("Saved {stem} bytes belonging to root {folder}.\n");
+            write(
+                root.path(),
+                &format!("out/{folder}/.markitai/assets/{stem}.{extension}"),
+                &bytes,
+            );
+            expected_assets.insert(
+                PathBuf::from(format!(".markitai/assets/{stem}{suffix}.{extension}")),
+                bytes.into_bytes(),
+            );
+        }
+        write(
+            root.path(),
+            &format!("out/{folder}/.markitai/assets/shared.png"),
+            std::str::from_utf8(shared).unwrap(),
+        );
+    }
+    expected_assets.insert(
+        PathBuf::from(".markitai/assets/shared.png"),
+        shared.to_vec(),
+    );
+    let original_outputs = files(&root.path().join("out"));
+    let original_inputs = files(&root.path().join("input"));
+    let cli = envelope(
+        &invoke(
+            root.path(),
+            &["input", "-o", "out", "--record-history", "--json"],
+        ),
+        0,
+    );
+    assert_eq!(cli["items"].as_array().unwrap().len(), 2);
+    assert!(
+        cli["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["status"] == "skipped" && item["skip_reason"] == "exists")
+    );
+    assert_eq!(files(&root.path().join("input")), original_inputs);
+    for (path, bytes) in &original_outputs {
+        assert_eq!(
+            std::fs::read(root.path().join("out").join(path)).unwrap(),
+            *bytes
+        );
+    }
+
+    let (job, meta) = only_job(root.path());
+    let archived = job.join("out");
+    let items = meta["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let mut expected_files = expected_assets.clone();
+    for (index, (name, suffix)) in [("page.txt.md", ""), ("page.txt (2).md", "-2")]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            items[index]["name"],
+            format!("{}/page.txt", ["a", "b"][index])
+        );
+        assert_eq!(items[index]["output"], name);
+        assert_eq!(items[index]["status"], "done");
+        assert_eq!(items[index]["skipped"], true);
+        assert_eq!(items[index]["skip_reason"], "exists");
+        let actual = std::fs::read_to_string(archived.join(name)).unwrap();
+        assert_eq!(actual, document(suffix));
+        assert!(actual.ends_with(LITERALS));
+        expected_files.insert(PathBuf::from(name), actual.into_bytes());
+
+        // Every active local URL spelling in the exact document above is
+        // resolved here, including encoded identity and query/fragment suffixes.
+        // The external/data candidates and protected examples are not local
+        // archive dependencies and must retain their original spelling.
+        for url in [
+            format!(".markitai/assets/poster{suffix}.png?size=1&amp;theme=dark#preview"),
+            format!(".markitai/assets/poster{suffix}.png"),
+            ".markitai/assets/shared.png".into(),
+            ".markitai/assets/%73hared.png".into(),
+            format!(".markitai/assets/clip{suffix}.mp4#t=2"),
+            format!(".markitai/assets/clip{suffix}.mp4"),
+            format!(".markitai/assets/captions{suffix}.vtt?lang=en&amp;mode=cc#cue"),
+            format!(".markitai/assets/audio{suffix}.ogg"),
+        ] {
+            let path = url.split(['?', '#']).next().unwrap().replace("%73", "s");
+            let path = Path::new(&path);
+            assert_eq!(
+                std::fs::read(archived.join(path)).unwrap(),
+                expected_assets[path]
+            );
+        }
+    }
+    assert_eq!(files(&archived), expected_files);
+    assert_eq!(expected_assets.len(), 9, "shared asset must be stored once");
+    let complete_job = files(&job);
+    for path in original_outputs.keys() {
+        std::fs::write(root.path().join("out").join(path), b"live output mutated").unwrap();
+    }
+    assert_eq!(files(&job), complete_job);
+    std::fs::remove_dir_all(root.path().join("input")).unwrap();
+    std::fs::remove_dir_all(root.path().join("out")).unwrap();
+    assert_eq!(files(&job), complete_job);
+    read_job(&job);
+}

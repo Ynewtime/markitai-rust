@@ -35,3 +35,5 @@
 - Named URL identities retain their original spelling; HTTP URLs ending in `.urls` remain URLs, and empty-directory JSON stays machine-readable.
 - Pure URL conversions retain the actual fetch strategy for CLI reporting without adding a binding JSON field.
 - Concurrent writers reuse identical content-addressed assets after exact byte verification; conflicting stored bytes fail without replacement.
+- HTML image candidate lists and media attributes retain their asset destinations after filtering, publication and history relocation.
+- Asset preparation and publication rewrite original paths in one pass, preventing renamed paths from being redirected or removed by a later asset.

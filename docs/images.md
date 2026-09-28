@@ -36,6 +36,24 @@ width/height/area filters and raw-byte deduplication. All references to a duplic
 are rewritten to the retained asset. Filtering removes rendered references;
 examples inside code spans and fenced blocks remain literal.
 
+Each preparation stage collects original paths and applies one mapping to the
+document. File publication does the same for content-addressed destinations in
+both base and enhanced Markdown. A generated filename matching another original
+asset name therefore cannot redirect or remove an already relocated reference.
+When input assets use the same source path more than once, the first entry
+determines that path's reference mapping, including retained or filtered assets.
+The original asset order is preserved.
+
+Rewriting handles Markdown links, reference definitions, wikilinks and exact
+frontmatter path scalars, plus HTML `a[href]`, `img[src/srcset]`,
+`source[src/srcset]`, `video[src/poster]`, `audio[src]` and `track[src]`.
+All relevant attributes are visited once; the first duplicate attribute wins.
+Candidate lists preserve surviving descriptors and URI suffixes. Filtering a
+candidate retains alternatives; filtering media destinations removes the affected
+attribute rather than its container. Audio/video sources alone do not count as
+image references; image candidate lists and video posters do. CSS/style content,
+custom lazy-load attributes, code and comments remain literal.
+
 With compression enabled, maximum width/height use proportional Lanczos resize.
 JPEG uses the configured quality and composites alpha onto white. PNG keeps
 transparency. WebP currently uses a lossless native encoder, with a warning that

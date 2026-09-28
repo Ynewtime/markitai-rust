@@ -150,6 +150,7 @@ fn notice(doc: &mut Document, message: &str) {
 pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
     let mut prepared = Vec::with_capacity(doc.assets.len());
     let mut seen: HashMap<_, String> = HashMap::new();
+    let mut replacements = HashMap::with_capacity(doc.assets.len());
     for asset in std::mem::take(&mut doc.assets) {
         let from = format!(".markitai/assets/{}", asset.name);
         let extension = Path::new(&asset.name)
@@ -157,6 +158,7 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
             .and_then(|s| s.to_str())
             .unwrap_or("");
         if !is_image_extension(extension) && image::guess_format(&asset.bytes).is_err() {
+            replacements.entry(from.clone()).or_insert(from);
             prepared.push(asset);
             continue;
         }
@@ -164,7 +166,7 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
         if config::enabled(cfg, "/image/filter/deduplicate")
             && let Some(target) = seen.get(&digest)
         {
-            doc.markdown = output_profiles::rewrite_asset_target(&doc.markdown, &from, target);
+            replacements.entry(from).or_insert_with(|| target.clone());
             continue;
         }
         let (image, format) = match decode(&asset.bytes) {
@@ -174,12 +176,13 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
                     doc,
                     "An embedded image could not be decoded within native limits; its original asset was retained without filtering or compression.",
                 );
+                replacements.entry(from.clone()).or_insert(from);
                 prepared.push(asset);
                 continue;
             }
         };
         if filtered(&image, cfg) {
-            doc.markdown = output_profiles::rewrite_asset_target(&doc.markdown, &from, "");
+            replacements.entry(from).or_default();
             continue;
         }
         let asset = if config::enabled(cfg, "/image/compress") {
@@ -211,9 +214,16 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
             );
         }
         let target = format!(".markitai/assets/{}", asset.name);
-        doc.markdown = output_profiles::rewrite_asset_target(&doc.markdown, &from, &target);
+        replacements.entry(from).or_insert_with(|| target.clone());
         seen.insert(digest, target);
         prepared.push(asset);
+    }
+    // Every key refers to the original document. A prepared name may also be
+    // another input name, so applying replacements one by one would cascade.
+    // Ambiguous duplicate source names retain the first asset's decision, even
+    // when it keeps its original name or is filtered out.
+    if replacements.iter().any(|(before, after)| before != after) {
+        doc.markdown = output_profiles::rewrite_asset_references(&doc.markdown, &replacements);
     }
     doc.assets = prepared;
 }
@@ -360,6 +370,138 @@ mod tests {
             doc.markdown.matches(".markitai/assets/a.png.png").count(),
             2
         );
+    }
+
+    #[test]
+    fn chained_asset_names_keep_distinct_images_and_duplicates_point_to_final_asset() {
+        for compress in [false, true] {
+            let first = png(100, 100);
+            let second = png(120, 100);
+            let mut doc = Document {
+                markdown: "![first](.markitai/assets/a.png)\n![second](.markitai/assets/a.png.png)\n![duplicate](.markitai/assets/copy.png)\n`![literal](.markitai/assets/a.png)`\n".into(),
+                assets: vec![
+                    Asset { name: "a.png".into(), bytes: first.clone() },
+                    Asset { name: "a.png.png".into(), bytes: second },
+                    Asset { name: "copy.png".into(), bytes: first },
+                ],
+                ..Default::default()
+            };
+            let cfg =
+                config::normalize(&json!({"image":{"compress":compress,"format":"png"}})).unwrap();
+            prepare_assets(&mut doc, &cfg);
+            assert_eq!(
+                doc.markdown,
+                "![first](.markitai/assets/a.png.png)\n![second](.markitai/assets/a.png.png.png)\n![duplicate](.markitai/assets/a.png.png)\n`![literal](.markitai/assets/a.png)`\n"
+            );
+            assert_eq!(doc.assets.len(), 2);
+            assert_eq!(doc.assets[0].name, "a.png.png");
+            assert_eq!(doc.assets[1].name, "a.png.png.png");
+            assert_eq!(decode(&doc.assets[0].bytes).unwrap().0.width(), 100);
+            assert_eq!(decode(&doc.assets[1].bytes).unwrap().0.width(), 120);
+        }
+    }
+
+    #[test]
+    fn filtering_an_original_name_does_not_remove_a_prepared_image_or_its_duplicate() {
+        let big = png(100, 100);
+        let mut doc = Document {
+            markdown: "![kept](.markitai/assets/a.png)\n![duplicate](.markitai/assets/copy.png)\n![tiny](.markitai/assets/a.png.png)\n`![literal](.markitai/assets/a.png.png)`\n".into(),
+            assets: vec![
+                Asset { name: "a.png".into(), bytes: big.clone() },
+                Asset { name: "copy.png".into(), bytes: big.clone() },
+                Asset { name: "a.png.png".into(), bytes: png(2, 2) },
+            ],
+            ..Default::default()
+        };
+        let cfg = config::normalize(&json!({"image":{"compress":false}})).unwrap();
+        prepare_assets(&mut doc, &cfg);
+        assert_eq!(doc.assets.len(), 1);
+        assert_eq!(doc.assets[0].name, "a.png.png");
+        assert_eq!(doc.assets[0].bytes, big);
+        assert!(doc.markdown.contains("![kept](.markitai/assets/a.png.png)"));
+        assert!(
+            doc.markdown
+                .contains("![duplicate](.markitai/assets/a.png.png)")
+        );
+        assert!(!doc.markdown.contains("![tiny]"));
+        assert!(
+            doc.markdown
+                .contains("`![literal](.markitai/assets/a.png.png)`")
+        );
+        assert!(doc.warnings.is_empty());
+    }
+
+    #[test]
+    fn duplicate_source_names_keep_the_first_filter_decision() {
+        let big = png(100, 100);
+        let tiny = png(2, 2);
+        for keep_first in [true, false] {
+            let input =
+                "![same](.markitai/assets/same.png)\n`![literal](.markitai/assets/same.png)`\n";
+            let bytes = if keep_first {
+                [big.clone(), tiny.clone()]
+            } else {
+                [tiny.clone(), big.clone()]
+            };
+            let mut doc = Document {
+                markdown: input.into(),
+                assets: bytes
+                    .into_iter()
+                    .map(|bytes| Asset {
+                        name: "same.png".into(),
+                        bytes,
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let cfg = config::normalize(&json!({"image":{"compress":false}})).unwrap();
+            prepare_assets(&mut doc, &cfg);
+            assert_eq!(doc.assets.len(), 1);
+            assert_eq!(doc.assets[0].bytes, big);
+            assert_eq!(
+                doc.markdown
+                    .contains("![same](.markitai/assets/same.png.png)"),
+                keep_first
+            );
+            assert!(
+                doc.markdown
+                    .contains("`![literal](.markitai/assets/same.png)`")
+            );
+            if !keep_first {
+                assert!(!doc.markdown.contains("![same]"));
+            }
+        }
+    }
+
+    #[test]
+    fn retained_first_asset_keeps_its_reference_when_a_later_namesake_is_an_image() {
+        for name in ["same.png", "same.bin"] {
+            let retained = vec![0, 1, 2];
+            let input = format!("![same](.markitai/assets/{name})\n");
+            let mut doc = Document {
+                markdown: input.clone(),
+                assets: vec![
+                    Asset {
+                        name: name.into(),
+                        bytes: retained.clone(),
+                    },
+                    Asset {
+                        name: name.into(),
+                        bytes: png(100, 100),
+                    },
+                ],
+                ..Default::default()
+            };
+            let cfg = config::normalize(&json!({"image":{"compress":false}})).unwrap();
+            prepare_assets(&mut doc, &cfg);
+            assert_eq!(doc.markdown, input);
+            assert_eq!(doc.assets.len(), 2);
+            assert_eq!(doc.assets[0].name, name);
+            assert_eq!(doc.assets[0].bytes, retained);
+            assert_eq!(doc.assets[1].name, format!("{name}.png"));
+            assert_eq!(decode(&doc.assets[1].bytes).unwrap().0.width(), 100);
+            assert_eq!(doc.warnings.len(), usize::from(name.ends_with(".png")));
+        }
     }
 
     #[test]

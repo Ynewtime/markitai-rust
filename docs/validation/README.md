@@ -163,3 +163,12 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   preserve exact records. [Executed drivers](drivers/round10/README.md) retain the
   historical commands and private-state protections. Remaining asset syntax,
   consumer, fault-matrix and platform acceptance is explicit in the narrative.
+
+## Round-eleven media destinations
+
+- [Source validation](html-media-round11.md): 608 Rust executions /465 distinct,
+  26 harness tests and 15 history process cases. Multiple media attributes and
+  srcset candidates now share exact destination handling; image preparation and
+  publication use original-path maps to prevent cascaded renames or filtering.
+  The [gate record](html-media-round11-gate.json) retains unchanged source hashes.
+  New release, installed packages and measured performance remain pending.

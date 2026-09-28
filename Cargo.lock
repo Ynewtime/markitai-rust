@@ -1544,6 +1544,7 @@ dependencies = [
  "image",
  "lopdf",
  "mail-parser",
+ "markup5ever 0.39.0",
  "pdf-inspector",
  "png",
  "quick-xml",

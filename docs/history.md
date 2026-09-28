@@ -78,9 +78,14 @@ Identical contents can also reuse a previously renamed conflicting variant;
 this avoids an extra copy that the reference writer can create.
 
 Reference rewriting shares the native Markdown parser and looks up each original
-destination once. It supports links, definitions, wikilinks, HTML `img[src]` /
-`a[href]` attributes and
-exact frontmatter path scalars, including percent-encoded spellings. Literal code
+destination once. It supports links, definitions, wikilinks, HTML `a[href]`,
+`img[src/srcset]`, `source[src/srcset]`, `video[src/poster]`, `audio[src]` and
+`track[src]`, plus exact frontmatter path scalars, including percent-encoded
+spellings. All supported attributes in a tag are processed together; duplicate
+attribute names use their first occurrence, including a valueless attribute.
+Image candidate URLs are separated from their descriptors after decoding HTML
+entities, so commas within data URLs or filenames do not become list separators.
+Literal code
 and unrelated prose stay unchanged. Parent-relative references are relocated when
 flattening. URI query/fragment suffixes retain their spelling, while literal
 `%`, `#` and `?` characters in replacement filenames are encoded as file data.
@@ -88,11 +93,19 @@ These behaviors deliberately improve on the reference writer's
 global text replacement and retained `../` paths; byte parity with those defects
 is not a target.
 
-HTML `srcset`, other media attributes and CSS URL syntax are not yet parsed by
-the relocation helper. Arbitrary Markdown or model output using these forms can
+CSS URL syntax and other element/attribute families, including custom lazy-load
+attributes, are not parsed by the relocation helper. Arbitrary Markdown or model output using these forms can
 retain a stale reference when an asset collision changes a name. Those syntax
 families remain a tracked fidelity gap; common generated Markdown references
 are covered by the current implementation.
+
+The newer media syntax is covered by native source and real-process tests; the
+frozen round-ten paired release evidence predates this extension.
+The candidate boundaries follow the [HTML srcset algorithm](https://html.spec.whatwg.org/multipage/images.html#parse-a-srcset-attribute).
+New filename data is encoded before HTML escaping so the
+[URL parser](https://url.spec.whatwg.org/#concept-basic-url-parser) cannot discard
+filename whitespace or treat a backslash as a separator. This is destination
+rewriting, not browser resource selection or full malformed-HTML recovery.
 
 ## Publication and resource boundaries
 
