@@ -3,7 +3,8 @@
 The Unix CLI connects this store to directory and URL-list dispatch. Every batch
 persists merged work and flushes each admitted target before a worker can make
 provider requests; `--resume` retains completed entries and retries unfinished
-work. Reports remain independently selectable. History export is still pending.
+work. Reports and optional [history archives](history.md) remain independently
+selectable; history is implemented separately from recovery state.
 The native conversion API and language bindings do not acquire recovery state.
 See [output ownership](output-ownership.md) for the separate publication protocol
 and [the control center](CONTROL.md) for the current validation status.

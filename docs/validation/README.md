@@ -4,15 +4,18 @@ An implementation checkpoint is reproducible only when it records the command,
 source revision, test inputs, build profile, and platform. Passing new unit
 tests establishes specific contracts; it does not imply reference parity.
 
-Latest: [round twenty-two](media-llm-round22.md), bounded Numbers tables,
-isolated Office full-page capture, typed document metadata, complete Unicode
-chunks and concurrent first-write cache recovery. The unchanged-source gate
-passes 1,033 Rust executions, 31 Python harness checks, formatting and strict
-Clippy, followed by six actual Office renderer/API tests. Release CLI passes ten workflows and 119 assertions; refreshed installed Node
-(three tests), Python (16 tests) and Go race acceptance pass. The prior actual
-web workspace/browser record is [round twenty-one](service-ui-round21.md).
-Scoped x86_64 execution retains a Rosetta OCR failure; remote CI, exact OCR
-quality and the complete migration remain unfinished.
+Latest: [round twenty-three](vision-auth-cli-round23.md), typed visual batches,
+pixel-aware caching, origin-scoped browser Basic authentication, guided CLI and
+runtime diagnostics. The unchanged-source gate passes 1,072 Rust executions,
+31 Python harness checks, formatting and strict Clippy, plus seven actual browser
+and six Office core/API tests. The retained CLI passes 13 workflows and 163
+assertions; installed Node (3), Python (16) and Go race acceptance pass.
+The project is paused at the user's request; see the [full summary](../STATUS.md).
+
+[Round twenty-two](media-llm-round22.md) retains Office/Numbers/text processing
+acceptance; [round twenty-one](service-ui-round21.md) retains actual web workspace
+and browser validation. Historical evidence remains tied to its own source and
+artifact. Remote CI, exact OCR quality and the complete migration remain open.
 
 ## Local checks
 

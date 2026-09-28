@@ -5,8 +5,8 @@ request and response contract. Neither an installed CLI nor a Python worker is
 used for conversion. Feature availability is therefore the same as the core;
 an installed binding does not add missing format, OCR, or browser capabilities.
 
-The latest [installed-package validation](validation/media-cli-round20.md)
-targets source `e2e5f9edf093bcd49efbcac66815cc2fc1b748dd` on macOS arm64.
+The latest [installed-package validation](validation/vision-auth-cli-round23.md)
+targets source `f1b1781c3f7d2126eda8743c74303e564538679b` on macOS arm64.
 Python 3.13, Node 24 and Go 1.27.1 checks pass: 16 installed Python tests,
 three installed Node tests and Go source-package race tests. The earlier
 [round-seventeen PDF comparison](validation/pdf-native-round17.md) remains its

@@ -3,7 +3,8 @@
 The CLI writes version `"1.0"` reports for single files, single URLs, directories
 and URL lists. Directory reports also include URLs discovered in `.urls` files.
 Reports summarize a finished run; separate [recovery state](state-storage.md)
-supports Unix batch resume. History export remains unsupported. Public core and
+supports Unix batch resume. Optional [history archives](history.md) retain independent
+documents and assets. Public core and
 Node/Python/Go conversion calls do not publish CLI reports.
 
 ## Selection and lifecycle

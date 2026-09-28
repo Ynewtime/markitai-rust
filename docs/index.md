@@ -1,5 +1,7 @@
 # Markitai Rust documentation
 
+- [Pause summary](STATUS.md): complete delivered scope, verified artifacts and remaining work.
+- [Remaining work](remaining-work.md): current acceptance queue.
 - [Control center](CONTROL.md): scope, ownership, acceptance, checkpoints.
 - [Architecture](architecture.md): runtime and dependency boundaries.
 - [Compatibility](compatibility.md): contracts against the reference release.
