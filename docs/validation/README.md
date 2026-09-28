@@ -183,7 +183,12 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
 
 ## Round-twelve CSS resources
 
-- [CSS source acceptance](css-round12.md) records 625 Rust executions /482 distinct,
+- [CSS acceptance](css-round12.md) records 625 Rust executions /482 distinct,
   26 harness tests and independent parser reviews. The [gate record](css-round12-gate.json)
-  retains 96 unchanged source identities. Release artifacts, installed packages
-  and browser consumption remain subsequent acceptance stages.
+  retains 96 unchanged source identities. Clean `8204ebe` has
+  [release artifacts](css-round12-build.json), [installed packages](css-round12-packages.json)
+  and an exact [CSS archive](css-round12-release.json).
+- [Browser consumption](css-round12-browser.json) verifies two archived pages,
+  renamed images/imports and encoded filenames after deleting live fixtures.
+  [Final identities](css-round12-final-check.json) and
+  [executed drivers](drivers/round12/README.md) retain the scope and provenance.

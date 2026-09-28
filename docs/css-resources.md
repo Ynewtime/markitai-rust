@@ -72,8 +72,8 @@ the containing document. Filtering can therefore retain the URL position using
 `url("")`, preserving font/cursor alternatives and the conditions/layer ordering
 of imports. Replacing arbitrary URLs with `none` would invalidate some of those
 grammars. Namespace URLs are identifiers rather than fetched resources and must
-not be relocated. The source and release validation record will state the exact
-accepted cases and remaining grammar limits for this iteration.
+not be relocated. [Round-twelve validation](validation/css-round12.md) records the
+exact accepted cases, frozen release and remaining grammar limits.
 
 Filtering image-set removes the affected candidate while retaining other
 candidates. If none remain, the image-set becomes an invalid empty URL resource.
@@ -85,5 +85,7 @@ itself does not establish an image suitable for model processing.
 
 Publication tests exercise actual base/enhanced files and all three asset path
 profiles. History tests exercise independent copied assets and collision
-renaming through the CLI. Release and installed-package acceptance remain
-separate gates; successful source tests alone do not prove those artifacts.
+renaming through the CLI. Actual release and installed-package gates pass on the
+current macOS arm64 host. Two authored browser cases also load copied images and
+imported CSS after deleting the live fixtures; this is not general browser or
+cross-platform acceptance.

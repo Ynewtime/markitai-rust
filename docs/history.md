@@ -102,6 +102,8 @@ outside destination rewriting; these remain tracked fidelity gaps.
 The newer media syntax is covered by source tests and
 [round-eleven native release acceptance](validation/html-media-round11.md);
 the frozen round-ten paired reference evidence predates this extension.
+CSS resources have [round-twelve release and browser acceptance](validation/css-round12.md)
+on authored cases; the reference history writer uses global text replacement.
 The candidate boundaries follow the [HTML srcset algorithm](https://html.spec.whatwg.org/multipage/images.html#parse-a-srcset-attribute).
 New filename data is encoded before HTML escaping so the
 [URL parser](https://url.spec.whatwg.org/#concept-basic-url-parser) cannot discard
