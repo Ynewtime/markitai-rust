@@ -77,6 +77,28 @@ pub(crate) fn document_key(content: &str, prompt_scope: &str, model_scope: &str)
     format!("{:x}", Sha256::digest(combined.as_bytes()))[..32].to_owned()
 }
 
+/// Framed bytes make page order, MIME and changed pixels part of cache identity.
+pub(crate) fn vision_key<'a>(
+    content: &str,
+    prompt_scope: &str,
+    model_scope: &str,
+    images: impl IntoIterator<Item = (usize, &'a str, &'a [u8])>,
+) -> String {
+    let mut digest = Sha256::new();
+    for part in ["native-vision-v1", prompt_scope, model_scope, content] {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part.as_bytes());
+    }
+    for (number, mime, bytes) in images {
+        digest.update((number as u64).to_le_bytes());
+        digest.update((mime.len() as u64).to_le_bytes());
+        digest.update(mime.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    format!("{:x}", digest.finalize())[..32].to_owned()
+}
+
 pub(crate) fn model_scope<'a>(models: impl IntoIterator<Item = &'a str>) -> String {
     let mut models: Vec<_> = models
         .into_iter()

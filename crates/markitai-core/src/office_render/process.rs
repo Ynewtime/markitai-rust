@@ -95,6 +95,23 @@ pub(super) fn convert(
     if Instant::now() >= deadline {
         return Err(failure("Office export timed out"));
     }
+    let mut command = private_command(program, profile)?;
+    command
+        .arg("--convert-to")
+        .arg(filter)
+        .arg("--outdir")
+        .arg(output)
+        .arg(input);
+    wait(command, Some((output, limit)), deadline)
+}
+
+pub(super) fn diagnose(program: &Path, profile: &Path, deadline: Instant) -> Result<()> {
+    let mut command = private_command(program, profile)?;
+    command.arg("--version");
+    wait(command, None, deadline)
+}
+
+fn private_command(program: &Path, profile: &Path) -> Result<Command> {
     let profile_url = url::Url::from_directory_path(profile)
         .map_err(|_| failure("invalid private profile path"))?;
     let mut command = Command::new(program);
@@ -108,11 +125,6 @@ pub(super) fn convert(
             "--norestore",
         ])
         .arg(format!("-env:UserInstallation={profile_url}"))
-        .arg("--convert-to")
-        .arg(filter)
-        .arg("--outdir")
-        .arg(output)
-        .arg(input)
         .current_dir(profile)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -138,6 +150,13 @@ pub(super) fn convert(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    Ok(command)
+}
+
+fn wait(mut command: Command, output: Option<(&Path, u64)>, deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        return Err(failure("Office export timed out"));
+    }
     let mut running = Running {
         child: command
             .spawn()
@@ -145,7 +164,9 @@ pub(super) fn convert(
         reaped: false,
     };
     loop {
-        check_output(output, limit)?;
+        if let Some((directory, limit)) = output {
+            check_output(directory, limit)?;
+        }
         if let Some(status) = running
             .child
             .try_wait()
@@ -155,7 +176,9 @@ pub(super) fn convert(
             if !status.success() {
                 return Err(failure("LibreOffice export failed"));
             }
-            check_output(output, limit)?;
+            if let Some((directory, limit)) = output {
+                check_output(directory, limit)?;
+            }
             return Ok(());
         }
         if Instant::now() >= deadline {

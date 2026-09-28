@@ -1,6 +1,6 @@
 # URL fetching and extracted-page caching
 
-The native `auto` and `static` strategies fetch HTTP(S) directly. They extract
+The native `static` strategy and anonymous `auto` strategy fetch HTTP(S) directly. They extract
 HTML, plain text and Markdown, or dispatch supported downloaded documents to
 the local format readers. Requests negotiate
 `Accept: text/markdown, text/html;q=0.9, */*;q=0.5`, follow at most ten redirects
@@ -172,3 +172,21 @@ native page media and model input after this private handoff.
 [Decision 0003](decisions/0003-persistent-fetch-cache.md) records the detailed
 reference comparison, storage contract and deferred browser, remote-cache,
 owned-asset, stale-fallback and request-coalescing work.
+
+## Browser HTTP credentials
+
+When `fetch.playwright.http_credentials` is non-null, `auto` selects the browser
+before consulting anonymous page cache or sending a PDF classification probe.
+This avoids reusing a public page for a configured private identity. Browser
+responses continue to bypass static cache reads and writes; removing credentials
+can reuse an existing anonymous row. Explicit `static` does not consume browser
+credentials and does not switch strategy on HTTP 401. Authentication failure
+does not send the page or credentials to a remote fetch service.
+
+The browser answers bounded Basic challenges only within the configured exact
+origin. Omitting origin binds credentials to the initial scheme/host/effective
+port; this intentionally narrows the reference's unrestricted default. The
+reference also tries anonymous static retrieval first in auto mode; the native
+authenticated path intentionally selects its configured identity first. Browser
+authenticated PDF downloads, proxy authentication and persistent sessions remain
+separate capabilities. See [browser contracts](browser.md).

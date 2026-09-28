@@ -12,12 +12,12 @@ pub(crate) struct DocumentMetadata {
 }
 
 #[derive(Debug)]
-struct Answer {
-    markdown: String,
-    metadata: DocumentMetadata,
+pub(super) struct Answer {
+    pub markdown: String,
+    pub metadata: DocumentMetadata,
 }
 impl Answer {
-    fn value(&self) -> Value {
+    pub(super) fn value(&self) -> Value {
         json!({"cleaned_markdown":self.markdown,"description":self.metadata.description,"tags":self.metadata.tags})
     }
 }
@@ -45,7 +45,7 @@ pub(crate) fn process_document_with_runtime(
     let accounting = DocumentScope::shared().expect("document scope installed");
     let before = document_usage().expect("document scope installed");
     let protected = chunks::Protected::new(markdown);
-    let sources = chunks::split(&protected.text);
+    let sources = protected.split();
     let cache = llm_cache::Cache::configured(cfg, cache_context);
     // Hits from configured model identities need no credential or dotenv reads.
     let ambient = std::cell::OnceCell::new();
@@ -319,7 +319,7 @@ fn validate_answer(
     Ok(())
 }
 
-fn parse_answer(text: &str) -> Result<Answer> {
+pub(super) fn parse_answer(text: &str) -> Result<Answer> {
     let text = text.trim();
     let text = if text.starts_with("```json\n") || text.starts_with("```\n") {
         text.split_once('\n')
@@ -335,7 +335,7 @@ fn parse_answer(text: &str) -> Result<Answer> {
     parse_value(&value, false)
 }
 
-fn parse_value(value: &Value, cached: bool) -> Result<Answer> {
+pub(super) fn parse_value(value: &Value, cached: bool) -> Result<Answer> {
     let invalid = || {
         Error::Conversion("LLM document response requires cleaned_markdown plus nonempty description and string tags".into())
     };
@@ -399,7 +399,7 @@ fn grams(text: &[char], width: usize) -> HashSet<String> {
         .map(|chars| chars.iter().collect())
         .collect()
 }
-fn plausible(source: &str, answer: &str, lenient: bool) -> Result<()> {
+pub(super) fn plausible(source: &str, answer: &str, lenient: bool) -> Result<()> {
     let source: Vec<_> = source.chars().filter(|ch| !ch.is_whitespace()).collect();
     let answer: Vec<_> = answer.chars().filter(|ch| !ch.is_whitespace()).collect();
     if source.len() < 200 {

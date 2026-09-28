@@ -4,6 +4,10 @@
 
 ### Added
 
+- Typed visual document metadata, complete ordered ten-page batches and persistent caches keyed by actual page image content.
+- Origin-scoped native browser Basic authentication and configuration-aware runtime diagnostics.
+- Guided terminal conversion through the ordinary CLI pipeline.
+
 - Bounded native Numbers table extraction with saved formula values and preserved sheet/table order.
 - Optional isolated LibreOffice page export for presentations and word-processing documents, complete page screenshots and local OCR supplements.
 - Typed document descriptions/tags, protected-literal Unicode chunking, shared request accounting and persistent per-chunk caching for local documents and text URLs.
@@ -50,6 +54,9 @@
 - Bounded native model discovery with credential-scoped caching, plus single-model connection probes without document conversion.
 
 ### Fixed
+
+- Bounded long-text splitting for literal marker-like input, and stop visual dispatch when the first metadata batch cannot succeed.
+- Private Unix permissions for Office diagnostic and rendering workspaces.
 
 - Concurrent first-time SQLite cache initialization retries bounded WAL/schema lock contention without replaying stored-row transactions.
 

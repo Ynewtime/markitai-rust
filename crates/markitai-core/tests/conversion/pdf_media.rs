@@ -174,7 +174,7 @@ fn pdf_vlm_sends_every_page_with_real_mime_in_memory() {
     assert!(result.screenshots.is_empty());
     let enhanced = result.llm_markdown.unwrap();
     assert!(enhanced.contains("All pages reviewed."));
-    assert!(enhanced.contains("<!-- Page images for reference -->"));
+    assert_eq!(enhanced.matches("<!-- Page number:").count(), 3);
     assert_eq!(enhanced.matches("<!-- ![Page ").count(), 3);
 }
 

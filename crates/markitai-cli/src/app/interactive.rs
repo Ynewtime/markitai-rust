@@ -15,14 +15,14 @@ struct Setting {
     node: Value,
 }
 
-fn terminal() -> CliResult<()> {
+pub(super) fn terminal() -> CliResult<()> {
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err((2, "Interactive configuration requires a terminal; use config set or init --yes for automation".into()));
     }
     Ok(())
 }
 
-fn prompt(
+pub(super) fn prompt(
     input: &mut impl BufRead,
     output: &mut impl Write,
     label: &str,
@@ -336,6 +336,66 @@ fn edit_with(
     Ok(())
 }
 
+/// A wizard owns cancellation only while prompting, before conversion begins.
+#[cfg(unix)]
+static GUIDED_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(unix)]
+extern "C" fn cancelled(_: libc::c_int) {
+    const MESSAGE: &[u8] = b"\nCancelled.\n";
+    unsafe {
+        libc::write(libc::STDERR_FILENO, MESSAGE.as_ptr().cast(), MESSAGE.len());
+        libc::_exit(0);
+    }
+}
+#[cfg(unix)]
+pub(super) struct CancelGuard(libc::sigaction);
+#[cfg(unix)]
+impl CancelGuard {
+    pub(super) fn new() -> io::Result<Self> {
+        let mut previous = unsafe { std::mem::zeroed() };
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = cancelled as *const () as libc::sighandler_t;
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+        }
+        if unsafe { libc::sigaction(libc::SIGINT, &action, &mut previous) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        GUIDED_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self(previous))
+    }
+}
+#[cfg(unix)]
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        GUIDED_CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            libc::sigaction(libc::SIGINT, &self.0, std::ptr::null_mut());
+        }
+    }
+}
+#[cfg(not(unix))]
+pub(super) struct CancelGuard;
+#[cfg(not(unix))]
+impl CancelGuard {
+    pub(super) fn new() -> io::Result<Self> {
+        Ok(Self)
+    }
+}
+
+pub(super) fn secret(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    label: &str,
+) -> CliResult<Option<String>> {
+    let answer = {
+        let _echo = Echo::hide().map_err(runtime)?;
+        prompt(input, output, label)
+    };
+    writeln!(output).map_err(runtime)?;
+    answer
+}
+
 #[cfg(unix)]
 static PREVIOUS_ECHO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 #[cfg(unix)]
@@ -352,6 +412,9 @@ extern "C" fn interrupted_secret(signal: libc::c_int) {
                 terminal.c_lflag &= !libc::ECHO;
             }
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &terminal);
+        }
+        if signal == libc::SIGINT && GUIDED_CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
+            cancelled(signal);
         }
         libc::_exit(128 + signal);
     }
@@ -598,7 +661,7 @@ pub(super) fn init(yes: bool, output: Option<&Path>, local: bool) -> CliResult<(
     Ok(())
 }
 
-fn choice(
+pub(super) fn choice(
     input: &mut impl BufRead,
     output: &mut impl Write,
     label: &str,

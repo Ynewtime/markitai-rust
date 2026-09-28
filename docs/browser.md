@@ -23,9 +23,60 @@ locations, then known Playwright Chromium cache layouts. Cache discovery honors
 stored browser state, installs a browser or opens the user's normal browser.
 Availability checks do not launch a process.
 
+## HTTP authentication and diagnostics
+
+`fetch.playwright.http_credentials` accepts an object containing `username` and
+`password`, with optional `origin` and `send`. Credentials are supplied only after
+a Chromium **Server Basic** challenge. They are not placed in browser arguments,
+URLs or a global Authorization header. The username and password are each bounded
+to 4,096 UTF-8 bytes; control characters and a colon in the Basic username are
+rejected. Empty strings are valid configured credentials. Unknown fields and
+invalid types fail before a browser is discovered or launched.
+
+Without an explicit origin, the credentials are restricted to the initial URL's
+scheme, hostname and effective port. An explicit HTTP(S) origin is matched exactly
+and can authorize a known redirect destination. A trailing root slash is accepted;
+userinfo, non-root paths, query strings and fragments are rejected. This default
+is deliberately narrower than the reference Playwright behavior, which permits
+credentials at any challenged origin when no origin is specified. Redirects and
+third-party subresources do not gain credential authority from the referring page.
+Proxy challenges never receive the server password. `send=always` and
+`send=unauthorized` retain Playwright's browser semantics: neither makes these
+browser requests send a preemptive Authorization header.
+
+Each intercepted request receives the configured credentials at most once;
+a repeated challenge is cancelled. A navigation session accepts at most 128
+challenge events, including rejected events. Authentication shares the existing
+navigation deadline. Errors do not include challenge payloads or credentials.
+Digest, NTLM/Kerberos and authenticated proxies are not supported by this first
+implementation. Extra HTTP headers retain their separate context-wide contract
+below; this credential policy does not silently narrow explicitly supplied headers.
+
+The internal presence helper allows the fetch coordinator to route authenticated
+`auto` requests before anonymous cache access or PDF probes. Explicit `static`
+does not acquire browser credentials. Authenticated downloads remain unsupported;
+a PDF response cannot be reported as successfully extracted browser text.
+Rendered private pages are not added to the static fetch cache.
+
+`browser_diagnostic()` discovers an installed executable, launches a fresh private
+profile and verifies a CDP `about:blank` page, then closes and reaps the process.
+It returns no executable when none is installed, or a fixed sanitized error when
+initialization fails. It does not load conversion settings, proxies, cookies or
+credentials. Startup has a 15-second bound and protocol setup/evaluation a shared
+five-second deadline, followed by process cleanup. Discovery alone remains a
+separate non-launching availability check.
+
+Optional tests explicitly launch installed Chromium against authored loopback
+servers for successful Basic authentication and actual screenshot pixels, bounded
+wrong-password failure, cross-origin redirect isolation with an explicit-origin
+positive case, third-party resource isolation, and diagnostic/profile cleanup.
+These are ignored in the ordinary workspace invocation and must be selected
+explicitly by the coordinator; implementation does not itself establish a passing
+release acceptance result.
+
 ## Fetch and screenshot behavior
 
-An explicit `playwright` request renders the page. An `auto` request without
+An explicit `playwright` request renders the page. An `auto` request without credentials or
 screenshots retains the existing static/cache path and can fall back to the local
 browser for recognized JavaScript/challenge or empty-HTML extraction failures.
 It does not introduce remote-provider fallback. An `auto` screenshot request
@@ -81,8 +132,9 @@ image-page and payload bounds. Pure LLM mode continues to use the text path.
 
 ## Explicit limits
 
-- `session_mode=isolated` is implemented. `domain_persistent` and
-  `http_credentials` return an unsupported error before browser launch.
+- `session_mode=isolated` is implemented. `domain_persistent` returns an
+  unsupported error before browser launch. Scoped Server Basic authentication is
+  implemented as described above; browser contexts are not persisted.
 - Proxy configuration comes from scheme-appropriate `HTTP_PROXY`, `HTTPS_PROXY`
   or `ALL_PROXY` environment variables and their lowercase forms. `NO_PROXY`
   rules and loopback bypasses are passed to Chromium. Only unauthenticated

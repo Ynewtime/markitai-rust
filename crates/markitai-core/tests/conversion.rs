@@ -28,6 +28,12 @@ mod numbers;
 #[path = "conversion/document_processing.rs"]
 mod document_processing;
 
+#[path = "conversion/vision_processing.rs"]
+mod vision_processing;
+
+#[path = "conversion/browser_auth.rs"]
+mod browser_auth;
+
 fn options() -> ConvertOptions {
     ConvertOptions {
         config: Some(json!({})),
@@ -155,6 +161,45 @@ fn unrelated_features_do_not_reject_text_or_literal_image_examples() {
     assert!(result.llm_markdown.unwrap().contains("Kept example."));
 }
 
+// Only successful mocks for the explicitly typed protocols acquire metadata.
+// Pure calls and deliberately invalid/failing responses retain their old payloads.
+fn mock_model_content(request: &Value, markdown: &str) -> String {
+    let system = request["messages"][0]["content"].as_str().unwrap_or("");
+    let typed_text = system.contains("MARKITAI_DOCUMENT_JSON_V1");
+    let typed_vision = system.contains("MARKITAI_VISION_JSON_V1");
+    let clean_vision = system.contains("MARKITAI_VISION_CLEAN_V1");
+    if !(typed_text || typed_vision || clean_vision) {
+        return markdown.to_owned();
+    }
+    let user = &request["messages"][1]["content"];
+    let source = user
+        .as_str()
+        .or_else(|| {
+            user.as_array()?
+                .iter()
+                .find(|item| item["type"] == "text")?["text"]
+                .as_str()
+        })
+        .unwrap_or("");
+    let body = if typed_vision || clean_vision {
+        if markdown.contains("{protected_input}") {
+            markdown.replace("{protected_input}", source)
+        } else {
+            format!("{source}\n\n{markdown}")
+        }
+    } else {
+        markdown.replace("{protected_input}", source)
+    };
+    if clean_vision {
+        body
+    } else {
+        json!({"cleaned_markdown":body,"frontmatter":{
+            "description":"Mock document description", "tags":["mock"]
+        }})
+        .to_string()
+    }
+}
+
 fn llm_server(status: u16, payload: &'static str) -> (String, std::thread::JoinHandle<Value>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -190,22 +235,10 @@ fn llm_server(status: u16, payload: &'static str) -> (String, std::thread::JoinH
         };
         let mut payload: Value = serde_json::from_str(payload).unwrap();
         if status == 200
-            && request["messages"][0]["content"]
-                .as_str()
-                .is_some_and(|system| system.contains("MARKITAI_DOCUMENT_JSON_V1"))
             && let Some(content) = payload.pointer_mut("/choices/0/message/content")
             && let Some(markdown) = content.as_str()
         {
-            let markdown = markdown.replace(
-                "{protected_input}",
-                request["messages"][1]["content"].as_str().unwrap(),
-            );
-            *content = json!(
-                json!({"cleaned_markdown":markdown,"frontmatter":{
-                    "description":"Mock document description", "tags":["mock"]
-                }})
-                .to_string()
-            );
+            *content = json!(mock_model_content(&request, markdown));
         }
         let payload = payload.to_string();
         write!(stream,"HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",payload.len()).unwrap();

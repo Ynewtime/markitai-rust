@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use url::Url;
 
 pub(super) struct Options {
+    pub credentials: Option<super::auth::Credentials>,
     pub timeout: u64,
     pub wait_for: String,
     pub extra_wait: u64,
@@ -189,6 +190,29 @@ fn proxy(env: &HashMap<String, String>, url: &Url) -> Result<(Option<String>, St
 }
 
 impl Options {
+    // Diagnostics do not load user configuration, cookies, credentials or proxies.
+    pub(super) fn diagnostic() -> Self {
+        Self {
+            credentials: None,
+            timeout: 5000,
+            wait_for: "domcontentloaded".into(),
+            extra_wait: 0,
+            selector: None,
+            skip_scroll: true,
+            cookies: Vec::new(),
+            headers: Map::new(),
+            user_agent: None,
+            blocked: Vec::new(),
+            proxy: None,
+            bypass: String::new(),
+            width: 1280,
+            height: 720,
+            quality: 85,
+            tile_height: 2000,
+            max_height: 10_000,
+        }
+    }
+
     pub fn from_config(cfg: &Value, url: &Url, capture: bool) -> Result<Self> {
         if !["http", "https"].contains(&url.scheme())
             || url.host_str().is_none()
@@ -211,14 +235,7 @@ impl Options {
         {
             return Err(Error::Unsupported("Native browser domain_persistent sessions are not implemented; use session_mode=isolated".into()));
         }
-        if settings
-            .get("http_credentials")
-            .is_some_and(|value| !value.is_null())
-        {
-            return Err(Error::Unsupported(
-                "Native browser http_credentials are not implemented".into(),
-            ));
-        }
+        let credentials = super::auth::parse(settings.get("http_credentials"), url)?;
         let authority = match url.port() {
             Some(port) => format!("{}:{port}", url.host_str().unwrap()),
             None => url.host_str().unwrap().to_owned(),
@@ -290,6 +307,7 @@ impl Options {
         let screenshot = cfg.get("screenshot").cloned().unwrap_or_else(|| json!({}));
         let (proxy, bypass) = proxy(&config::environment(), url)?;
         Ok(Self {
+            credentials,
             timeout,
             wait_for,
             extra_wait: unsigned(&settings, "extra_wait_ms", 3000, 0, 30_000)?,

@@ -4,8 +4,8 @@ The native runtime can reuse successful non-pure local and URL text processing
 across invocations and processes. A hit returns the saved typed Markdown and generated description/tags without an
 HTTP request, retry delay, request-budget charge or new token/cost usage. The
 normal output pipeline still applies current metadata, profiles and output paths.
-Pure enhancement, standalone image analysis and page/browser vision do not use
-this cache. Fetched response caching is a separate layer. There is no process-memory cache in this implementation.
+Pure enhancement and standalone caption/description analysis do not use
+this cache. Non-pure page/browser visual processing uses a separate batch namespace. Fetched response caching is a separate layer. There is no process-memory cache in this implementation.
 
 ## Configuration and CLI behavior
 
@@ -64,6 +64,32 @@ still needs the environment to identify its pool. Prompt files must remain
 readable because their actual text determines whether an answer is reusable.
 The normal CLI may already have read dotenv during configuration loading; this
 lookup ordering does not promise that the complete CLI invocation avoids it.
+
+## Visual batch identity and retry
+
+`native-vision-v1` keeps visual entries separate from typed text and legacy
+Markdown. Its length-framed digest includes the protected text for that batch,
+resolved prompt templates and protocol marker, eligible positive-weight model
+identities, and every ordered frame's number, MIME and full encoded bytes.
+Changing image pixels, image order, prompt rules or first/cleaner response mode
+invalidates the corresponding entry. Filenames alone never identify pixels.
+Image payloads, credentials and provider endpoints are not saved in keys or rows.
+
+Each batch has its own protection scope, so an unchanged batch can be reused
+when another batch changes. A changed source-owned image reference or other
+body text also correctly changes that batch's identity. First-batch entries
+contain Markdown and validated description/tags; cleaner entries contain Markdown
+and null metadata. Reads revalidate the schema, protected markers and visual
+content guards. Rejected, truncated, refused or partial answers are not admitted.
+A legacy entry cannot satisfy a visual lookup.
+
+Successful batches may be cached even when another batch makes the complete
+conversion fail. A retry sends only misses, while the final enhanced body still
+requires every batch to succeed. A wholly cached visual document has zero new
+usage; any new paid response makes the complete conversion's cache-hit indicator
+false. The same bypass, capacity, isolation and SQLite initialization rules apply.
+The reference's name-based visual cache identity is intentionally strengthened
+with actual bytes to prevent stale OCR after image changes.
 
 ## Storage and failure behavior
 

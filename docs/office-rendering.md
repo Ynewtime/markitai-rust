@@ -80,8 +80,8 @@ Initial direct backend probe used LibreOfficeDev `26.8.0.0.alpha0`, build
 that initial probe alone did not establish renderer/API acceptance. Its raw
 commands, output hashes and logs remain in
 `.local/media-llm-round22/office-probe/record.json`, separate from the later passing
-tests above. Round 22 release CLI and installed-binding validation are still
-pending. The six tests do not establish legacy binary input import fidelity,
+tests above. Round 22 release CLI and installed-binding validation subsequently
+passed, as recorded below. The six tests do not establish legacy binary input import fidelity,
 cross-platform rendering, performance or Microsoft Office layout parity.
 
 The initial Word fixture put two adjacent page breaks in one paragraph. This
@@ -98,3 +98,8 @@ acceptance, including hidden/blank pages and full-frame pixel checks. Refreshed
 installed Node/Python/Go packages pass their binding tests against this core. See
 [round-22 evidence](validation/media-llm-round22.md); these authored samples do not
 establish Microsoft Office layout equivalence or other-host support.
+
+`office_diagnostic()` uses the same private process setup and cleanup, acquiring
+an export slot within a ten-second deadline and running only `--version`. It
+reports discoverable-and-startable status separately from PDF platform support
+and document fidelity. Child stderr is discarded and failure messages are fixed.

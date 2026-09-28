@@ -1,3 +1,7 @@
+#[path = "app/doctor.rs"]
+mod doctor;
+#[path = "app/guided.rs"]
+mod guided;
 #[path = "app/interactive.rs"]
 mod interactive;
 #[path = "app/logging.rs"]
@@ -22,7 +26,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name="markitai", version=markitai_core::VERSION,
     about="Convert documents and URLs to Markdown", disable_help_subcommand=true, args_override_self=true)]
 struct Cli {
@@ -122,7 +126,7 @@ struct Cli {
     interactive: bool,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum Command {
     /// Inspect or edit configuration.
     Config {
@@ -138,7 +142,7 @@ enum Command {
         #[arg(long)]
         local: bool,
     },
-    /// Report native runtime capabilities.
+    /// Diagnose configured workflows and optional native backends.
     Doctor {
         #[arg(long)]
         json: bool,
@@ -174,7 +178,7 @@ enum Command {
     Mcp,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum CacheCommand {
     Stats {
         #[arg(long)]
@@ -199,7 +203,7 @@ enum CacheCommand {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 enum ConfigCommand {
     List {
         #[arg(short='f', long="format", default_value="json", value_parser=["json","yaml","table"], ignore_case=true)]
@@ -270,8 +274,11 @@ fn tri(yes: bool, no: bool) -> Option<bool> {
 }
 
 fn execute(cli: &Cli) -> CliResult<i32> {
-    if cli.command.is_some() && cli.input.is_some() {
-        return Err((2, "Cannot mix INPUT with a subcommand".into()));
+    if cli.command.is_some() && (cli.input.is_some() || cli.interactive) {
+        return Err((
+            2,
+            "Cannot mix INPUT or --interactive with a subcommand".into(),
+        ));
     }
     let permits_missing = matches!(
         cli.command,
@@ -300,22 +307,41 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     if let Some(command) = &cli.command {
         return subcommand(cli, command, overrides);
     }
-    for (requested, name) in [
-        (cli.interactive, "--interactive"),
-        (
-            cli.llm_batch || cli.llm_batch_timeout.is_some() || cli.llm_batch_collect.is_some(),
-            "LLM Batch API",
-        ),
-    ] {
-        if requested {
-            return Err(unsupported(name));
-        }
+    if cli.interactive && cli.json {
+        return Err((2, "--interactive and --json cannot be used together".into()));
     }
-    let Some(input) = cli.input.as_deref() else {
-        return Err((2, "INPUT is required".into()));
-    };
+    if cli.input.is_none() && !cli.interactive {
+        Cli::command().print_help().map_err(runtime)?;
+        println!();
+        return Ok(0);
+    }
+    if cli.llm_batch || cli.llm_batch_timeout.is_some() || cli.llm_batch_collect.is_some() {
+        return Err(unsupported("LLM Batch API"));
+    }
+    let cfg = conversion_config(cli, overrides)?;
+    if cli.interactive {
+        let Some(run) = guided::collect(cli, cfg)? else {
+            eprintln!("Cancelled.");
+            return Ok(0);
+        };
+        let mut effective = cli.clone();
+        effective.input = Some(run.input);
+        effective.output = Some(run.output);
+        effective.interactive = false;
+        return execute_conversion(
+            &effective,
+            effective.input.as_deref().unwrap(),
+            run.config,
+            effective.output.clone(),
+        );
+    }
+    execute_conversion(cli, cli.input.as_deref().unwrap(), cfg, cli.output.clone())
+}
+
+fn conversion_config(cli: &Cli, overrides: Option<Value>) -> CliResult<Value> {
     let mut cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
     if let Some(name) = &cli.preset {
+        let name = name.to_lowercase();
         let preset = match name.as_str() {
             "minimal" => {
                 json!({"llm":false,"alt":false,"desc":false,"ocr":false,"screenshot":false})
@@ -323,7 +349,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             "standard" => json!({"llm":true,"alt":true,"desc":true,"ocr":false,"screenshot":false}),
             "rich" => json!({"llm":true,"alt":true,"desc":true,"ocr":false,"screenshot":true}),
             _ => cfg["presets"]
-                .get(name)
+                .get(&name)
                 .cloned()
                 .ok_or_else(|| (1, format!("Unknown preset: {name}")))?,
         };
@@ -425,6 +451,15 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         cfg["llm"]["concurrency"] = json!(n);
     }
     config::validate(&cfg).map_err(runtime)?;
+    Ok(cfg)
+}
+
+fn execute_conversion(
+    cli: &Cli,
+    input: &str,
+    mut cfg: Value,
+    mut output: Option<PathBuf>,
+) -> CliResult<i32> {
     logging::start(&cfg, cli.log_level.as_deref()).map_err(runtime)?;
     logging::event(
         logging::Level::Debug,
@@ -452,7 +487,6 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     if !directory && (!cli.globs.is_empty() || cli.max_depth.is_some()) {
         return Err((2, "--glob and --max-depth require a directory input".into()));
     }
-    let mut output = cli.output.clone();
     if is_url(input)
         && config::enabled(&cfg, "/screenshot/screenshot_only")
         && !config::enabled(&cfg, "/llm/enabled")
@@ -1322,44 +1356,16 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
             fix,
             suggest_extras,
         } => {
-            if *fix {
-                return Err(unsupported("Automatic runtime repairs"));
+            if *as_json && *fix {
+                return Err((2, "--json and --fix cannot be used together".into()));
             }
             if *suggest_extras {
                 return Err(unsupported(
                     "Python extras recommendations (this build is native Rust)",
                 ));
             }
-            config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
-            let browser = markitai_core::browser_available();
-            let ocr = markitai_core::local_ocr_available();
-            let pdf = markitai_core::pdf_raster_available();
-            let office = markitai_core::office_render_available();
-            let diagnostic = json!({"version":markitai_core::VERSION,"runtime":"rust","configuration":"valid","capabilities":{"local_conversion":true,"static_fetch":true,"openai_compatible_llm":true,"ocr":ocr,"screenshots":browser || pdf,"browser":browser,"office_screenshots":office,"cache":true,"serve":true,"mcp":true},"status":"development"});
-            if *as_json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&diagnostic).map_err(runtime)?
-                );
-            } else {
-                println!(
-                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache, REST conversion service, stdio MCP\nLocal image OCR: {}\nInstalled browser and URL screenshots: {}\nPDF page screenshots: {}\nPDF page OCR: {}\nOffice screenshots: {}",
-                    markitai_core::VERSION,
-                    if ocr { "available" } else { "unavailable" },
-                    if browser { "available" } else { "unavailable" },
-                    if pdf { "available" } else { "unavailable" },
-                    if pdf && ocr {
-                        "available"
-                    } else {
-                        "unavailable"
-                    },
-                    if office {
-                        "available (installed LibreOffice)"
-                    } else {
-                        "unavailable"
-                    }
-                );
-            }
+            let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
+            return doctor::run(&cfg, selected_config(cli).as_deref(), *as_json, *fix);
         }
         Command::Cache { command } => {
             let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;

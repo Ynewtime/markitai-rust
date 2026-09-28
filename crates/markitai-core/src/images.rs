@@ -951,8 +951,20 @@ mod tests {
                     }
                 }
             };
-            let response =
-                r##"{"choices":[{"message":{"content":"# Read vector\n\nA red rectangle."}}]}"##;
+            assert!(
+                request["messages"][0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("MARKITAI_VISION_JSON_V1")
+            );
+            let protected = request["messages"][1]["content"][0]["text"]
+                .as_str()
+                .unwrap();
+            let response = json!({"choices":[{"message":{"content":json!({
+                "cleaned_markdown":format!("{protected}\n\n# Read vector\n\nA red rectangle."),
+                "frontmatter":{"description":"A red rectangle in SVG", "tags":["svg"]}
+            }).to_string()}}]})
+            .to_string();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
             request
         });
@@ -965,7 +977,7 @@ mod tests {
                     "prompts":{"dir":directory.path().join("prompts")},"log":{"dir":null},
                     "ocr":{"enabled":false},"screenshot":{"enabled":false},
                     "image":{"compress":false,"max_width":25,"alt_enabled":false,"desc_enabled":false},
-                    "llm":{"enabled":true,"keep_base":true,"failure_policy":"fail","router_settings":{"num_retries":0},
+                    "llm":{"enabled":true,"keep_base":true,"on_failure":"fail","router_settings":{"num_retries":0},
                         "model_list":[{"model_name":"local-svg-vision","litellm_params":{"model":"openai/test-svg","api_base":base,"api_key":"local-fixture-only"},"model_info":{"supports_vision":true}}]}
                 })),
                 ..Default::default()

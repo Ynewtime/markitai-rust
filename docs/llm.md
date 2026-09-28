@@ -183,8 +183,9 @@ fails with a configuration diagnostic. Default `~/.markitai/...` paths honor
 Templates support `{source}`, `{timestamp}`, `{mode_rules}`, `{content}` and
 `{metadata_section}`. For non-pure text processing the metadata placeholder carries
 the typed JSON contract. The same contract is appended to custom system templates;
-custom prompts do not bypass response validation. Pure and current vision prompts
-retain their existing behavior, including an empty metadata placeholder.
+custom prompts do not bypass response validation. The first non-pure visual batch
+also supplies its typed contract through this placeholder. Later visual cleaner
+batches and pure requests leave it empty; pure behavior is unchanged.
 Document content is inserted last so literal braces inside a document are not
 interpreted as template placeholders. The default user template is exactly
 `{content}`: pure mode sends the supplied Markdown unchanged. Its fresh system
@@ -244,11 +245,68 @@ These are deletion safeguards, not proof of semantic accuracy.
 
 Both local and ordinary URL text use the [typed persistent cache](cache.md).
 Cache hits require no model request and have zero new usage; bypass controls still
-refresh successful answers. Pure text, standalone image analysis and page/browser
-vision bypass this document cache. Vision still follows its existing Markdown
-response path: structured vision batches, image-aware document caching, the
-reference tool/JSON-schema capability ladder and speculative JSON repair remain
-unimplemented. This delivery does not claim those separate capabilities.
+refresh successful answers. Pure text and standalone caption/description analysis
+bypass this document cache. Non-pure page/browser vision uses its own image-aware
+batch namespace, described below. Provider tool/JSON-schema negotiation and
+speculative JSON repair remain separate, unimplemented capabilities.
+
+## Structured visual documents
+
+Non-pure PDF/Office page images and standalone image/TIFF transcription use
+`MARKITAI_VISION_JSON_V1` for the first batch. The response has the same
+`cleaned_markdown` plus `frontmatter.description/tags` shape as typed text.
+Canonical title, source and time remain application-owned. The original base
+body does not receive model metadata. Standalone alt/description analysis keeps
+its separate existing image-analysis schema.
+
+Paged documents use at most ten images per request. The first batch completes
+before later batches begin; later requests use `MARKITAI_VISION_CLEAN_V1` and
+return plain Markdown without metadata. Workers share the caller's runtime and
+conversion accounting context. They may complete out of order, but their bodies
+are assembled in frame order and only the first batch supplies metadata.
+Browser screenshot tiles describe a single web page and remain one bounded
+visual request; they are not assigned fictitious document page boundaries.
+Pure requests retain their existing path.
+
+The caller supplies positive increasing frame numbers, actual image MIME and
+bytes. Existing page-count limits apply before requests, and the complete image
+set must be nonempty and at most 100 MiB. Complete ordered `Page number:` or
+`Slide number:` comments align text to pages. Preamble and trailing material are
+retained, and code examples containing those comments do not create pages.
+If a complete map is absent, all source text is retained once, split at safe
+line/literal boundaries across batches; a warning explicitly declines precise
+text-to-page alignment. No frame is dropped in that fallback.
+
+Source literals use the same protected markers as text processing, separately
+for each visual batch. Each marker must survive exactly once and in order.
+Scanning an image with no extracted text is valid: the output need not overlap
+empty text. For substantial extracted prose, the existing deletion safeguard
+also checks the visible text after protected literals are removed. Short explicit
+refusals, repetitive degraded output, blank results and token-limit truncation
+are rejected. These are conservative safeguards, not proof of correct OCR or
+semantic fidelity; model accuracy still needs independent evaluation.
+
+Malformed typed output or violated content guards can consume up to three
+validation attempts, within the shared request budget. The known minimum number
+of uncached batches must fit the remaining budget before the first request.
+Transport retries, visual validation, document fallback and image analysis use
+that same budget; zero still means unlimited. Paid error and invalid responses
+retain their parsed usage exactly once.
+
+A fatal first-batch failure prevents later dispatch. Fatal authentication after
+available routing fallbacks, quota/billing failure and exhausted budgets stop
+queued batches before HTTP admission. Already active calls finish. A nonfatal
+batch failure may leave valid sibling batches cached, but it never returns a
+partial enhanced document. Ordinary rendered web pages may use the remaining
+budget for typed text fallback; visual-only/empty pages, PDF/Office documents
+and fatal failures do not use that fallback. Existing output failure policies
+govern retained base files and screenshots.
+
+The native vision-model diagnostic uses the actual deployment and credential
+resolver, reachable groups, positive weights and explicit `supports_vision`
+exclusions. It reports eligible identities without a provider probe or guessing
+capability from model names. An unspecified capability is eligible, not evidence
+that the provider can process images.
 
 ## Verification
 
@@ -272,6 +330,14 @@ typed fields and base separation, Unicode parallel chunk order, literal fidelity
 URL cache hits without credentials, partial-failure retry, preflight admission,
 shared retry budgets, custom prompts and unchanged pure behavior. Chunk/cache
 unit checks cover typed namespaces, Unicode tails and malformed metadata.
+
+Round twenty-three adds `tests/conversion/vision_processing.rs`: loopback HTTP
+cases for 21-frame bounded concurrency/order, eleven-frame cache reuse and pixel
+changes, paid authentication failure, later failure with partial-cache retry,
+zero-request budget rejection, and queued-batch cancellation. Module tests cover
+page/slide boundaries, code-literal examples, cache content guards and actual
+vision-model eligibility. These newly authored cases await the coordinator's
+integrated gate; the test source alone is not execution evidence.
 
 HTTP tests bind loopback listeners, capture request headers and JSON, return
 scripted responses, and use bounded socket timeouts. Retry sleeps are injected

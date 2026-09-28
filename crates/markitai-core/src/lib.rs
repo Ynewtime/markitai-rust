@@ -40,15 +40,30 @@ pub fn office_render_available() -> bool {
     office_render::available() && pdf_raster::available()
 }
 
+/// Launch and close an isolated browser session; no document or provider request is made.
+pub fn browser_diagnostic() -> Result<Option<PathBuf>> {
+    browser::diagnostic()
+}
+
+/// Check that the optional Office executable starts within a bounded deadline.
+pub fn office_diagnostic() -> Result<Option<PathBuf>> {
+    office_render::diagnostic()
+}
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Report local model configuration without contacting a provider or exposing keys.
 pub fn llm_capabilities(config: &Value) -> LlmCapabilities {
     llm::capabilities(config, &config::environment())
+}
+
+/// Return the native router's eligible vision model identities without a network probe.
+pub fn llm_vision_models(config: &Value) -> Vec<String> {
+    llm::vision_models(config, &config::environment())
 }
 
 pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput> {
@@ -393,27 +408,102 @@ pub fn convert_with_publication(
                 .iter()
                 .map(|shot| screenshot_mime(&shot.bytes).map(|mime| (mime, shot.bytes.as_slice())))
                 .collect::<Result<_>>()?;
-            llm::enhance_images_with_source_and_runtime(
-                input,
-                &source_context,
-                &image_refs,
-                &cfg,
-                context.llm_runtime,
-            )
-            .map(without_cache)
+            if pure {
+                llm::enhance_images_with_source_and_runtime(
+                    input,
+                    &source_context,
+                    &image_refs,
+                    &cfg,
+                    context.llm_runtime,
+                )
+                .map(without_cache)
+            } else {
+                let frames = image_refs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (mime, bytes))| llm::VisionFrame {
+                        number: index + 1,
+                        mime,
+                        bytes,
+                    })
+                    .collect::<Vec<_>>();
+                let kind = if pdf_input || office_media_requested {
+                    llm::VisionKind::PagedDocument
+                } else {
+                    llm::VisionKind::WebCapture
+                };
+                let enhanced = llm::process_vision_with_runtime(
+                    llm::VisionRequest {
+                        markdown: input,
+                        source_label: &source_context,
+                        cache_context: source,
+                        kind,
+                        frames: &frames,
+                    },
+                    &cfg,
+                    context.llm_runtime,
+                );
+                // A rendered web page still has an independently extracted body.
+                // Reuse the same document accounting context for a typed text fallback.
+                match enhanced {
+                    Err(failure)
+                        if is_url
+                            && !pdf_input
+                            && !screenshot_only
+                            && !doc.markdown.trim().is_empty()
+                            && failure.allow_text_fallback =>
+                    {
+                        result.warnings.push("Rendered-page enhancement failed; attempting structured text processing with the remaining document budget.".into());
+                        llm::process_document_with_runtime(
+                            input,
+                            &source_context,
+                            source,
+                            doc.metadata.get("content_profile").and_then(Value::as_str)
+                                == Some("social_post"),
+                            &cfg,
+                            context.llm_runtime,
+                        )
+                    }
+                    outcome => outcome.map_err(|failure| failure.error),
+                }
+            }
         } else if !vision.is_empty() {
             let images = vision
                 .iter()
                 .map(|image| (image.mime, image.bytes.as_slice()))
                 .collect::<Vec<_>>();
-            llm::enhance_images_with_source_and_runtime(
-                input,
-                &source_context,
-                &images,
-                &cfg,
-                context.llm_runtime,
-            )
-            .map(without_cache)
+            if pure {
+                llm::enhance_images_with_source_and_runtime(
+                    input,
+                    &source_context,
+                    &images,
+                    &cfg,
+                    context.llm_runtime,
+                )
+                .map(without_cache)
+            } else {
+                let frames = images
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (mime, bytes))| llm::VisionFrame {
+                        number: index + 1,
+                        mime,
+                        bytes,
+                    })
+                    .collect::<Vec<_>>();
+                llm::process_vision_with_runtime(
+                    llm::VisionRequest {
+                        markdown: input,
+                        source_label: &source_context,
+                        cache_context: source,
+                        kind: llm::VisionKind::PagedDocument,
+                        frames: &frames,
+                    },
+                    &cfg,
+                    context.llm_runtime,
+                )
+                .map_err(|failure| failure.error)
+            }
         } else if !pure {
             llm::process_document_with_runtime(
                 input,
@@ -465,17 +555,20 @@ pub fn convert_with_publication(
                 });
                 if send_pdf_images && !screenshots.is_empty() {
                     let enhanced = result.llm_markdown.as_mut().expect("enhanced body is set");
-                    enhanced.push_str("\n\n<!-- Page images for reference -->\n");
-                    for (index, screenshot) in screenshots.iter().enumerate() {
-                        if index > 0 {
-                            enhanced.push('\n');
-                        }
-                        enhanced.push_str(&match office_kind {
+                    let references = screenshots
+                        .iter()
+                        .enumerate()
+                        .map(|(index, screenshot)| match office_kind {
                             Some(kind) => {
                                 office_media::reference(kind, index + 1, &screenshot.name)
                             }
                             None => formats::pdf_screenshot_reference(index + 1, &screenshot.name),
-                        });
+                        })
+                        .filter(|reference| !enhanced.contains(reference.as_str()))
+                        .collect::<Vec<_>>();
+                    if !references.is_empty() {
+                        enhanced.push_str("\n\n<!-- Page images for reference -->\n");
+                        enhanced.push_str(&references.join("\n"));
                     }
                 }
                 result.usage = enhancement.usage;

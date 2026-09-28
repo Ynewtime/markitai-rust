@@ -156,6 +156,7 @@ pub(super) struct Browser {
     next_id: u64,
     pub deadline: Instant,
     blocked: Vec<regex::Regex>,
+    auth: super::auth::State,
     in_flight: HashSet<String>,
     pub last_network_change: Instant,
     pub main_frame: Option<String>,
@@ -201,6 +202,7 @@ impl Browser {
             next_id: 1,
             deadline: Instant::now() + Duration::from_millis(options.timeout),
             blocked: options.blocked.clone(),
+            auth: super::auth::State::new(options.credentials.clone()),
             in_flight: HashSet::new(),
             last_network_change: Instant::now(),
             main_frame: None,
@@ -229,7 +231,7 @@ impl Browser {
         browser.call("Browser.setDownloadBehavior", json!({"behavior":"deny"}))?;
         browser.call(
             "Fetch.enable",
-            json!({"patterns":[{"urlPattern":"*","requestStage":"Request"}]}),
+            json!({"patterns":[{"urlPattern":"*","requestStage":"Request"}],"handleAuthRequests":browser.auth.enabled()}),
         )?;
         browser.call("Emulation.setDeviceMetricsOverride", json!({"width":options.width,"height":options.height,"deviceScaleFactor":1,"mobile":false}))?;
         if !options.headers.is_empty() {
@@ -268,6 +270,10 @@ impl Browser {
         }
         let params = &message["params"];
         match message.get("method").and_then(Value::as_str).unwrap_or("") {
+            "Fetch.authRequired" => {
+                let response = self.auth.respond(params)?;
+                self.send("Fetch.continueWithAuth", response)?;
+            }
             "Fetch.requestPaused" => {
                 let id = params["requestId"]
                     .as_str()
@@ -367,6 +373,13 @@ impl Browser {
             .cloned()
             .unwrap_or(Value::Null))
     }
+    #[cfg(test)]
+    pub(super) fn test_process(&self) -> Option<(u32, std::path::PathBuf)> {
+        self._process
+            .as_ref()
+            .map(|process| (process.child.id(), process._profile.path().to_owned()))
+    }
+
     pub fn idle(&self) -> bool {
         self.in_flight.is_empty()
             && self.last_network_change.elapsed() >= Duration::from_millis(500)
@@ -424,6 +437,7 @@ mod tests {
                 session: "test-session".into(),
                 next_id: 1,
                 deadline: Instant::now() + Duration::from_secs(3),
+                auth: super::super::auth::State::new(None),
                 blocked: vec![regex::Regex::new(r"^https://example\.test/ads/").unwrap()],
                 in_flight: HashSet::new(),
                 last_network_change: Instant::now(),
@@ -473,6 +487,46 @@ mod tests {
                 json!({"complete":true})
             );
         }
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn authentication_events_preserve_matching_replies_and_ignore_other_sessions() {
+        let (mut browser, worker) = mock(4096, |mut socket| {
+            let command = receive(&mut socket);
+            let event = |session: &str| json!({"sessionId":session,"method":"Fetch.authRequired","params":{"requestId":"auth-1","request":{"url":"https://example.test/page"},"authChallenge":{"source":"Server","origin":"https://example.test","scheme":"basic","realm":"fixture"}}});
+            send(&mut socket, event("other-session"));
+            send(&mut socket, event("test-session"));
+            let action = receive(&mut socket);
+            assert_eq!(action["method"], "Fetch.continueWithAuth");
+            assert_eq!(
+                action["params"]["authChallengeResponse"],
+                json!({"response":"ProvideCredentials","username":"u","password":"p"})
+            );
+            send(&mut socket, json!({"id":action["id"],"result":{}}));
+            send(&mut socket, event("test-session"));
+            let cancel = receive(&mut socket);
+            assert_eq!(
+                cancel["params"]["authChallengeResponse"],
+                json!({"response":"CancelAuth"})
+            );
+            send(&mut socket, json!({"id":cancel["id"],"result":{}}));
+            send(
+                &mut socket,
+                json!({"id":command["id"],"result":{"complete":true}}),
+            );
+        });
+        browser.auth = super::super::auth::State::new(
+            super::super::auth::parse(
+                Some(&json!({"username":"u","password":"p"})),
+                &Url::parse("https://example.test/").unwrap(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            browser.call("Page.navigate", json!({})).unwrap(),
+            json!({"complete":true})
+        );
         worker.join().unwrap();
     }
 

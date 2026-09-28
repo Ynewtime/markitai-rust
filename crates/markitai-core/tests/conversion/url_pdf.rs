@@ -162,12 +162,22 @@ impl Server {
                         }
                     }
                 };
-                captured.lock().unwrap().push(request);
-                let reply = replies.pop_front().unwrap_or(Reply {
+                let mut reply = replies.pop_front().unwrap_or(Reply {
                     status: 500,
                     headers: Vec::new(),
                     body: b"Unexpected duplicate request".to_vec(),
                 });
+                if reply.status == 200 && request.head.starts_with("POST /v1/chat/completions ") {
+                    let input: Value = serde_json::from_slice(&request.body).unwrap();
+                    let mut payload: Value = serde_json::from_slice(&reply.body).unwrap();
+                    if let Some(content) = payload.pointer_mut("/choices/0/message/content")
+                        && let Some(markdown) = content.as_str()
+                    {
+                        *content = json!(super::mock_model_content(&input, markdown));
+                    }
+                    reply.body = serde_json::to_vec(&payload).unwrap();
+                }
+                captured.lock().unwrap().push(request);
                 write!(
                     stream,
                     "HTTP/1.1 {} Mock\r\nContent-Length: {}\r\nConnection: close\r\n",

@@ -1,4 +1,7 @@
 //! Optional Chromium rendering through native CDP, with an isolated process per fetch.
+mod auth;
+#[cfg(test)]
+mod auth_tests;
 mod cdp;
 mod options;
 
@@ -131,6 +134,37 @@ pub(crate) fn discover() -> Option<PathBuf> {
 /// Check installed executables without launching a browser or opening a profile.
 pub fn available() -> bool {
     discover().is_some()
+}
+
+/// Launch a private blank page and verify its protocol connection without user settings.
+/// Startup is bounded to 15 seconds, followed by a five-second protocol deadline.
+pub fn diagnostic() -> Result<Option<PathBuf>> {
+    let Some(executable) = discover() else {
+        return Ok(None);
+    };
+    diagnostic_with(&executable)?;
+    Ok(Some(executable))
+}
+
+fn diagnostic_with(executable: &Path) -> Result<()> {
+    let run = || -> Result<()> {
+        let mut browser = cdp::Browser::launch(executable, &options::Options::diagnostic())?;
+        if browser.evaluate("location.href")?.as_str() != Some("about:blank") {
+            return Err(Error::Fetch(
+                "Browser diagnostic did not open a blank page".into(),
+            ));
+        }
+        Ok(())
+    };
+    run().map_err(|_| {
+        Error::Fetch("Chromium diagnostic could not initialize a private blank page".into())
+    })
+}
+
+/// Presence determines routing; full validation runs before browser discovery/launch.
+pub(crate) fn http_credentials_configured(cfg: &Value) -> bool {
+    cfg.pointer("/fetch/playwright/http_credentials")
+        .is_some_and(|value| !value.is_null())
 }
 
 fn filename(url: &Url) -> String {
@@ -422,18 +456,26 @@ mod tests {
         );
     }
     #[test]
-    fn unsupported_session_and_credentials_fail_before_browser_discovery() {
-        for cfg in [
-            json!({"fetch":{"playwright":{"session_mode":"domain_persistent"}}}),
-            json!({"fetch":{"playwright":{"http_credentials":{"username":"private","password":"secret"}}}}),
-        ] {
-            let error = fetch("http://127.0.0.1/", &cfg, false)
+    fn unsupported_session_and_malformed_credentials_fail_before_browser_discovery() {
+        let cfg = json!({"fetch":{"playwright":{"session_mode":"domain_persistent"}}});
+        assert!(
+            fetch("http://127.0.0.1/", &cfg, false)
                 .err()
                 .unwrap()
-                .to_string();
-            assert!(!error.contains("secret") && !error.contains("private"));
-            assert!(error.contains("not implemented"));
-        }
+                .to_string()
+                .contains("not implemented")
+        );
+        let cfg = json!({"fetch":{"playwright":{"http_credentials":{"username":"private","password":123}}}});
+        let error = fetch("http://127.0.0.1/", &cfg, false)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("private") && !error.contains("123"));
+        assert!(http_credentials_configured(&cfg));
+        assert!(!http_credentials_configured(&json!({})));
+        assert!(!http_credentials_configured(
+            &json!({"fetch":{"playwright":{"http_credentials":null}}})
+        ));
     }
 
     #[test]

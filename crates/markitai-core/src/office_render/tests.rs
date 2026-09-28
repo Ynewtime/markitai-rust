@@ -100,6 +100,13 @@ fn export_requires_new_regular_correct_output_and_does_not_modify_input() {
     assert_eq!(fs::read(&input).unwrap(), PRESENTATION);
     let private = result._workspace.path().to_owned();
     assert!(private.exists());
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
     drop(result);
     assert!(!private.exists());
     for script in [
@@ -241,4 +248,25 @@ fn installed_libreoffice_preserves_word_explicit_blank_middle_page() {
     let blank = session.render(2, 72.).unwrap();
     assert_eq!(blank.dimensions(), (612, 792));
     assert!(blank.pixels().all(|p| p.0 == [255, 255, 255]));
+}
+
+#[cfg(unix)]
+#[test]
+fn diagnostic_checks_startup_without_export_and_bounds_hung_programs() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("private-profile");
+    fs::create_dir(&profile).unwrap();
+    let success = mock(
+        dir.path(),
+        "[ \"$out\" = '' ]\n[ \"$PWD\" -ef \"$TMPDIR\" ]\nlast=''\nfor arg in \"$@\"; do last=\"$arg\"; done\n[ \"$last\" = '--version' ]",
+    );
+    process::diagnose(&success, &profile, Instant::now() + Duration::from_secs(3)).unwrap();
+    let rejected = mock(dir.path(), "printf 'private test stderr' >&2\nexit 9");
+    let error = process::diagnose(&rejected, &profile, Instant::now() + Duration::from_secs(3))
+        .unwrap_err();
+    assert!(!error.to_string().contains("private test stderr"));
+    let hung = mock(dir.path(), "sleep 30");
+    let start = Instant::now();
+    assert!(process::diagnose(&hung, &profile, start + Duration::from_millis(150)).is_err());
+    assert!(start.elapsed() < Duration::from_secs(2));
 }

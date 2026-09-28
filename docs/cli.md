@@ -18,6 +18,8 @@ markitai mcp
 markitai note.txt -o output/ --log-level DEBUG --config-json '{"log":{"dir":"./logs","format":"json"}}'
 markitai config edit
 markitai init --local
+markitai -I
+markitai -c isolated.json doctor --json
 ```
 
 ## 已实现的命令行为
@@ -31,13 +33,15 @@ markitai init --local
 - 报告发布失败保留已完成文件及 stdout JSON 条目，并退出非零；报告不替代 stdout envelope。stdout 转换、dry run、无可恢复状态的空目录和失败/跳过的单项不生成报告；批量部分失败仍可生成报告。报告的 skip 冲突策略保留已有报告。
 - Unix 目录/URL 列表每次保存恢复状态；`--resume` 合并新发现任务、保留完成项并重试未完成项。输出归属凭证保护隐式重试，旧状态按普通冲突策略升级。首次 Ctrl-C 停止派发、同步状态并等待在途转换，退出 130；再次中断立即退出。详见 [恢复状态](state-storage.md) 与 [输出归属](output-ownership.md)。
 - `--record-history` 将本次实际处理项保存到隔离 home 下的 `serve/jobs/`，包含独立的最终文档、资产和兼容元数据；归档失败只警告，stdout/dry-run/中断不归档。开关覆盖环境和配置，详见 [历史归档](history.md)。
-- 配置优先级由核心解析；根级 `-c` 和 `--config-json` 对子命令同样生效。布尔参数支持显式否定；重复正反开关以最后一个为准，preset 应用后显式参数覆盖。
+- 配置优先级由核心解析；根级 `-c` 和 `--config-json` 对子命令同样生效。布尔参数支持显式否定；重复正反开关以最后一个为准，preset 名称按小写查找，应用后显式参数覆盖。没有 INPUT/子命令且未指定 `-I` 时显示帮助并退出 0，包括只给转换选项的情况；参数本身非法仍退出 2。
 - `config list/get/path/validate/set/edit` 可用；list 支持 JSON/YAML/table；默认隐藏凭据。set/edit 原子更新配置，保留未知字段，不写入临时 `--config-json` 内容。
 - `config edit` 是终端中的导航编辑器：`/关键字` 模糊搜索、数字选择当前页设置、`n/p` 翻页，也可输入完整配置 key。输入值后按同一配置 schema 验证并立即保存；无效值不落盘。空输入保留当前值，`:empty` 写空字符串，`:cancel` 返回，`q` 退出。列表隐藏凭据，外部修改配置后拒绝覆盖，要求重新打开。
-- 编辑器遍历标量设置和嵌套配置，跳过数组、字典、prompts、presets、domain_profiles；复杂值仍用 `config set`。界面使用按行导航，不复刻参考版全屏方向键界面；顶层转换选择器 `-I/--interactive` 仍未实现。stdin/stderr 非终端时明确拒绝，不等待脚本输入。Unix 敏感值输入暂时关闭终端回显；此时 Ctrl-C/SIGTERM 恢复回显后退出 130/143，不保存未确认值。其他平台敏感输入明确拒绝，可使用 `config set` 保存 `env:VARIABLE` 引用。
+- 编辑器遍历标量设置和嵌套配置，跳过数组、字典、prompts、presets、domain_profiles；复杂值仍用 `config set`。界面使用按行导航，不复刻参考版全屏方向键界面。stdin/stderr 非终端时明确拒绝，不等待脚本输入。Unix 敏感值输入暂时关闭终端回显；配置编辑中 Ctrl-C/SIGTERM 恢复回显后退出 130/143，不保存未确认值。其他平台敏感输入明确拒绝，可使用 `config set` 保存 `env:VARIABLE` 引用。
 - `init [--local|-o path]` 提供位置选择与已有文件 update/overwrite/keep；默认 keep。`init --yes` 无提示创建配置，已有配置只追加新发现的模型、保留已有模型和其他字段，重复运行无变化。`-o` 指向已有目录时写入该目录的 `markitai.json`。坏配置仅允许交互明确覆盖，自动更新报错并保留原字节。
 - 初始化只检测当前核心支持的 API 环境配置和 `MODEL`，不发模型请求，不保存凭据明文，生成配置默认关闭 LLM。不检测订阅登录、不安装运行时、不创建参考版 `.env` 模板；可用环境变量或现有隔离 home 下的 `.env` 配置凭据。交互编辑/初始化与其他新功能的验证状态以调度中心为准。
-- `doctor [--json]` 报告当前开发版原生能力；诊断 JSON 暂为 Rust 新 schema，尚未与旧 doctor 逐字段对齐。
+- `-I/--interactive` 引导选择文件、目录或 URL、输出目录、LLM、alt/desc/pure、OCR 与截图，确认后复用普通转换、报告和批量流程。显式配置、preset 和命令行开关成为向导默认值；Enter 保留当前有效值，y/n 显式启用/关闭，摘要显示最终效果。这比参考版仅发送勾选的正向开关更明确，也保留了参考版重新启动 CLI 时会丢失的显式配置。缺少模型时可设置仅用于本次运行的 API 模型/环境引用/隐藏密钥、重试检测或关闭 LLM；不写配置，不调用订阅 CLI。提示与摘要写 stderr，不改变转换 stdout。q、EOF、拒绝确认退出 0；Unix 向导提示期间 Ctrl-C 同样退出 0并恢复密钥输入回显，转换开始后使用普通中断行为。非 Unix 中断状态依终端平台，尚未实机验证。`-I --json`、向导与子命令混用、非终端输入均退出 2。
+- `doctor [--json]` 恢复参考的顶层检查字典：`playwright/libreoffice/rapidocr/anydoc/serve/llm-api/vision-model/vlm-ocr`，配置订阅模型时追加对应 SDK/auth 项。每项包含 `name/description/status/message/install_hint`，状态为 `ok/warning/missing/error`，按检查需要附 `path/optional/models`；保留旧 key，但描述实际原生后端，不声称安装了同名 Python 包。Chromium 实际执行私有 profile 的 about:blank/CDP 启停，LibreOffice 有界执行隔离的 `--version`；这不证明网页/文档完整兼容。OCR 检查平台 API 可用性，不预热模型；LLM 只核对本地配置、环境引用和路由资格，不联系 provider。
+- doctor 缺少可选组件退出 0；活跃模型缺少环境引用或不可用、配置明确要求的浏览器不可启动时退出 1，weight=0 的模型不阻断。显式 playwright、截图以及带 HTTP credentials 的 auto 抓取要求浏览器，显式 static 不因该凭据字段而要求浏览器。VLM OCR 项显示 `MARKITAI_NO_VLM_OCR` 的实际选择。`doctor --fix` 运行诊断并给人工修复提示；原生自动 Chromium 安装仍未实现，浏览器不可用时返回 1且不执行安装器。`--json --fix` 返回 2，Python 专属 `--suggest-extras` 明确未支持。
 - `serve` 启动原生 REST 服务，支持提交文件/URL、任务快照与 SSE、结果/资产/ZIP 下载及持久历史。沿用 host、port、no-open、no-auth、allowed-host 参数；完整工作区界面和其他未迁移接口见 [REST 服务](serve.md)。
 - `mcp` 通过标准输入/输出提供 `convert_document`、`convert_url`、`batch_convert`、`job_status` 四个工具。配置与文件输出沿用同一核心，批处理任务保存在当前 MCP 进程内；协议和结果边界见 [MCP 服务](mcp.md)。
 - `--dry-run` 仅枚举输入和目标，不调用转换器、不创建输出目录。
@@ -52,7 +56,7 @@ markitai init --local
 
 ## 明确的迁移缺口
 
-URL 抓取的其他策略、图片/视觉 URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、顶层交互转换选择器、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和视觉 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 演示与文字文档可通过可选的独立 LibreOffice 安装获得全页截图和 OCR 补充，详见 [Office 渲染](office-rendering.md)；表格截图和其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取的其他策略、非 Unix 断点恢复、Batch API、原生自动浏览器安装、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；文本、独立图片与分页视觉请求的缓存范围分别见 [LLM 处理](llm.md)，不能将一次命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 演示与文字文档可通过可选的独立 LibreOffice 安装获得全页截图和 OCR 补充，详见 [Office 渲染](office-rendering.md)；表格截图和其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
 
 持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 

@@ -8,6 +8,8 @@ pub(super) struct Protected {
     pub text: String,
     prefix: String,
     literals: Vec<(String, String)>,
+    pub page_starts: Vec<(usize, usize)>,
+    ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl Protected {
@@ -65,6 +67,28 @@ impl Protected {
             cursor = range.end;
         }
         ranges.sort_by_key(|r| r.start);
+        // Record semantic boundaries before adjacent literal ranges coalesce.
+        // A fence ending immediately before page 1 must not hide that page.
+        let mut page_starts = Vec::new();
+        for range in &ranges {
+            let literal = source[range.clone()].trim();
+            if let Some(inner) = literal
+                .strip_prefix("<!--")
+                .and_then(|s| s.strip_suffix("-->"))
+            {
+                let inner = inner.trim();
+                if let Some(number) = inner
+                    .strip_prefix("Page number:")
+                    .or_else(|| inner.strip_prefix("Slide number:"))
+                    .or_else(|| inner.strip_prefix("Page "))
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .filter(|n| *n > 0)
+                {
+                    page_starts.push((range.start, number));
+                }
+            }
+        }
+        page_starts.dedup();
         let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
         for range in ranges {
             if let Some(last) = merged.last_mut()
@@ -78,6 +102,7 @@ impl Protected {
         let mut text = String::new();
         let mut literals = Vec::new();
         cursor = 0;
+        let source_ranges = merged.clone();
         for range in merged {
             text.push_str(&source[cursor..range.start]);
             let token = format!("{prefix}{:08}⟧", literals.len());
@@ -94,7 +119,56 @@ impl Protected {
             text,
             prefix,
             literals,
+            page_starts,
+            ranges: source_ranges,
         }
+    }
+
+    pub fn without_markers(&self, text: &str) -> String {
+        let mut output = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find(&self.prefix) {
+            output.push_str(&rest[..start]);
+            let Some(end) = rest[start..].find('⟧') else {
+                return output;
+            };
+            rest = &rest[start + end + '⟧'.len_utf8()..];
+        }
+        output.push_str(rest);
+        output
+    }
+
+    pub fn boundary_after(&self, source: &str, mut offset: usize) -> usize {
+        while offset < source.len() && !source.is_char_boundary(offset) {
+            offset += 1;
+        }
+        loop {
+            let index = self.ranges.partition_point(|range| range.end <= offset);
+            if let Some(range) = self.ranges.get(index)
+                && range.start < offset
+                && offset < range.end
+            {
+                offset = range.end;
+            } else {
+                break;
+            }
+        }
+        // A line boundary cannot split prose words or a protected source literal.
+        if offset == 0 || source.as_bytes().get(offset.wrapping_sub(1)) == Some(&b'\n') {
+            return offset;
+        }
+        let end = source[offset..]
+            .find('\n')
+            .map_or(source.len(), |n| offset + n + 1);
+        let index = self.ranges.partition_point(|range| range.end <= end);
+        self.ranges
+            .get(index)
+            .filter(|range| range.start < end && end < range.end)
+            .map_or(end, |range| range.end)
+    }
+
+    pub fn split(&self) -> Vec<String> {
+        split(&self.text, Some(&self.prefix))
     }
 
     pub fn validate(&self, original: &str, answer: &str) -> Result<()> {
@@ -330,7 +404,7 @@ fn inline_ranges(source: &str, start: usize, end: usize, ranges: &mut Vec<std::o
 
 /// Every scalar is included once; oversized prose blocks split at newline then
 /// scalar boundaries. An opaque protected marker is never bisected.
-pub(super) fn split(text: &str) -> Vec<String> {
+fn split(text: &str, protected_prefix: Option<&str>) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut rest = text;
     while rest.chars().take(LIMIT + 1).count() > LIMIT {
@@ -338,10 +412,25 @@ pub(super) fn split(text: &str) -> Vec<String> {
             .char_indices()
             .nth(LIMIT)
             .map_or(rest.len(), |(at, _)| at);
-        if let Some(start) = rest[..end].rfind("⟦MKTI:")
-            && !rest[start..end].contains('⟧')
-        {
-            end = start;
+        if let Some(prefix) = protected_prefix {
+            // Include a bounded lookahead when the scalar boundary falls inside
+            // the prefix itself, including its opening multibyte bracket.
+            let mut lookahead = end.saturating_add(prefix.len()).min(rest.len());
+            while !rest.is_char_boundary(lookahead) {
+                lookahead += 1;
+            }
+            if let Some((start, _)) = rest[..lookahead]
+                .rmatch_indices(prefix)
+                .find(|(start, _)| *start < end)
+                && let Some(close) = rest[start..].find('⟧')
+            {
+                let token_end = start + close + '⟧'.len_utf8();
+                if end < token_end {
+                    // This prefix is absent from source text: only generated tokens
+                    // can match it. A token at the start must still advance the loop.
+                    end = if start > 0 { start } else { token_end };
+                }
+            }
         }
         let prefix = &rest[..end];
         if let Some(at) = prefix.rfind("\n\n").filter(|&at| at > 0) {
@@ -372,7 +461,7 @@ mod tests {
         let protected = Protected::new(&source);
         assert_eq!(protected.restore(&protected.text).unwrap(), source);
         assert!(!protected.text.contains("[end](target)"));
-        assert_eq!(split(&protected.text).concat(), protected.text);
+        assert_eq!(protected.split().concat(), protected.text);
     }
 
     #[test]
@@ -396,12 +485,63 @@ mod tests {
     #[test]
     fn unicode_chunks_keep_tail_and_exact_concatenation() {
         let text = format!("{}\n\n{}TAIL", "甲".repeat(33_000), "乙".repeat(35_000));
-        let chunks = split(&text);
+        let chunks = split(&text, None);
         assert!(chunks.len() >= 3);
         assert!(chunks.iter().all(|s| s.chars().count() <= LIMIT));
         assert_eq!(chunks.concat(), text);
         assert!(chunks.last().unwrap().ends_with("TAIL"));
     }
+    #[test]
+    fn source_marker_lookalikes_are_plain_text_and_chunks_always_advance() {
+        for source in [
+            format!("⟦MKTI:{}TAIL", "界".repeat(LIMIT * 2)),
+            format!(
+                "{}⟦MKTI:0123456789abcdef:00000000⟧{}TAIL",
+                "x".repeat(LIMIT - 4),
+                "y".repeat(LIMIT)
+            ),
+        ] {
+            let protected = Protected::new(&source);
+            let chunks = protected.split();
+            assert!(chunks.len() <= 3);
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| !chunk.is_empty() && chunk.chars().count() <= LIMIT)
+            );
+            assert_eq!(chunks[0].chars().count(), LIMIT);
+            assert_eq!(chunks.concat(), source);
+            assert_eq!(protected.restore(&chunks.concat()).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn generated_literal_token_crossing_chunk_boundary_remains_whole() {
+        // Exercise boundaries in the opening glyph, hash, index and closing glyph.
+        for distance in 1..=48 {
+            let source = format!(
+                "{}[source](assets/original.png){}TAIL",
+                "界".repeat(LIMIT - distance),
+                "y".repeat(LIMIT)
+            );
+            let protected = Protected::new(&source);
+            let chunks = protected.split();
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| !chunk.is_empty() && chunk.chars().count() <= LIMIT)
+            );
+            assert_eq!(chunks.concat(), protected.text);
+            for (token, _) in &protected.literals {
+                assert_eq!(
+                    chunks.iter().filter(|chunk| chunk.contains(token)).count(),
+                    1
+                );
+            }
+            assert_eq!(protected.restore(&chunks.concat()).unwrap(), source);
+        }
+    }
+
     #[test]
     fn very_long_literal_is_one_restorable_token_not_a_truncated_chunk() {
         let source = format!("```text\n{}\n```\nAfter", "x  \n".repeat(50_000));

@@ -2,6 +2,7 @@
 mod chunks;
 mod document;
 mod service_probe;
+mod vision;
 use crate::{ConversionUsage, Error, LlmRuntime, Result, config, llm_cache};
 use base64::Engine;
 pub(crate) use document::{DocumentMetadata, process_document_with_runtime};
@@ -17,6 +18,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
+pub(crate) use vision::{
+    VisionFailure, VisionFrame, VisionKind, VisionRequest, process_vision_with_runtime,
+};
 
 const MAX_RESPONSE: u64 = 100 * 1024 * 1024;
 const MAX_BACKOFF_SECONDS: u64 = 60;
@@ -386,6 +390,7 @@ struct Failure {
     error: Error,
     retryable: bool,
     fatal: bool,
+    document_fatal: bool,
     retry_after: Option<u64>,
 }
 impl Failure {
@@ -394,6 +399,7 @@ impl Failure {
             error: Error::Conversion(message.into()),
             retryable: false,
             fatal: false,
+            document_fatal: false,
             retry_after: None,
         }
     }
@@ -693,6 +699,28 @@ pub(crate) fn capabilities(cfg: &Value, env: &HashMap<String, String>) -> crate:
         effective: routable,
         models,
     }
+}
+
+/// Uses the actual deployment resolver; model names do not imply vision support.
+pub(crate) fn vision_models(cfg: &Value, env: &HashMap<String, String>) -> Vec<String> {
+    let Ok(entries) = deployments(cfg, env) else {
+        return Vec::new();
+    };
+    let Ok(groups) = fallback_groups(cfg, &entries) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    entries
+        .into_iter()
+        .filter(|entry| {
+            groups.contains(&entry.group)
+                && entry.supports_vision != Some(false)
+                && (matches!(entry.provider.as_str(), "ollama" | "ollama_chat")
+                    || entry.key.as_ref().is_some_and(|key| !key.is_empty()))
+                && seen.insert(entry.id.clone())
+        })
+        .map(|entry| entry.id)
+        .collect()
 }
 
 fn deployments(cfg: &Value, env: &HashMap<String, String>) -> Result<Vec<Deployment>> {
@@ -1044,6 +1072,17 @@ fn run_with_runtime(
     sleep: &mut dyn FnMut(Duration),
     runtime: Option<&LlmRuntime>,
 ) -> Result<(String, ConversionUsage)> {
+    run_controlled(prompts, cfg, env, sleep, runtime, None).map_err(|failure| failure.error)
+}
+
+fn run_controlled(
+    prompts: &Prompts,
+    cfg: &Value,
+    env: &HashMap<String, String>,
+    sleep: &mut dyn FnMut(Duration),
+    runtime: Option<&LlmRuntime>,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+) -> std::result::Result<(String, ConversionUsage), VisionFailure> {
     let strategy = cfg
         .pointer("/llm/router_settings/routing_strategy")
         .and_then(Value::as_str)
@@ -1051,7 +1090,7 @@ fn run_with_runtime(
     if strategy != "simple-shuffle" {
         return Err(Error::Unsupported(format!(
             "LLM routing strategy '{strategy}' requires persistent routing metrics and is not implemented"
-        )));
+        )).into());
     }
     let entries = deployments(cfg, env)?;
     let groups = fallback_groups(cfg, &entries)?;
@@ -1091,12 +1130,14 @@ fn run_with_runtime(
     let mut attempts = 0u64;
     let mut slept = 0u64;
     let mut usage = ConversionUsage::default();
-    let mut last_error = Error::Conversion("No enabled LLM model can process this request".into());
-    for group in groups {
+    let mut last_error = VisionFailure::blocked(Error::Conversion(
+        "No enabled LLM model can process this request".into(),
+    ));
+    for (group_index, group) in groups.iter().enumerate() {
         let candidates: Vec<_> = entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.group == group)
+            .filter(|(_, entry)| entry.group == *group)
             .filter(|(_, entry)| prompts.image.is_none() || entry.supports_vision != Some(false))
             .map(|(index, _)| index)
             .collect();
@@ -1106,9 +1147,9 @@ fn run_with_runtime(
         let mut failed = HashSet::new();
         for attempt in 0..=retries {
             if budget > 0 && attempts >= budget || document_exhausted() {
-                return Err(Error::Conversion(
+                return Err(VisionFailure::blocked(Error::Conversion(
                     "LLM per-document request budget exhausted".into(),
-                ));
+                )));
             }
             let remaining: Vec<_> = candidates
                 .iter()
@@ -1126,15 +1167,42 @@ fn run_with_runtime(
             );
             let result = {
                 let _permit = runtime.acquire();
-                admit_document_attempt()?;
+                if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+                    return Err(VisionFailure::blocked(Error::Conversion(
+                        "Visual document processing stopped after a fatal batch".into(),
+                    )));
+                }
+                if let Err(error) = admit_document_attempt() {
+                    if let Some(stop) = stop {
+                        stop.store(true, Ordering::Release);
+                    }
+                    return Err(VisionFailure::blocked(error));
+                }
                 attempts = attempts.saturating_add(1);
-                request(&client, &entries[selected], prompts, &mut usage)
+                let response = request(&client, &entries[selected], prompts, &mut usage);
+                if let Err(failure) = &response {
+                    let future = entries.iter().any(|entry| {
+                        groups[group_index + 1..].contains(&entry.group)
+                            && (prompts.image.is_none() || entry.supports_vision != Some(false))
+                    });
+                    if (failure.fatal || failure.document_fatal && !future)
+                        && let Some(stop) = stop
+                    {
+                        // Publish cancellation while still holding the permit: a queued
+                        // sibling must see it before its next HTTP admission.
+                        stop.store(true, Ordering::Release);
+                    }
+                }
+                response
             };
             match result {
                 Ok(text) => return Ok((text, usage)),
                 Err(failure) => {
                     failed.insert(selected);
-                    last_error = failure.error;
+                    last_error = VisionFailure {
+                        error: failure.error,
+                        allow_text_fallback: !failure.document_fatal,
+                    };
                     if failure.fatal {
                         return Err(last_error);
                     }
@@ -1142,9 +1210,9 @@ fn run_with_runtime(
                         break;
                     }
                     if budget > 0 && attempts >= budget || document_exhausted() {
-                        return Err(Error::Conversion(
+                        return Err(VisionFailure::blocked(Error::Conversion(
                             "LLM per-document request budget exhausted".into(),
-                        ));
+                        )));
                     }
                     let backoff = failure
                         .retry_after
@@ -1234,6 +1302,7 @@ fn request(
             ),
             retryable: error.is_timeout() || error.is_connect() || error.is_body(),
             fatal: false,
+            document_fatal: false,
             retry_after: None,
         })?;
     let status = response.status().as_u16();
@@ -1261,6 +1330,7 @@ fn request(
             error: Error::Conversion("Cannot read LLM response".into()),
             retryable: true,
             fatal: false,
+            document_fatal: false,
             retry_after: None,
         })?;
     if status >= 300 {
@@ -1297,6 +1367,7 @@ fn request(
             retryable: !fatal
                 && (matches!(status, 408 | 409 | 429 | 500..=599) || model_unavailable),
             fatal,
+            document_fatal: fatal || matches!(status, 401 | 403),
             retry_after,
         });
     }
@@ -1345,6 +1416,7 @@ fn request(
             error: Error::Conversion("LLM returned no text".into()),
             retryable: true,
             fatal: false,
+            document_fatal: false,
             retry_after: None,
         })
 }

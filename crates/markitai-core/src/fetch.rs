@@ -172,6 +172,12 @@ pub(crate) fn fetch_with_context(
             require_capture_output(cfg, output_available)?;
             fetch_browser(source, cfg, capture)
         }
+        // A configured browser identity must not read an anonymous cache entry
+        // or send an unauthenticated PDF probe before challenge authentication.
+        "auto" if browser::http_credentials_configured(cfg) => {
+            require_capture_output(cfg, output_available)?;
+            fetch_browser(source, cfg, capture)
+        }
         "auto" if capture => match probe_pdf(source, &url, cfg, explicit_strategy)? {
             Some(outcome) => Ok(outcome),
             None => {

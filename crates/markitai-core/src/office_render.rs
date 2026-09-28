@@ -108,6 +108,31 @@ pub(crate) fn available() -> bool {
     discover().is_some()
 }
 
+fn private_workspace(prefix: &str) -> Result<TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    Ok(builder.tempdir()?)
+}
+
+/// Discover and start the optional program with private state and a short deadline.
+pub(crate) fn diagnostic() -> Result<Option<PathBuf>> {
+    let Some(program) = discover() else {
+        return Ok(None);
+    };
+    let workspace = private_workspace("markitai-office-diagnostic-")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let _permit = process::acquire(deadline)?;
+    process::diagnose(&program, workspace.path(), deadline).map_err(|_| {
+        failure("LibreOffice diagnostic could not complete within its startup deadline")
+    })?;
+    Ok(Some(program))
+}
+
 pub(crate) fn export_pdf(input: &Path, requested_kind: OfficeKind) -> Result<OfficePdf> {
     if requested_kind == OfficeKind::Spreadsheet {
         return Err(Error::Unsupported("Spreadsheet screenshots are not implemented; Office PDF export currently supports presentations and word-processing documents".into()));
@@ -160,9 +185,7 @@ fn export_with(
     let deadline = Instant::now() + timeout;
     let _permit = process::acquire(deadline)?;
     let bytes = read_bounded(input, byte_limit)?;
-    let workspace = tempfile::Builder::new()
-        .prefix("markitai-office-")
-        .tempdir()?;
+    let workspace = private_workspace("markitai-office-")?;
     let source_dir = workspace.path().join("input");
     let output_dir = workspace.path().join("output");
     let profile = workspace.path().join("profile");
