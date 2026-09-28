@@ -31,6 +31,9 @@ recall is diagnostic, never a substitute for the exact-content checks.
 - [Initial baseline](formats-baseline.md): 0/24 exact passes.
 - [Intermediate recovery](formats-recovery.md): 13/24 exact passes.
 - [Second recovery](formats-recovery-r4.md): 15/24 exact passes, with all remaining differences listed.
+- [MSG/HTML recovery](formats-recovery-r5.md): 17/24 exact passes; four differences and three expected image-only rejections.
+- [Final round-three format check](formats-recovery-r6.md): the same 24 case outcomes after the CSS visibility fix.
+- [Full HTML corpus](html-corpus.md): 24/209 exact local API passes; remaining body differences and errors stay in the denominator.
 
 Each record identifies a frozen artifact; later fixes do not retroactively change
 its measurements. Full JSON reports retain the complete fixture denominator.
@@ -49,3 +52,18 @@ The filesystem cache is warm. Output differences are recorded; faster timing
 with different output cannot establish equivalent-quality performance. Broad
 format throughput, cold caches, peak RSS, repeated host calls, and platform
 distribution matrices require additional measured records.
+
+The updated CLI harness disables the reference's dotenv autoload, alternates
+engine order, checks every stdout against its warmup and withholds time ratios
+when conversion output differs. It preserves earlier measurements in separate
+files. This isolates the exercised configuration paths; it is not an OS sandbox.
+
+## Round-three evidence
+
+- [Artifact identities](artifacts-round3.json) for the CLI, C library, installed
+  Python wheel and npm archive at source `21bf8f5`.
+- [CLI measurements](performance-round3.md), including exact-output gates and
+  current isolation limitations.
+- [Repeated API measurement method](api-benchmark-method.md) and
+  [results](performance-api-round3.md). The native C ABI uses a pre-encoded
+  request; these are not measurements of the new Python binding's full call cost.

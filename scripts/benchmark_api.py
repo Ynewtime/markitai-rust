@@ -302,7 +302,7 @@ def main() -> int:
                                     "process_medians_ms": medians, "peak_rss_bytes_each": peaks,
                                     "median_peak_rss_bytes": statistics.median(peaks), "workers": results}
         ratio = measurements["reference"]["median_of_process_medians_ms"] / measurements["native"]["median_of_process_medians_ms"]
-        report["cases"].append({"name": name, "input_bytes": source.stat().st_size(),
+        report["cases"].append({"name": name, "input_bytes": source.stat().st_size,
                                 "input_sha256": input_hash, "markdown_exact_match": parity,
                                 "measurements": measurements,
                                 "reference_over_native_time_ratio": ratio if parity else None})

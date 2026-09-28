@@ -54,10 +54,11 @@ def main():
         config = work/'config.json'
         config.write_text(json.dumps({'llm':{'enabled':False},'ocr':{'enabled':False},
             'screenshot':{'enabled':False},'image':{'alt_enabled':False,'desc_enabled':False},
-            'cache':{'enabled':False,'global_dir':str(work/'cache')},'history':{'record':False}}))
+            'cache':{'enabled':False,'global_dir':str(work/'cache')},'history':{'record':False},
+            'log':{'dir':None}}))
         environment = {k:v for k,v in os.environ.items() if k in {'PATH','SYSTEMROOT','TMPDIR','LANG','LC_ALL'}}
         environment.update(MARKITAI_HOME=str(work/'state'),MARKITAI_CONFIG=str(config),
-                           MARKITAI_LOG_DIR=str(work/'logs'),PYTHONDONTWRITEBYTECODE='1',
+                           PYTHONDONTWRITEBYTECODE='1',
                            PYTHONNOUSERSITE='1',PYTHON_DOTENV_DISABLED='1',
                            LITELLM_LOCAL_MODEL_COST_MAP='True')
         cases = {

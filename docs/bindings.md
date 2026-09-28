@@ -259,3 +259,22 @@ Pydantic extension-protocol compatibility or cross-platform support.
 Recovery artifacts live under `.local/bindings-wheels/round2` and
 `.local/bindings-packages/round2`, preserving the initial artifacts. Their sizes
 and identities are recorded in `validation/artifacts-round2.json`.
+
+## MSG, raster vision and HTML checkpoint: 2026-09-28
+
+Source `21bf8f5` was rebuilt after the CSS visibility fix. The newly installed
+wheel passed 16 tests, the addon passed three, and an independently installed npm
+archive passed synchronous/asynchronous Unicode conversion. Go's race tests
+passed against the rebuilt C library on macOS 27; its host test did not force an
+older deployment target. These checks use the same core as the CLI, including
+the new MSG, image and routing paths; they do not individually exercise every
+format through every host adapter.
+
+The final wheel and npm archive are preserved in
+`.local/bindings-wheels/round3-final` and
+`.local/bindings-packages/round3-final`. Their compressed/unpacked sizes are
+7,391,308/15,142,519 and 7,292,463/14,735,272 bytes respectively.
+[Artifact identities and validation logs](validation/artifacts-round3.json)
+record the exact source and hashes. The earlier round-three packages remain
+available in their own ignored directories; subsequent builds do not replace
+this evidence. Cross-platform release validation remains unfinished.
