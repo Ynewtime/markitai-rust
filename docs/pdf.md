@@ -16,6 +16,12 @@ separate `Tr 3` invisible run currently reproduces that reader's inclusion of
 the invisible run. Refinement leaves that page unchanged and retains the
 explicit warning that complete hidden-text filtering is not established.
 
+Another reproduced dependency defect removes ordinary paragraphs beginning
+`Page N` as if they were page numbers. The
+[two/40-page reproduction](validation/pdf-page-prefix-round15.json) retains
+original inputs and archived executable outputs. Layout's character-agreement
+guard does not conceal this loss, and local decode reuse does not fix it.
+
 ## Layout reconstruction
 
 Reliable pages receive one additional positioned-text pass. Font sizes are

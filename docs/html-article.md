@@ -51,10 +51,11 @@ retention negatives. This document describes policy and fixture provenance;
 executed corpus results and any remaining differences belong in validation
 records, not an inferred claim of complete extraction parity.
 
-An unresolved exception is the script-stripped LessWrong streaming snapshot:
-the article is inside a hidden React segment, with no completion calls or
-boundary comments. Both the older Rust output and the round-fourteen timeout
-rerun contain only four words. Selection does not unhide this segment based on
-size or matching IDs. The [streaming gap record](validation/html-streaming-gap-round14.md)
-distinguishes this content loss from the corrected timeout and describes the
-separate reference hidden-subtree heuristic and future recovery requirements.
+Before selection, [streamed-content recovery](html-stream.md) handles explicit
+React completions and eligible script-stripped article chains. The LessWrong
+snapshot now retains its substantive body and notes; the
+[round-fifteen review](validation/native-performance-round15.md) identifies the
+remaining formatting differences. Selection itself does not unhide arbitrary
+content based on size. The [historical gap record](validation/html-streaming-gap-round14.md)
+preserves the earlier four-word output and the distinction between timeout and
+content loss.

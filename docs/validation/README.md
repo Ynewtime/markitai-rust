@@ -50,6 +50,16 @@ its measurements. Full JSON reports retain the complete fixture denominator.
 - [Hidden streamed-content gap](html-streaming-gap-round14.md) distinguishes a
   resolved timeout from the remaining missing article body.
 
+## Round-fifteen evidence
+
+- [Extraction cost and streamed-content recovery](native-performance-round15.md):
+  585 distinct Rust tests; 207 unchanged HTML and 24 unchanged format responses;
+  two recovered streamed articles; exact-output Rust and reference-Python timings.
+- The largest tested code container is 43.17 times faster than round fourteen;
+  broader speed, memory and size goals remain open. Source `2c53fe3`, CLI 22.61 MiB.
+- [PDF page-prefix loss](pdf-page-prefix-round15.json) records a separately
+  reproduced baseline defect rather than counting lost text as a performance gain.
+
 ## Initial CLI benchmark
 
 ```sh
