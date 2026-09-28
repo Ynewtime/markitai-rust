@@ -14,8 +14,11 @@ network policy and optional model enhancement belong to the orchestration layer.
 | CSV, TSV | csv | CSV preserves the reference's header width and raw cells; TSV retains the widest row and escapes table delimiters |
 | IPYNB | serde_json | Markdown cells, fenced code and raw cells; metadata title and code language; code fences sized to protect embedded backticks |
 | JSON | serde_json | Validated, pretty-printed fenced JSON; an additive Rust format |
-| XML | quick-xml | Validated, fenced source; document types are rejected; content-specific XML rendering remains pending |
+| XML | quick-xml | Structured headings, attributes and mixed text, plus a source fence for small inputs; document types are rejected |
 | EML | mail-parser | Decoded subject, body and MIME attachments; attachment bytes returned separately |
+| MSG | cfb + native properties | Outlook headers, Unicode/ANSI body, HTML fallback and bounded by-value attachments |
+| RST, Org, TeX | native markup readers | Structured sections, lists, code, math, links and tables; unsupported constructs retained with warnings |
+| JPEG, PNG, GIF, BMP, TIFF, WebP | image + native LLM transport | Standalone vision inputs and shared raster assets; local OCR remains unavailable |
 | DOC, DOCX, DOCM | anydoc document model | Headings, styled text, lists, tables, links, formulas, notes and embedded assets |
 | PPT, PPS, POT, PPTX, PPTM, PPSX, PPSM | anydoc document model | Native presentation content through the same Markdown renderer |
 | XLS, XLSX, XLSM, XLSB | anydoc document model | Native sheet content; XLS/XLSX/XLSM single-sheet names are recovered from package metadata; exact cell-format compatibility has not been established |
@@ -24,7 +27,8 @@ network policy and optional model enhancement belong to the orchestration layer.
 | PDF | pdf-inspector + lopdf | Per-page text/layout extraction, page markers, partial-page recovery and bounded extraction of supported embedded images |
 
 The native Office renderer reads the document once and preserves referenced
-embedded bytes. Unreferenced archive images are omitted. References use `.markitai/assets/{name}` until the output layer assigns
+embedded bytes. Shared image preparation then applies configured filtering and
+compression. Unreferenced archive images are omitted. References use `.markitai/assets/{name}` until the output layer assigns
 final paths. A merged table's origin contains its content; covered cells are
 empty, and a warning records this Markdown representation.
 
@@ -58,23 +62,24 @@ used by the readers above.
 
 ## Explicit remaining compatibility work
 
-Image formats (JPEG/JPG/PNG/WEBP/SVG/GIF/BMP/TIFF/HEIC/HEIF/AVIF), MSG, Numbers,
-Org, RST and TeX have no local adapter yet. They return an unsupported-format
-error. `supports_extension` reports implemented adapters rather than a desired
-future format list. Image routing with vision enhancement is an orchestration
-capability and must not imply local OCR exists.
+Numbers, SVG rasterization, HEIF/AVIF decoding and local OCR remain unfinished.
+Multi-page TIFF vision routing is explicitly rejected pending complete page
+handling. `supports_extension` reports local text readers; standalone image
+classification and vision extraction are separate orchestration paths. See
+[images](images.md), [MSG](msg.md), [markup](markup.md) and [HTML](html.md) for
+their scoped contracts and limits.
 
 The HTML reader implements general article extraction. It does not yet implement
 the original engine's X/GitHub/Hacker News/Reddit/YouTube/Substack/Bilibili/Steam
 resolvers, structured conversation threads, four-stage adaptive recovery,
-schema.org fallback, advanced footnotes, mathematical reconstruction, CSS media
+schema.org body fallback, advanced footnotes, mathematical reconstruction, CSS media
 visibility, or content-pattern scoring. These need independent tests before
 advertising parity. Basic success on an HTML fixture is not evidence that its
 full extraction contract matches.
 
-The email reader preserves the body and attachments, but full Python header and
-layout parity is pending. The XML reader preserves the original XML in a fenced
-block; it does not yet reproduce the original dialect-aware Markdown adapter.
+The email readers preserve body and attachments, but complete header, attachment
+and layout parity is pending. XML now has structured prose and the sample fixture
+is exact; arbitrary dialect parity remains open.
 Office conversion can differ in whitespace, table header selection, numbering,
 anchors, font-driven headings and metadata. Such differences must remain visible
 in differential reports rather than being normalized away.
@@ -89,7 +94,7 @@ when its body data occupies only three; this differs from the reference's
 three-column rendering of the ODS fixture. RTF heading bold markers are omitted while other emphasis is
 retained. Hidden XLS/XLSX worksheets are currently omitted by the upstream parser
 and reported explicitly. XLSB sheet metadata, older XLS code pages other than
-Windows-1252, slide-boundary markers, presentation image recompression, PDF table
+Windows-1252, slide-boundary markers, exact presentation image encoding, PDF table
 layout and PDF image placement require further compatibility work.
 
 ## Error and output principles

@@ -11,7 +11,7 @@ use std::sync::{
 
 #[derive(Parser, Debug)]
 #[command(name="markitai", version=markitai_core::VERSION,
-    about="Convert documents and URLs to Markdown", disable_help_subcommand=true)]
+    about="Convert documents and URLs to Markdown", disable_help_subcommand=true, args_override_self=true)]
 struct Cli {
     #[arg(value_name = "INPUT")]
     input: Option<String>,
@@ -29,45 +29,45 @@ struct Cli {
     preset: Option<String>,
     #[arg(long, value_parser=["rag","obsidian","okf"], ignore_case=true)]
     profile: Option<String>,
-    #[arg(long, conflicts_with = "no_llm")]
+    #[arg(long, overrides_with = "no_llm")]
     llm: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "llm")]
     no_llm: bool,
-    #[arg(long, conflicts_with = "no_alt")]
+    #[arg(long, overrides_with = "no_alt")]
     alt: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "alt")]
     no_alt: bool,
-    #[arg(long, conflicts_with = "no_desc")]
+    #[arg(long, overrides_with = "no_desc")]
     desc: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "desc")]
     no_desc: bool,
-    #[arg(long, conflicts_with = "no_ocr")]
+    #[arg(long, overrides_with = "no_ocr")]
     ocr: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "ocr")]
     no_ocr: bool,
-    #[arg(long, conflicts_with = "no_screenshot")]
+    #[arg(long, overrides_with = "no_screenshot")]
     screenshot: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "screenshot")]
     no_screenshot: bool,
-    #[arg(long, conflicts_with = "no_screenshot_only")]
+    #[arg(long, overrides_with = "no_screenshot_only")]
     screenshot_only: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "screenshot_only")]
     no_screenshot_only: bool,
-    #[arg(long, conflicts_with = "no_pure")]
+    #[arg(long, overrides_with = "no_pure")]
     pure: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "pure")]
     no_pure: bool,
     #[arg(long)]
     keep_base: bool,
     #[arg(long)]
     resume: bool,
-    #[arg(long, conflicts_with = "compress")]
+    #[arg(long, overrides_with = "compress")]
     no_compress: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "no_compress")]
     compress: bool,
-    #[arg(long, conflicts_with = "cache")]
+    #[arg(long, overrides_with = "cache")]
     no_cache: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "no_cache")]
     cache: bool,
     #[arg(long)]
     no_cache_for: Option<String>,
@@ -101,9 +101,9 @@ struct Cli {
     log_level: Option<String>,
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, conflicts_with = "no_record_history")]
+    #[arg(long, overrides_with = "no_record_history")]
     record_history: bool,
-    #[arg(long)]
+    #[arg(long, overrides_with = "record_history")]
     no_record_history: bool,
     #[arg(short = 'I', long)]
     interactive: bool,
@@ -260,10 +260,6 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         (cli.cache, "--cache"),
         (cli.no_cache_for.is_some(), "--no-cache-for"),
         (cli.log_level.is_some(), "--log-level"),
-        (
-            cli.no_compress || cli.compress,
-            "Image compression controls",
-        ),
     ] {
         if requested {
             return Err(unsupported(name));
@@ -300,6 +296,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         ("ocr", "enabled", tri(cli.ocr, cli.no_ocr)),
         ("image", "alt_enabled", tri(cli.alt, cli.no_alt)),
         ("image", "desc_enabled", tri(cli.desc, cli.no_desc)),
+        ("image", "compress", tri(cli.compress, cli.no_compress)),
         (
             "screenshot",
             "enabled",
@@ -636,7 +633,15 @@ fn convert_task(task: &Task, cfg: &Value) -> Result<ConversionOutput, String> {
             ..Default::default()
         },
     )
-    .map_err(|e| e.to_string())
+    .or_else(|error| match error {
+        markitai_core::Error::ImageOnly(_) => {
+            let mut result = ConversionOutput::default();
+            result.source = task.source.clone();
+            result.skip_reason = Some("image_only".into());
+            Ok(result)
+        }
+        other => Err(other.to_string()),
+    })
 }
 fn outcome(task: &Task, result: &Result<ConversionOutput, String>) -> Value {
     let mut item = json!({"kind":if is_url(&task.source){"url"}else{"file"},"source":task.display,"status":"failed","output":null,"error":null,"warnings":[],"skip_reason":null,"images":0,"screenshots":0,"cost_usd":0.0,"duration_s":null,"cache_hit":false,"fetch_cache_hit":false,"llm_cache_hit":false,"fetch_strategy":null,"source_file":task.source_file,"llm_usage":{}});
@@ -686,6 +691,9 @@ fn emit_json(items: &[Value], error: Option<&str>) {
     );
 }
 fn print_stdout(result: &ConversionOutput, cfg: &Value) -> io::Result<()> {
+    if result.skip_reason.is_some() {
+        return Ok(());
+    }
     let mut stdout = io::stdout().lock();
     let rendered = markitai_core::output::content(result, cfg, result.llm_markdown.is_some())
         .map_err(io::Error::other)?;
@@ -764,7 +772,9 @@ fn discover(input: &Path, output: &Path, cli: &Cli, cfg: &Value) -> CliResult<Ve
         let out = output.join(relative.parent().unwrap_or(Path::new("")));
         if ext == "urls" {
             tasks.extend(parse_urls(path, &out)?);
-        } else if markitai_core::formats::supports_extension(&ext) {
+        } else if markitai_core::formats::supports_extension(&ext)
+            || markitai_core::is_image_extension(&ext)
+        {
             tasks.push(Task {
                 source: path.to_string_lossy().into_owned(),
                 display: relative.to_string_lossy().replace('\\', "/"),

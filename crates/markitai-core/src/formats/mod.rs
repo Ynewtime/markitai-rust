@@ -2,6 +2,7 @@
 
 mod html;
 mod markup;
+mod msg;
 mod native;
 mod text;
 
@@ -27,6 +28,7 @@ pub fn supports_extension(extension: &str) -> bool {
             | "json"
             | "xml"
             | "eml"
+            | "msg"
             | "rst"
             | "org"
             | "tex"
@@ -43,7 +45,7 @@ pub fn extract(path: &Path) -> Result<Document> {
         .to_ascii_lowercase();
     if !supports_extension(&extension) {
         return Err(Error::Unsupported(format!(
-            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, email, PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Org, RST and TeX. Image OCR, MSG and Numbers readers are not implemented yet.",
+            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, EML/MSG email, PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Org, RST and TeX. Local OCR and Numbers readers are not implemented yet.",
             extension
         )));
     }
@@ -53,12 +55,7 @@ pub fn extract(path: &Path) -> Result<Document> {
             markdown: text::decode(&bytes)?,
             ..Document::default()
         },
-        "html" | "htm" | "xhtml" => {
-            let mut document = extract_html(&text::decode(&bytes)?, None)?;
-            // Local HTML follows the workflow's content-heading title rule.
-            document.metadata.remove("title");
-            document
-        }
+        "html" | "htm" | "xhtml" => extract_html(&text::decode(&bytes)?, None)?,
         "csv" | "tsv" => text::delimited(
             &text::decode(&bytes)?,
             if extension == "tsv" { b'\t' } else { b',' },
@@ -67,6 +64,7 @@ pub fn extract(path: &Path) -> Result<Document> {
         "json" => text::json(&text::decode(&bytes)?)?,
         "xml" => text::xml(&text::decode(&bytes)?)?,
         "eml" => text::email(&bytes)?,
+        "msg" => msg::extract(&bytes)?,
         "rst" | "org" | "tex" | "latex" => markup::extract(&text::decode(&bytes)?, &extension)?,
         _ => native::extract(&bytes, &extension)?,
     };
@@ -87,11 +85,11 @@ mod tests {
     fn format_support_does_not_promise_unimplemented_readers() {
         for extension in [
             ".DOCX", "pdf", "pptx", "xls", "ods", "eml", "markdown", "tsv", "org", "rst", "tex",
-            "latex",
+            "latex", "msg",
         ] {
             assert!(supports_extension(extension), "{extension}");
         }
-        for extension in ["", "exe", "png", "heic", "numbers", "msg"] {
+        for extension in ["", "exe", "png", "heic", "numbers"] {
             assert!(!supports_extension(extension), "{extension}");
         }
     }

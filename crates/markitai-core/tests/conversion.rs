@@ -54,6 +54,82 @@ fn native_request_rejects_unknown_options_and_preserves_error_codes() {
     assert_eq!(unknown["ok"], false);
 }
 
+#[test]
+fn image_api_requires_extraction_and_vision_uses_binary_content() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("图像.png");
+    image::DynamicImage::new_rgb8(80, 80).save(&path).unwrap();
+    let error = convert(path.to_str().unwrap(), options()).unwrap_err();
+    assert_eq!(error.code(), "conversion_error");
+    assert!(error.to_string().contains("llm=True"));
+    let (base, server) = llm_server(
+        200,
+        r##"{"choices":[{"message":{"content":"# 图像\n\nRead text from image."}}]}"##,
+    );
+    let output = convert(path.to_str().unwrap(), ConvertOptions {
+        config: Some(json!({"image":{"compress":false},"llm":{"enabled":true,"router_settings":{"num_retries":0},"model_list":[{"model_name":"vision","litellm_params":{"model":"openai/test-vision","api_base":base,"api_key":"test-key"},"model_info":{"supports_vision":true}}]}})),
+        output_dir: Some(dir.path().join("output")),
+        ..Default::default()
+    }).unwrap();
+    let request = server.join().unwrap();
+    let content = request["messages"][1]["content"].as_array().unwrap();
+    let expected = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(std::fs::read(&path).unwrap())
+    );
+    assert!(content.iter().any(|block| {
+        block["image_url"]["url"]
+            .as_str()
+            .is_some_and(|url| url == expected)
+    }));
+    assert_eq!(output.usage.requests, 1);
+    assert!(
+        output
+            .llm_markdown
+            .unwrap()
+            .contains("Read text from image.")
+    );
+    assert_eq!(output.assets.len(), 1);
+    assert_eq!(
+        std::fs::read(&output.assets[0]).unwrap(),
+        std::fs::read(&path).unwrap()
+    );
+}
+
+#[test]
+fn unrelated_features_do_not_reject_text_or_literal_image_examples() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("example.md");
+    std::fs::write(&input, "# Text\n\n`![literal](not-an-image.png)`\n").unwrap();
+    let cfg = json!({"security":{"pdf_sanitize":"remove"},"ocr":{"enabled":true},"screenshot":{"enabled":true},"image":{"alt_enabled":true,"desc_enabled":true}});
+    let plain = convert(
+        input.to_str().unwrap(),
+        ConvertOptions {
+            config: Some(cfg.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(plain.markdown.contains("![literal]"));
+    let (base, server) = llm_server(
+        200,
+        r##"{"choices":[{"message":{"content":"# Text\n\nKept example."}}]}"##,
+    );
+    let mut cfg = cfg;
+    cfg["llm"] = json!({"enabled":true,"router_settings":{"num_retries":0},"model_list":[{"model_name":"test","litellm_params":{"model":"openai/test","api_base":base,"api_key":"test"}}]});
+    let result = convert(
+        input.to_str().unwrap(),
+        ConvertOptions {
+            config: Some(cfg),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert!(result.llm_markdown.unwrap().contains("Kept example."));
+}
+
 fn llm_server(status: u16, payload: &'static str) -> (String, std::thread::JoinHandle<Value>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

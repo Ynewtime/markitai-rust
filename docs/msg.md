@@ -1,0 +1,93 @@
+# Outlook MSG reader
+
+The MSG adapter reads Outlook compound files directly through `cfb`. It returns
+Markdown, metadata, attachment bytes and warnings without Outlook, Python, local
+mail configuration, network requests or writes to the source file.
+
+## Output contract
+
+The Markdown header preserves the existing MSG layout: `# Email Message`,
+available From/To/Subject fields, then `## Content`. The subject is also the
+document title. Date, From, To, Cc and Bcc are retained in the adapter's metadata;
+they do not introduce new Markdown header rows. The output layer applies its
+ordinary local-file frontmatter policy.
+
+Display recipient properties take precedence. If a display property is absent,
+the adapter reads recipient objects and groups their addresses by recipient type.
+Sender address falls back to the SMTP property and then the display name.
+Submission time, or delivery time when submission time is absent, is converted
+from FILETIME to UTC RFC 3339. Microsoft documents the
+[recipient type](https://learn.microsoft.com/en-us/office/client-developer/outlook/mapi/pidtagrecipienttype-canonical-property)
+and [submission time](https://learn.microsoft.com/en-us/office/client-developer/outlook/mapi/pidtagclientsubmittime-canonical-property)
+properties.
+
+Body precedence is Unicode plain text, ANSI plain text, then HTML. ANSI decoding
+uses the declared message code page; HTML uses its Internet code page. Supported
+code pages cover UTF-8, ASCII, Latin-1, Windows-1250 through Windows-1258, common
+Japanese/Chinese/Korean encodings and selected ISO/KOI8 encodings. Unknown or
+malformed declared encodings produce a warning before trying UTF-8 and
+Windows-1252. Invalid UTF-16 is an error; it is not silently replaced with damaged
+characters. HTML uses the shared email fragment renderer, retaining the message
+body instead of selecting an article candidate.
+
+The reference's committed `sample.msg` stores its readable body as HTML and has
+a submission timestamp that its Markdown does not display. This reader follows
+that distinction. Exact fixture parity must be checked against a frozen native
+artifact; passing authored tests alone does not establish corpus parity.
+
+## Attachments
+
+By-value attachment data is preserved byte-for-byte and returned as assets.
+Names are reduced to safe basenames with an ordinal prefix; embedded directory
+names never become output paths. HTML `cid:` references in quoted or unquoted
+`src`/`href` attributes resolve to matching attachment content IDs. Other
+attachments receive a Markdown link so every emitted asset has a reference.
+Missing content IDs produce a warning.
+
+Attachment extraction is an additive fidelity improvement over the inspected
+reference MSG converter, which did not emit these assets. External-file/web
+references, embedded messages and OLE attachment methods are not dereferenced or
+executed; each unsupported attachment produces a warning. The supported method
+and remaining methods are distinguished by Microsoft's
+[attachment-method specification](https://learn.microsoft.com/en-us/office/client-developer/outlook/mapi/pidtagattachmethod-canonical-property).
+
+The reader does not yet decompress RTF-only bodies, recursively export embedded
+messages, interpret named calendar/contact properties, or preserve full Outlook
+HTML styling. A message without readable plain text or HTML returns its headers
+and supported attachments with a warning explaining the missing body. Corrupt
+or oversized attachments do not discard readable message text.
+
+## Bounds and malformed inputs
+
+| Resource | Limit |
+| --- | --- |
+| Input compound file | 256 MiB |
+| Total bytes copied from property streams | 128 MiB |
+| Individual text/HTML property | 16 MiB |
+| Individual binary attachment | 64 MiB |
+| Property table | 1 MiB |
+| Compound directory entries | 16,384 |
+| Recipient or attachment objects | 1,024 of each |
+
+Stream lengths are checked before payload copying, with a second bound while
+reading. These adapter bounds do not claim that all upstream CFB bookkeeping
+allocations are independently bounded. A foreign compound document lacking the
+message property table is rejected. Truncated property records and conflicting
+duplicate values are errors; zero padding after complete records is accepted.
+Malformed recipient or attachment subobjects produce explicit warnings while
+the main message is retained.
+
+The parser follows the top-level message, recipient and attachment storage
+structure described in [MS-OXMSG](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxmsg/621801cb-b617-474c-bce6-69037d73461a).
+It reads fixed values from property tables and variable values from their named
+streams. It does not trust attachment paths or named property identifiers as
+instructions.
+
+## Verification
+
+Authored in-memory CFB tests cover legacy header/body layout, date metadata,
+Windows-1251 decoding, Unicode body precedence, recipient fallback, byte-exact
+attachments, path normalization, CID prefix collisions, missing content IDs,
+malformed Unicode/property tables, non-message compound files, unsupported
+attachment methods, RTF-only notices and pre-copy stream limits. These tests
+require no source-project fixtures or private mail accounts.

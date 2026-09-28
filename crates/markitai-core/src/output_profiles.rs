@@ -3,6 +3,7 @@
 use crate::VERSION;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use serde_json::{Map, Value, json};
+use std::collections::{HashMap, HashSet};
 
 pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cfg: &Value) {
     match cfg.pointer("/output/profile").and_then(Value::as_str) {
@@ -17,9 +18,465 @@ pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cf
 }
 
 /// Replace a complete asset destination, retaining link titles and wiki aliases.
+/// An empty replacement removes the reference (a filtered image).
 /// Literal code and unrelated paths remain untouched.
 pub(crate) fn rewrite_asset_target(markdown: &str, previous: &str, next: &str) -> String {
     transform(markdown, false, false, false, Some((previous, next)))
+}
+
+/// Recognize actual image references while excluding Markdown and HTML literals.
+pub(crate) fn has_image_references(markdown: &str) -> bool {
+    let definitions = definitions(markdown);
+    let mut context = LiteralContext::default();
+    let mut cursor = 0;
+    while let Some((line, literal)) = next_content(markdown, &mut cursor, &mut context) {
+        if !literal && definition(line).is_none() && inline_has_images(line, &definitions) {
+            return true;
+        }
+    }
+    false
+}
+
+// Keep multiline HTML tags together without allocating or treating Markdown
+// fences and literal examples as HTML attributes.
+fn next_content<'a>(
+    source: &'a str,
+    cursor: &mut usize,
+    context: &mut LiteralContext,
+) -> Option<(&'a str, bool)> {
+    let start = *cursor;
+    if start == source.len() {
+        return None;
+    }
+    let end_of_line = |offset: usize| {
+        source[offset..]
+            .find('\n')
+            .map_or(source.len(), |end| offset + end + 1)
+    };
+    let mut end = end_of_line(start);
+    let literal = context.literal(&source[start..end]);
+    if !literal {
+        let mut index = start;
+        while index < end {
+            let tail = &source[index..end];
+            if let Some(rest) = tail.strip_prefix('\\') {
+                index += 1 + rest.chars().next().map_or(0, char::len_utf8);
+            } else if let Some(length) = code_span_end(tail).or_else(|| html_literal_end(tail)) {
+                index += length;
+            } else if let Some(reference) = html_reference(&source[index..]) {
+                index += reference.tag_end;
+                if index > end {
+                    end = end_of_line(index);
+                }
+            } else {
+                index += tail.chars().next().unwrap().len_utf8();
+            }
+        }
+    }
+    *cursor = end;
+    Some((&source[start..end], literal))
+}
+
+struct Definition<'a> {
+    label: String,
+    target: &'a str,
+    start: usize,
+    end: usize,
+    angle: bool,
+}
+
+fn label(value: &str) -> String {
+    unescape(value)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn closing_bracket(text: &str, start: usize) -> Option<usize> {
+    let mut depth = 1;
+    let mut index = start;
+    while index < text.len() {
+        let ch = text[index..].chars().next()?;
+        if ch == '\\' {
+            index += 1;
+            index += text[index..].chars().next()?.len_utf8();
+            continue;
+        }
+        if ch == '[' {
+            depth += 1;
+        }
+        if ch == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn definition(line: &str) -> Option<Definition<'_>> {
+    let mut index = line.len() - line.trim_start_matches([' ', '\t', '>']).len();
+    if !line[index..].starts_with('[') {
+        return None;
+    }
+    let label_start = index + 1;
+    index = closing_bracket(line, label_start)?;
+    let name = label(&line[label_start..index]);
+    if name.is_empty() || !line[index..].starts_with("]:") {
+        return None;
+    }
+    index += 2;
+    while line[index..].starts_with([' ', '\t']) {
+        index += 1;
+    }
+    let angle = line[index..].starts_with('<');
+    if angle {
+        index += 1;
+    }
+    let start = index;
+    let mut depth = 0;
+    while index < line.len() {
+        let ch = line[index..].chars().next()?;
+        if ch == '\\' {
+            index += 1;
+            index += line[index..].chars().next()?.len_utf8();
+            continue;
+        }
+        if angle && ch == '>' || !angle && ch.is_whitespace() {
+            break;
+        }
+        if ch == '\n' || ch == '\r' {
+            return None;
+        }
+        if !angle && ch == '(' {
+            depth += 1;
+        }
+        if !angle && ch == ')' {
+            if depth == 0 {
+                return None;
+            }
+            depth -= 1;
+        }
+        index += ch.len_utf8();
+    }
+    if index == start || depth != 0 || angle && !line[index..].starts_with('>') {
+        return None;
+    }
+    let remainder = line[index + usize::from(angle)..].trim();
+    if !remainder.is_empty() {
+        let opening = remainder.chars().next()?;
+        let closing = match opening {
+            '\'' => '\'',
+            '"' => '"',
+            '(' => ')',
+            _ => return None,
+        };
+        if remainder.len() < 2 || !remainder.ends_with(closing) {
+            return None;
+        }
+    }
+    Some(Definition {
+        label: name,
+        target: &line[start..index],
+        start,
+        end: index,
+        angle,
+    })
+}
+
+fn definitions(markdown: &str) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    let mut context = LiteralContext::default();
+    for line in markdown.split_inclusive('\n') {
+        if !context.literal(line)
+            && let Some(definition) = definition(line)
+        {
+            result
+                .entry(definition.label)
+                .or_insert_with(|| unquote(&unescape(definition.target)));
+        }
+    }
+    result
+}
+
+fn reference_use(text: &str) -> Option<(String, &str, usize, bool)> {
+    let (image, start) = if text.starts_with("![") {
+        (true, 2)
+    } else if text.starts_with('[') {
+        (false, 1)
+    } else {
+        return None;
+    };
+    let close = closing_bracket(text, start)?;
+    let alt = &text[start..close];
+    let mut end = close + 1;
+    if text[end..].starts_with('(') {
+        return None;
+    }
+    let name = if text[end..].starts_with('[') {
+        let close = closing_bracket(text, end + 1)?;
+        let explicit = &text[end + 1..close];
+        end = close + 1;
+        if explicit.is_empty() { alt } else { explicit }
+    } else {
+        alt
+    };
+    Some((label(name), alt, end, image))
+}
+
+fn code_span_end(text: &str) -> Option<usize> {
+    if !text.starts_with('`') {
+        return None;
+    }
+    let width = text.bytes().take_while(|byte| *byte == b'`').count();
+    let mut index = width;
+    while index < text.len() {
+        if text[index..].starts_with('`') {
+            let closing = text[index..]
+                .bytes()
+                .take_while(|byte| *byte == b'`')
+                .count();
+            index += closing;
+            if closing == width {
+                return Some(index);
+            }
+        } else {
+            index += text[index..].chars().next()?.len_utf8();
+        }
+    }
+    Some(text.len())
+}
+
+fn html_literal_end(text: &str) -> Option<usize> {
+    if text.starts_with("<!--") {
+        return Some(text.find("-->").map_or(text.len(), |end| end + 3));
+    }
+    if !text.starts_with('<') {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    for tag in ["pre", "code", "script", "style"] {
+        if lower
+            .strip_prefix(&format!("<{tag}"))
+            .is_some_and(|tail| tail.starts_with('>') || tail.starts_with(char::is_whitespace))
+        {
+            let closing = format!("</{tag}>");
+            return Some(
+                lower
+                    .find(&closing)
+                    .map_or(text.len(), |end| end + closing.len()),
+            );
+        }
+    }
+    None
+}
+
+struct HtmlReference<'a> {
+    target: &'a str,
+    start: usize,
+    end: usize,
+    tag_end: usize,
+    attribute_start: usize,
+    attribute_end: usize,
+    image: bool,
+}
+
+fn html_reference(text: &str) -> Option<HtmlReference<'_>> {
+    if !text.starts_with('<') {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut index = 1;
+    while bytes.get(index).is_some_and(u8::is_ascii_alphanumeric) {
+        index += 1;
+    }
+    let image = text[1..index].eq_ignore_ascii_case("img");
+    if !image && !text[1..index].eq_ignore_ascii_case("a") {
+        return None;
+    }
+    let wanted = if image { "src" } else { "href" };
+    let mut destination = None;
+    while index < bytes.len() {
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if text[index..].starts_with("/>") {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'>') {
+            let (start, end, attribute_start, attribute_end) = destination?;
+            return Some(HtmlReference {
+                target: &text[start..end],
+                start,
+                end,
+                tag_end: index + 1,
+                attribute_start,
+                attribute_end,
+                image,
+            });
+        }
+        let name_start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !b"=<>/\"'".contains(byte))
+        {
+            index += 1;
+        }
+        if index == name_start {
+            return None;
+        }
+        let name = &text[name_start..index];
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'=') {
+            continue;
+        }
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let quote = bytes
+            .get(index)
+            .copied()
+            .filter(|byte| matches!(byte, b'\'' | b'"'));
+        if quote.is_some() {
+            index += 1;
+        }
+        let start = index;
+        while let Some(byte) = bytes.get(index) {
+            if quote == Some(*byte)
+                || quote.is_none() && (byte.is_ascii_whitespace() || *byte == b'>')
+            {
+                break;
+            }
+            index += 1;
+        }
+        let end = index;
+        if quote.is_some() {
+            if bytes.get(index).copied() != quote {
+                return None;
+            }
+            index += 1;
+        }
+        if name.eq_ignore_ascii_case(wanted) && destination.is_none() {
+            destination = Some((start, end, name_start, index));
+        }
+    }
+    None
+}
+
+fn html_unescape(value: &str) -> String {
+    let mut result = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('&') {
+        result.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let Some(end) = rest.find(';') else {
+            break;
+        };
+        let entity = &rest[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            _ => entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+                .and_then(|n| u32::from_str_radix(n, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|n| n.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        if let Some(ch) = decoded {
+            result.push(ch);
+            rest = &rest[end + 1..];
+        } else {
+            result.push('&');
+            rest = &rest[1..];
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '&' => "&amp;".into(),
+            '"' => "&quot;".into(),
+            '\'' => "&#39;".into(),
+            '<' => "&lt;".into(),
+            '>' => "&gt;".into(),
+            ch if ch.is_ascii_whitespace() || ch == '`' || ch == '=' => format!("&#{};", ch as u32),
+            ch => ch.to_string(),
+        })
+        .collect()
+}
+
+fn destination(value: &str, angle: bool) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_whitespace()
+                || matches!(ch, '<' | '>' | '\\')
+                || !angle && matches!(ch, '(' | ')' | '[' | ']' | '"' | '\'')
+            {
+                format!("%{:02X}", ch as u32)
+            } else {
+                ch.to_string()
+            }
+        })
+        .collect()
+}
+
+fn inline_has_images(line: &str, definitions: &HashMap<String, String>) -> bool {
+    inline_has_images_nested(line, definitions, 0)
+}
+
+fn inline_has_images_nested(
+    line: &str,
+    definitions: &HashMap<String, String>,
+    depth: usize,
+) -> bool {
+    if depth >= 64 {
+        return false;
+    }
+    let mut index = 0;
+    while index < line.len() {
+        let tail = &line[index..];
+        if let Some(rest) = tail.strip_prefix('\\') {
+            index += 1 + rest.chars().next().map_or(0, char::len_utf8);
+        } else if let Some(end) = code_span_end(tail) {
+            index += end;
+        } else if let Some(end) = html_literal_end(tail) {
+            index += end;
+        } else if let Some(reference) = html_reference(tail) {
+            if reference.image && !reference.target.is_empty() {
+                return true;
+            }
+            index += reference.tag_end;
+        } else if tail.starts_with("![[") && tail.contains("]]") {
+            return true;
+        } else if let Some(reference) = reference(tail) {
+            if reference.image || inline_has_images_nested(reference.alt, definitions, depth + 1) {
+                return true;
+            }
+            index += reference.end;
+        } else if let Some((name, _, _, true)) = reference_use(tail)
+            && definitions.contains_key(&name)
+        {
+            return true;
+        } else {
+            index += tail.chars().next().unwrap().len_utf8();
+        }
+    }
+    false
 }
 
 fn okf(metadata: &mut Map<String, Value>) {
@@ -125,11 +582,39 @@ fn transform(
 ) -> String {
     let mut context = LiteralContext::default();
     let mut output = String::with_capacity(source.len());
-    for line in source.split_inclusive('\n') {
-        if context.literal(line) {
+    let removed: HashSet<_> = if let Some((previous, "")) = replacement {
+        definitions(source)
+            .into_iter()
+            .filter(|(_, target)| target == previous)
+            .map(|(label, _)| label)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let mut cursor = 0;
+    while let Some((line, literal)) = next_content(source, &mut cursor, &mut context) {
+        if literal {
             output.push_str(line);
+        } else if let Some(definition) = definition(line) {
+            if removed.contains(&definition.label) {
+                if line.ends_with('\n') {
+                    output.push('\n');
+                }
+                continue;
+            }
+            let next = replacement
+                .filter(|(previous, _)| *previous == unquote(&unescape(definition.target)))
+                .map(|(_, next)| destination(next, definition.angle))
+                .or_else(|| visible.then(|| visible_target(definition.target)).flatten());
+            if let Some(next) = next {
+                output.push_str(&line[..definition.start]);
+                output.push_str(&next);
+                output.push_str(&line[definition.end..]);
+            } else {
+                output.push_str(line);
+            }
         } else {
-            output.push_str(&inline(line, visible, wiki, rag, replacement));
+            output.push_str(&inline(line, visible, wiki, rag, replacement, &removed));
         }
     }
     output
@@ -316,8 +801,9 @@ fn inline(
     wiki: bool,
     rag: bool,
     replacement: Option<(&str, &str)>,
+    removed: &HashSet<String>,
 ) -> String {
-    inline_nested(line, visible, wiki, rag, replacement, 0)
+    inline_nested(line, visible, wiki, rag, replacement, removed, 0)
 }
 
 fn inline_nested(
@@ -326,6 +812,7 @@ fn inline_nested(
     wiki: bool,
     rag: bool,
     replacement: Option<(&str, &str)>,
+    removed: &HashSet<String>,
     depth: usize,
 ) -> String {
     if depth >= 64 {
@@ -341,22 +828,51 @@ fn inline_nested(
             index += amount;
             continue;
         }
-        if tail.starts_with('`') {
-            let width = tail.bytes().take_while(|byte| *byte == b'`').count();
-            let mut end = width;
-            while end < tail.len() {
-                if tail[end..].starts_with('`') {
-                    let closing = tail[end..].bytes().take_while(|byte| *byte == b'`').count();
-                    end += closing;
-                    if closing == width {
-                        break;
-                    }
-                } else {
-                    end += tail[end..].chars().next().unwrap().len_utf8();
+        if let Some(end) = code_span_end(tail) {
+            output.push_str(&tail[..end]);
+            index += end;
+            continue;
+        }
+        if let Some(end) = html_literal_end(tail) {
+            if rag && tail.starts_with("<!--") && tail[..end].ends_with("-->") {
+                let comment = tail[4..end - 3].trim();
+                if let Some(number) = comment.strip_prefix("Page number:").map(str::trim)
+                    && !number.is_empty()
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    output.push_str(&format!("<!-- page: {number} -->"));
+                    index += end;
+                    continue;
                 }
             }
             output.push_str(&tail[..end]);
             index += end;
+            continue;
+        }
+        if let Some(reference) = html_reference(tail) {
+            let next = replacement
+                .filter(|(previous, _)| *previous == unquote(&html_unescape(reference.target)))
+                .map(|(_, next)| next.to_owned())
+                .or_else(|| {
+                    visible
+                        .then(|| visible_target(&html_unescape(reference.target)))
+                        .flatten()
+                });
+            if let Some(next) = next {
+                if next.is_empty() {
+                    if !reference.image {
+                        output.push_str(&tail[..reference.attribute_start]);
+                        output.push_str(&tail[reference.attribute_end..reference.tag_end]);
+                    }
+                } else {
+                    output.push_str(&tail[..reference.start]);
+                    output.push_str(&html_escape(&next));
+                    output.push_str(&tail[reference.end..reference.tag_end]);
+                }
+            } else {
+                output.push_str(&tail[..reference.tag_end]);
+            }
+            index += reference.tag_end;
             continue;
         }
         if let Some(rest) = tail.strip_prefix("![[")
@@ -366,6 +882,10 @@ fn inline_nested(
             let (target, alias) = body
                 .split_once('|')
                 .map_or((body, None), |(a, b)| (a, Some(b)));
+            if replacement.is_some_and(|(from, to)| from == unquote(target) && to.is_empty()) {
+                index += end + 5;
+                continue;
+            }
             let new = replacement
                 .filter(|(from, _)| *from == unquote(target))
                 .map(|(_, to)| to.to_owned())
@@ -378,10 +898,35 @@ fn inline_nested(
             index += end + 5;
             continue;
         }
+        if !removed.is_empty()
+            && let Some((name, alt, end, image)) = reference_use(tail)
+            && removed.contains(&name)
+        {
+            if !image {
+                output.push_str(alt);
+            }
+            index += end;
+            continue;
+        }
         if let Some(reference) = reference(tail) {
+            if replacement.is_some_and(|(from, to)| {
+                from == unquote(&unescape(reference.target)) && to.is_empty()
+            }) {
+                if !reference.image {
+                    output.push_str(reference.alt);
+                }
+                index += reference.end;
+                continue;
+            }
             let target = replacement
                 .filter(|(from, _)| *from == unquote(&unescape(reference.target)))
-                .map(|(_, to)| to.to_owned())
+                .map(|(_, to)| {
+                    destination(
+                        to,
+                        reference.target_start > 0
+                            && tail.as_bytes()[reference.target_start - 1] == b'<',
+                    )
+                })
                 .or_else(|| visible.then(|| visible_target(reference.target)).flatten())
                 .unwrap_or_else(|| reference.target.to_owned());
             if wiki && reference.image && target.starts_with("assets/") && !reference.has_title {
@@ -407,6 +952,7 @@ fn inline_nested(
                         wiki,
                         rag,
                         replacement,
+                        removed,
                         depth + 1,
                     ));
                     output.push_str(&tail[1 + reference.alt.len()..reference.target_start]);
@@ -511,6 +1057,121 @@ fn table_cells(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_html_attributes_remain_complete_and_literals_stay_unchanged() {
+        let input = "Before <img\n src=\".markitai/assets/a.png\"\n alt=\"title\"> after\n<a\n href='.markitai/assets/a.png'>download</a>\n";
+        let rewritten = rewrite_asset_target(input, ".markitai/assets/a.png", "assets/hash.png");
+        assert_eq!(rewritten.matches("assets/hash.png").count(), 2);
+        assert!(!rewritten.contains(".markitai"));
+        assert!(has_image_references(input));
+        let literal = "```html\n<img\n src=\".markitai/assets/a.png\">\n```\n`<img`\n";
+        assert_eq!(
+            rewrite_asset_target(literal, ".markitai/assets/a.png", "assets/hash.png"),
+            literal
+        );
+        assert!(!has_image_references(literal));
+    }
+
+    #[test]
+    fn reference_definitions_keep_titles_and_match_complete_decoded_targets() {
+        let input = "![one][image]\n![image][]\n![image]\n[image]: <.markitai/assets/a%20b.png> \"A title\"\n[other]: .markitai/assets/a%20b.png.extra 'Keep'\n";
+        let result = rewrite_asset_target(
+            input,
+            ".markitai/assets/a b.png",
+            ".markitai/assets/new name.png",
+        );
+        assert!(result.contains("[image]: <.markitai/assets/new%20name.png> \"A title\""));
+        assert!(result.contains("[other]: .markitai/assets/a%20b.png.extra 'Keep'"));
+        let visible = profile(&result, "rag", false);
+        assert!(visible.contains("[image]: <assets/new%20name.png> \"A title\""));
+        assert!(has_image_references(&visible));
+    }
+
+    #[test]
+    fn html_asset_attributes_preserve_other_attributes_and_escape_replacements() {
+        let input = "<IMG class='photo' SRC=\".markitai/assets/a&amp;b.png\" data-src='unchanged' title='tip'> <a href='.markitai/assets/a&amp;b.png'>Download</a> <img src='.markitai/assets/a&amp;b.png.extra'>";
+        let result = rewrite_asset_target(
+            input,
+            ".markitai/assets/a&b.png",
+            ".markitai/assets/new & name.png",
+        );
+        assert!(result.contains("SRC=\".markitai/assets/new&#32;&amp;&#32;name.png\""));
+        assert!(result.contains("data-src='unchanged' title='tip'"));
+        assert!(result.contains("href='.markitai/assets/new&#32;&amp;&#32;name.png'"));
+        assert!(result.contains("src='.markitai/assets/a&amp;b.png.extra'"));
+        assert!(has_image_references(&result));
+        assert!(!has_image_references(
+            "<img data-src='not-loaded.png'> <a href='image.png'>link</a>"
+        ));
+    }
+
+    #[test]
+    fn filtered_reference_images_disappear_but_download_text_and_literals_remain() {
+        let input = "![one][id] ![id][] ![id] [download][id]\n[id]: assets/a.png \"Title\"\n<img src='assets/a.png'> <a href='assets/a.png' class='download'>Download</a>\n`![id]`\n";
+        let result = rewrite_asset_target(input, "assets/a.png", "");
+        assert!(!result.contains("[one]"));
+        assert!(!result.contains("[id]:"));
+        assert!(result.contains("download"));
+        assert!(!result.contains("<img"));
+        assert!(!result.contains("href="));
+        assert!(result.contains("class='download'>Download</a>"));
+        assert!(result.contains("`![id]`"));
+        assert!(!has_image_references(&result));
+    }
+
+    #[test]
+    fn image_detection_and_rewrites_ignore_literal_code_and_comments() {
+        let literals = "```md\n![example](assets/a.png)\n[id]: assets/a.png\n<img src='assets/a.png'>\n```\n    ![indented](assets/a.png)\n`<img src='assets/a.png'>` and `![example](assets/a.png)`\n<pre>![pre](assets/a.png)</pre>\nText <code><img src='assets/a.png'></code>\n<!-- ![comment](assets/a.png) -->\n";
+        assert!(!has_image_references(literals));
+        assert_eq!(
+            rewrite_asset_target(literals, "assets/a.png", "assets/hash.png"),
+            literals
+        );
+        for actual in [
+            "![actual](assets/a.png)",
+            "![[assets/a.png|Caption]]",
+            "<img src='assets/a.png'>",
+            "![id]\n[id]: assets/a.png",
+            "[![photo](assets/a.png)](https://example.test)",
+        ] {
+            assert!(
+                has_image_references(&format!("{literals}\n{actual}")),
+                "{actual}"
+            );
+        }
+        assert!(!has_image_references("![unresolved]"));
+        assert!(!has_image_references("\\![escaped](assets/a.png)"));
+        assert!(!has_image_references("[unused]: assets/a.png"));
+    }
+
+    #[test]
+    fn written_enhanced_markdown_keeps_reference_and_html_assets_resolvable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::normalize(&json!({"output":{"profile":"rag"}})).unwrap();
+        let mut result = crate::ConversionOutput {
+            markdown: "![base](.markitai/assets/image.png)".into(),
+            llm_markdown: Some("![photo][img]\n\n[img]: .markitai/assets/image.png \"Original\"\n<img src=\".markitai/assets/image.png\">\n<a href=\".markitai/assets/image.png\">Original</a>\n".into()),
+            ..Default::default()
+        };
+        crate::output::apply_profiles(&mut result, &cfg);
+        crate::output::write(
+            dir.path(),
+            "scan.png",
+            &mut result,
+            &[crate::Asset {
+                name: "image.png".into(),
+                bytes: b"fixture-image-bytes".to_vec(),
+            }],
+            &cfg,
+        )
+        .unwrap();
+        let filename = result.assets[0].file_name().unwrap().to_str().unwrap();
+        let written = std::fs::read_to_string(result.llm_output_path.unwrap()).unwrap();
+        assert_eq!(written.matches(&format!("assets/{filename}")).count(), 3);
+        assert!(!written.contains("assets/image.png"));
+        assert!(result.assets[0].is_file());
+    }
 
     fn profile(source: &str, name: &str, wiki: bool) -> String {
         let mut source = source.to_owned();

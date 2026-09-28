@@ -84,6 +84,69 @@ fn single_runtime_error_retains_json_and_usage_error_has_none() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
 }
+
+#[test]
+fn image_only_cli_items_skip_without_writing_empty_documents() {
+    let dir = fixture();
+    // Image-only detection precedes decoding when no extractor is requested.
+    std::fs::write(dir.path().join("scan.jpg"), b"not decoded in skip mode").unwrap();
+    let stdout = invoke(dir.path(), &["scan.jpg"]);
+    assert!(stdout.status.success());
+    assert!(stdout.stdout.is_empty());
+    let output = invoke(dir.path(), &["scan.jpg", "-o", "out", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["items"][0]["status"], "skipped");
+    assert_eq!(body["items"][0]["skip_reason"], "image_only");
+    assert_eq!(body["totals"]["skipped"], 1);
+    assert!(!dir.path().join("out/scan.jpg.md").exists());
+    let missing = invoke(dir.path(), &["missing.jpg"]);
+    assert_eq!(missing.status.code(), Some(1));
+}
+
+#[test]
+fn paired_boolean_flags_use_the_last_occurrence() {
+    let dir = fixture();
+    let output = invoke(
+        dir.path(),
+        &[
+            "note.txt",
+            "--pure",
+            "--no-pure",
+            "--llm",
+            "--no-llm",
+            "--compress",
+            "--no-compress",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.starts_with(b"---\n"));
+    let output = invoke(
+        dir.path(),
+        &[
+            "note.txt",
+            "--no-pure",
+            "--pure",
+            "--pure",
+            "--no-compress",
+            "--compress",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.starts_with(b"# Contract\n"));
+}
 #[test]
 fn batch_keeps_relative_directories_and_partial_failure_exit() {
     let dir = fixture();

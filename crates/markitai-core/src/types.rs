@@ -17,6 +17,8 @@ pub enum Error {
     #[error("{0}")]
     Conversion(String),
     #[error("{0}")]
+    ImageOnly(String),
+    #[error("{0}")]
     Fetch(String),
     #[error("{0}")]
     Config(String),
@@ -34,7 +36,7 @@ impl Error {
             Self::NoModelConfigured => "no_model_configured",
             Self::InvalidInput(_) => "invalid_input",
             Self::Unsupported(_) => "unsupported",
-            Self::Conversion(_) => "conversion_error",
+            Self::Conversion(_) | Self::ImageOnly(_) => "conversion_error",
             Self::Fetch(_) => "fetch_error",
             Self::Config(_) => "config_error",
             Self::Io(_) => "io_error",

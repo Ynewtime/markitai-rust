@@ -38,7 +38,11 @@ Output names preserve the source extension: `report.pdf.md` and
 `report.pdf.v2`. Explicit CLI filenames and batch-reserved stems reach this layer
 as private configuration fields. Assets are addressed by SHA-256 content prefixes.
 The public result contains only durable asset paths when an output directory was
-provided.
+provided. Asset remapping recognizes inline images/links, wiki references,
+reference definitions, and HTML `img`/`a` destinations, including multiline tags.
+It preserves titles and other attributes while leaving code and literal examples
+untouched. Filtered reference images are removed together with their definitions;
+download-link labels remain readable.
 
 The current implementation serializes file reservations and writing within one
 process. Cross-process reservations and throughput on asset-heavy batches still

@@ -1,12 +1,14 @@
 pub mod config;
 mod fetch;
 pub mod formats;
+mod images;
 mod llm;
 mod markdown;
 pub mod output;
 mod output_profiles;
 mod types;
 
+pub use images::is_image_extension;
 pub use types::*;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -46,15 +48,6 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         }
         cfg["output"]["profile"] = json!(profile);
     }
-    if cfg
-        .pointer("/security/pdf_sanitize")
-        .and_then(Value::as_str)
-        == Some("remove")
-    {
-        return Err(Error::Unsupported(
-            "PDF hidden-text removal is not implemented in this development build".into(),
-        ));
-    }
     if config::enabled(&cfg, "/llm/enabled")
         && cfg
             .pointer("/llm/max_cost_per_document_usd")
@@ -63,28 +56,6 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
     {
         return Err(Error::Unsupported("LLM cost limits require pricing support, which is not implemented in this development build".into()));
     }
-    if config::enabled(&cfg, "/llm/enabled")
-        && cfg
-            .pointer("/llm/model_list")
-            .and_then(Value::as_array)
-            .is_some_and(|v| v.len() > 1)
-    {
-        return Err(Error::Unsupported(
-            "Multiple-model routing is not implemented in this development build".into(),
-        ));
-    }
-    for (path, feature) in [
-        ("/ocr/enabled", "OCR"),
-        ("/screenshot/enabled", "Screenshots"),
-        ("/image/alt_enabled", "Image alt text"),
-        ("/image/desc_enabled", "Image descriptions"),
-    ] {
-        if config::enabled(&cfg, path) {
-            return Err(Error::Unsupported(format!(
-                "{feature} is not implemented in this development build"
-            )));
-        }
-    }
     let is_url = is_url(source);
     if source.contains("://") && !is_url {
         return Err(Error::InvalidInput(
@@ -92,6 +63,11 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         ));
     }
     let input_path = config::expand_home(Path::new(source));
+    let image_input = !is_url
+        && input_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(is_image_extension);
     let output_dir = options.output_dir.map(|path| config::expand_home(&path));
     if !is_url {
         let path = &input_path;
@@ -111,11 +87,25 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
                 "Input is not a file: {source}"
             )));
         }
-        if meta.len() > 100 * 1024 * 1024 {
+        if meta.len() > 500 * 1024 * 1024 {
             return Err(Error::InvalidInput(
-                "Input exceeds the 100 MiB limit".into(),
+                "Input exceeds the 500 MiB limit".into(),
             ));
         }
+    }
+    if image_input
+        && config::enabled(&cfg, "/ocr/enabled")
+        && !config::enabled(&cfg, "/llm/enabled")
+    {
+        return Err(Error::Unsupported(
+            "Local OCR is not implemented in this development build".into(),
+        ));
+    }
+    if image_input && !config::enabled(&cfg, "/llm/enabled") {
+        return Err(Error::ImageOnly(format!(
+            "{} is an image file with no text to extract. Enable LLM (llm=True) or OCR (ocr=True) for content extraction.",
+            input_path.file_name().unwrap_or_default().to_string_lossy()
+        )));
     }
     let name = if is_url {
         output::url_name(source, &Default::default())
@@ -136,13 +126,78 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
             ..Default::default()
         });
     }
-    let mut doc = if is_url {
+    if is_url && config::enabled(&cfg, "/screenshot/enabled") {
+        return Err(Error::Unsupported(
+            "Browser screenshots are not implemented in this development build".into(),
+        ));
+    }
+    let mut vision = None;
+    let mut doc = if image_input {
+        if config::enabled(&cfg, "/ocr/enabled")
+            && config::environment()
+                .get("MARKITAI_NO_VLM_OCR")
+                .is_some_and(|value| {
+                    ["1", "true", "yes", "on"].contains(&value.to_ascii_lowercase().as_str())
+                })
+        {
+            return Err(Error::Unsupported("VLM OCR is disabled by MARKITAI_NO_VLM_OCR; the local OCR backend is not implemented yet".into()));
+        }
+        let (doc, image) = images::extract(&input_path, &cfg)?;
+        vision = Some(image);
+        doc
+    } else if is_url {
         fetch::fetch(source, &cfg)?
     } else {
         formats::extract(&input_path)?
     };
+    let format = doc
+        .metadata
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if format == "PDF" {
+        if cfg["security"]["pdf_sanitize"] == "remove" {
+            return Err(Error::Unsupported(
+                "PDF hidden-text removal is not implemented in this development build".into(),
+            ));
+        }
+        if config::enabled(&cfg, "/ocr/enabled") {
+            return Err(Error::Unsupported(
+                "PDF OCR is not implemented in this development build".into(),
+            ));
+        }
+    }
+    if matches!(format, "PDF" | "PPTX" | "PPT" | "PPTM" | "PPSX" | "PPSM")
+        && config::enabled(&cfg, "/screenshot/enabled")
+    {
+        return Err(Error::Unsupported(
+            "Document screenshots are not implemented in this development build".into(),
+        ));
+    }
+    if !image_input {
+        images::prepare_assets(&mut doc, &cfg);
+    }
+    if config::enabled(&cfg, "/llm/enabled")
+        && (image_input || output_profiles::has_image_references(&doc.markdown))
+    {
+        for (path, feature) in [
+            ("/image/alt_enabled", "Image alt text"),
+            ("/image/desc_enabled", "Image descriptions"),
+        ] {
+            if config::enabled(&cfg, path) {
+                return Err(Error::Unsupported(format!(
+                    "{feature} is not implemented in this development build"
+                )));
+            }
+        }
+    }
     let mut result = output::prepare(source, &name, &mut doc, &cfg);
     if config::enabled(&cfg, "/llm/enabled") {
+        let source_context = if is_url {
+            output::redact_url(source)
+        } else {
+            name.clone()
+        };
         result.base_frontmatter = Some(result.frontmatter.clone());
         let pure = config::enabled(&cfg, "/llm/pure");
         let input = if pure {
@@ -150,7 +205,12 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         } else {
             &result.markdown
         };
-        match llm::enhance(input, &cfg) {
+        let enhanced = if let Some(image) = &vision {
+            llm::enhance_image_with_source(input, &source_context, image.mime, &image.bytes, &cfg)
+        } else {
+            llm::enhance_with_source(input, &source_context, &cfg)
+        };
+        match enhanced {
             Ok((markdown, usage)) => {
                 let (meta, body) = output::split_frontmatter(&markdown);
                 if pure {
