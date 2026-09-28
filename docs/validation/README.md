@@ -171,4 +171,12 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   srcset candidates now share exact destination handling; image preparation and
   publication use original-path maps to prevent cascaded renames or filtering.
   The [gate record](html-media-round11-gate.json) retains unchanged source hashes.
-  New release, installed packages and measured performance remain pending.
+  Clean `18680d9` [release](html-media-round11-build.json) passes its
+  [media archive case](html-media-round11-release.json) and
+  [installed packages](html-media-round11-packages.json).
+- [Paired CLI samples](html-media-round11-benchmark-r2.json) retain 72 processes,
+  exact output equality and 56 timed runs. The 250/1000-attachment fixtures have
+  18.67%/39.54% lower median elapsed time than the previous Rust release on this
+  host; text/50 sample ranges overlap. The [failed correctness attempt](html-media-round11-benchmark-r1.json),
+  [final identities](html-media-round11-final-check.json) and
+  [executed drivers](drivers/round11/README.md) preserve the experiment's boundaries.

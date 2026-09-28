@@ -99,8 +99,9 @@ retain a stale reference when an asset collision changes a name. Those syntax
 families remain a tracked fidelity gap; common generated Markdown references
 are covered by the current implementation.
 
-The newer media syntax is covered by native source and real-process tests; the
-frozen round-ten paired release evidence predates this extension.
+The newer media syntax is covered by source tests and
+[round-eleven native release acceptance](validation/html-media-round11.md);
+the frozen round-ten paired reference evidence predates this extension.
 The candidate boundaries follow the [HTML srcset algorithm](https://html.spec.whatwg.org/multipage/images.html#parse-a-srcset-attribute).
 New filename data is encoded before HTML escaping so the
 [URL parser](https://url.spec.whatwg.org/#concept-basic-url-parser) cannot discard
