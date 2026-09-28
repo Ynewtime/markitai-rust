@@ -20,7 +20,7 @@ pub(super) fn run(
     cli: &Cli,
     cfg: &Value,
     mut tasks: Vec<Task>,
-    _destination: BatchDestination<'_>,
+    destination: BatchDestination<'_>,
     report_plan: Option<&report::ReportPlan>,
     clock: Instant,
     context: ConvertContext<'_>,
@@ -95,11 +95,14 @@ pub(super) fn run(
         drop(sender);
         receiver.into_iter().collect::<Vec<_>>()
     });
-    records.sort_by_key(|record| record.index);
     let report_error = finish_report(report_plan, &records, clock, cli.verbose && !cli.quiet).err();
     if let Some(error) = &report_error {
         eprintln!("Error: {error}");
     }
+    if let Some(plan) = destination.history {
+        plan.record(&records);
+    }
+    records.sort_by_key(|record| record.index);
     let failed = records
         .iter()
         .filter(|record| record.status == ItemStatus::Failed)
@@ -176,6 +179,7 @@ mod tests {
             BatchDestination {
                 mode: RunMode::Directory,
                 output: &output,
+                history: None,
             },
             None,
             Instant::now(),
@@ -222,6 +226,7 @@ mod tests {
             BatchDestination {
                 mode: RunMode::Directory,
                 output: &output,
+                history: None,
             },
             Some(&plan),
             Instant::now(),
@@ -254,7 +259,8 @@ mod tests {
                 vec![task(&good, &output), task(&bad, &output)],
                 BatchDestination {
                     mode: RunMode::Directory,
-                    output: &output
+                    output: &output,
+                    history: None,
                 },
                 Some(&plan),
                 Instant::now(),

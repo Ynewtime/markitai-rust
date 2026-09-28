@@ -286,7 +286,6 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             cli.llm_batch || cli.llm_batch_timeout.is_some() || cli.llm_batch_collect.is_some(),
             "LLM Batch API",
         ),
-        (cli.record_history, "--record-history"),
         (cli.log_level.is_some(), "--log-level"),
     ] {
         if requested {
@@ -363,11 +362,8 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         cfg["history"]["record"] =
             json!(["1", "true", "yes", "on"].contains(&value.trim().to_lowercase().as_str()));
     }
-    if cli.no_record_history {
-        cfg["history"]["record"] = json!(false);
-    }
-    if config::enabled(&cfg, "/history/record") {
-        return Err(unsupported("history.record"));
+    if let Some(enabled) = tri(cli.record_history, cli.no_record_history) {
+        cfg["history"]["record"] = json!(enabled);
     }
     if let Some(bypass) = tri(cli.no_cache, cli.cache) {
         cfg["cache"]["no_cache"] = json!(bypass);
@@ -512,6 +508,14 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     }
     let run_clock = Instant::now();
     let started_at = timestamp();
+    let history_plan = crate::history::Plan::new(
+        &cfg,
+        output.as_deref(),
+        mode,
+        cli.preset.as_deref(),
+        &started_at,
+        !cli.quiet && !cli.json,
+    );
     let report_plan = if let Some(output_dir) = output.clone() {
         report::plan(
             RunInfo {
@@ -565,6 +569,9 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         if let Some(error) = &report_error {
             eprintln!("Error: {error}");
         }
+        if let Some(plan) = &history_plan {
+            plan.record(std::slice::from_ref(&record));
+        }
         if cli.json {
             emit_json(&[item], report_error.as_deref());
         } else {
@@ -601,6 +608,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         BatchDestination {
             mode,
             output: output.as_deref().unwrap(),
+            history: history_plan.as_ref(),
         },
         report_plan.as_ref(),
         run_clock,
@@ -611,6 +619,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
 struct BatchDestination<'a> {
     mode: RunMode,
     output: &'a Path,
+    history: Option<&'a crate::history::Plan>,
 }
 
 #[derive(Clone)]
@@ -762,8 +771,35 @@ fn convert_item(
 ) -> (RunItem, Result<ConversionOutput, String>) {
     let clock = Instant::now();
     let started_at = timestamp();
+    let history_enabled = task.output.is_some() && config::enabled(cfg, "/history/record");
+    let history_eligible = history_enabled && crate::history::eligible(&task.source);
     let result = convert_task(task, cfg, context, publication);
-    let record = recorded(task, index, clock, started_at, &result);
+    let mut record = recorded(task, index, clock, started_at, &result);
+    record.history_eligible = history_eligible;
+    if history_enabled && record.skip_reason.as_deref() == Some("exists") {
+        record.history_output = task.output.as_ref().map(|directory| {
+            let fallback = if is_url(&task.source) {
+                markitai_core::output::url_name(&task.source, &Default::default())
+            } else {
+                Path::new(&task.source)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let stem = cfg["output"]["filename"]
+                .as_str()
+                .map(|name| name.strip_suffix(".md").unwrap_or(name))
+                .or(task.reserved_stem.as_deref())
+                .or_else(|| {
+                    task.filename
+                        .as_deref()
+                        .map(|name| name.strip_suffix(".md").unwrap_or(name))
+                })
+                .unwrap_or(&fallback);
+            config::expand_home(directory).join(format!("{stem}.md"))
+        });
+    }
     (record, result)
 }
 
@@ -786,6 +822,8 @@ fn recorded(
         source_file: task.source_file.clone(),
         status: ItemStatus::Failed,
         output: None,
+        history_output: None,
+        history_eligible: true,
         error: None,
         warnings: Vec::new(),
         skip_reason: None,

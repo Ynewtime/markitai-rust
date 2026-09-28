@@ -234,7 +234,11 @@ pub(super) fn run(
     clock: Instant,
     context: ConvertContext<'_>,
 ) -> CliResult<i32> {
-    let BatchDestination { mode, output } = destination;
+    let BatchDestination {
+        mode,
+        output,
+        history,
+    } = destination;
     let scope = Scope::new(
         if mode == RunMode::Directory {
             Mode::Directory
@@ -764,6 +768,18 @@ pub(super) fn run(
                 fatal.get_or_insert(error);
             }
         }
+    }
+    if signal.is_none()
+        && !storage_failed
+        && let Some(plan) = history
+    {
+        plan.record(&records);
+    }
+    if signal.is_none()
+        && let Some(received) = crate::signals::interrupted()
+    {
+        signal = Some(received);
+        eprintln!("Interrupted: stopping new work and waiting for active conversions.");
     }
     records.sort_by_key(|record| record.index);
     let items: Vec<_> = records.iter().map(outcome).collect();

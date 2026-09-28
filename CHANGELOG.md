@@ -20,6 +20,7 @@
 - Recovery-state codec and durable store with legacy ordering, process locks, bounded journals and crash replay fences.
 - Unix directory/URL-list resume with durable dispatch, separate file/URL concurrency limits, restored reports and controlled interruption.
 - Per-member CLI publication locks and prepared ownership receipts for safe failed-item retries across process restarts.
+- Optional CLI history archives with compatible job metadata, bounded private copies, Unicode conflict handling and relocated asset references.
 
 ### Fixed
 

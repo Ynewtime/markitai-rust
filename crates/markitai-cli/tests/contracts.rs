@@ -319,15 +319,16 @@ fn directory_filters_on_url_lists_are_usage_errors() {
 }
 
 #[test]
-fn explicit_history_opt_out_overrides_unsupported_environment_request() {
+fn stdout_ignores_history_and_explicit_opt_out_preserves_markdown() {
     let dir = fixture();
     let output = invoke_env(
         dir.path(),
         &["note.txt"],
         &[("MARKITAI_RECORD_HISTORY", "1")],
     );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("history.record"));
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# Contract"));
+    assert!(!dir.path().join("home/serve/jobs").exists());
     let output = invoke_env(
         dir.path(),
         &["note.txt", "--no-record-history", "--pure"],
@@ -335,6 +336,7 @@ fn explicit_history_opt_out_overrides_unsupported_environment_request() {
     );
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("# Contract"));
+    assert!(!dir.path().join("home/serve/jobs").exists());
 }
 
 #[test]

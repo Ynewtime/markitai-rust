@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cfg: &Value) {
     match cfg.pointer("/output/profile").and_then(Value::as_str) {
-        Some("rag") => *markdown = transform(markdown, true, false, true, None),
+        Some("rag") => *markdown = transform(markdown, true, false, true, Replacements::None),
         Some("obsidian") => {
             let wiki = cfg.pointer("/output/wikilinks").and_then(Value::as_bool) == Some(true);
-            *markdown = transform(markdown, true, wiki, false, None);
+            *markdown = transform(markdown, true, wiki, false, Replacements::None);
         }
         Some("okf") => okf(metadata),
         _ => (),
@@ -21,7 +21,187 @@ pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cf
 /// An empty replacement removes the reference (a filtered image).
 /// Literal code and unrelated paths remain untouched.
 pub(crate) fn rewrite_asset_target(markdown: &str, previous: &str, next: &str) -> String {
-    transform(markdown, false, false, false, Some((previous, next)))
+    transform(
+        markdown,
+        false,
+        false,
+        false,
+        Replacements::Single(previous, next),
+    )
+}
+
+/// Rewrite original destinations through one map, without visiting inserted text.
+/// Keys are decoded paths; percent-encoded references are decoded exactly once.
+pub(crate) fn rewrite_asset_references(
+    source: &str,
+    replacements: &HashMap<String, String>,
+) -> String {
+    if replacements.is_empty() {
+        return source.to_owned();
+    }
+    transform(
+        source,
+        false,
+        false,
+        false,
+        Replacements::Many(replacements),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Replacements<'a> {
+    None,
+    Single(&'a str, &'a str),
+    Many(&'a HashMap<String, String>),
+}
+
+#[derive(Clone, Copy)]
+enum TargetSyntax {
+    Markdown,
+    Html,
+    Wiki,
+}
+
+impl TargetSyntax {
+    fn decode(self, value: &str) -> String {
+        match self {
+            Self::Markdown => unescape(value),
+            Self::Html => html_unescape(value),
+            Self::Wiki => value.to_owned(),
+        }
+    }
+
+    fn suffix_start(self, value: &str) -> usize {
+        let mut index = 0;
+        while index < value.len() {
+            let rest = &value[index..];
+            let character = rest.chars().next().unwrap();
+            if matches!(character, '#' | '?') {
+                return index;
+            }
+            if matches!(self, Self::Markdown) && character == '\\' {
+                if let Some(next) = rest[1..].chars().next() {
+                    if matches!(next, '#' | '?') {
+                        return index;
+                    }
+                    index += 1 + next.len_utf8();
+                    continue;
+                }
+            } else if matches!(self, Self::Html) && character == '&' {
+                // Stop at another '&' or non-entity character, so an unmatched
+                // prefix cannot repeatedly scan the remainder of a long tag.
+                let mut end = None;
+                for (offset, byte) in rest.bytes().enumerate().skip(1) {
+                    if byte == b';' {
+                        end = Some(offset);
+                        break;
+                    }
+                    if !byte.is_ascii_alphanumeric() && byte != b'#' {
+                        break;
+                    }
+                }
+                if let Some(end) = end {
+                    let entity = &rest[..=end];
+                    let decoded = html_unescape(entity);
+                    if matches!(decoded.as_str(), "#" | "?") {
+                        return index;
+                    }
+                    if decoded != entity {
+                        index += entity.len();
+                        continue;
+                    }
+                }
+            }
+            index += character.len_utf8();
+        }
+        value.len()
+    }
+}
+
+/// Keep URI syntax separate from a filesystem name. A suffix is still in its
+/// original Markdown/HTML/wiki spelling and must not be percent-decoded again.
+#[derive(Clone, Copy)]
+struct TargetRewrite<'map, 'source> {
+    path: &'map str,
+    suffix: &'source str,
+}
+
+impl TargetRewrite<'_, '_> {
+    fn markdown(self, angle: bool) -> String {
+        let mut result = destination(self.path, angle);
+        result.push_str(self.suffix);
+        result
+    }
+
+    fn html(self) -> String {
+        let mut result = html_escape(&uri_file_path(self.path, false));
+        // This span came from the same parsed attribute and retains its entity
+        // escaping and percent escapes. Escaping it again changes URI data.
+        result.push_str(self.suffix);
+        result
+    }
+
+    fn wiki(self) -> String {
+        let mut result = uri_file_path(self.path, true);
+        result.push_str(self.suffix);
+        result
+    }
+}
+
+fn uri_file_path(value: &str, wiki: bool) -> String {
+    let mut result = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '%' => result.push_str("%25"),
+            '#' => result.push_str("%23"),
+            '?' => result.push_str("%3F"),
+            character
+                if wiki
+                    && (matches!(character, '|' | '[' | ']') || character.is_ascii_control()) =>
+            {
+                use std::fmt::Write;
+                write!(result, "%{:02X}", character as u32).unwrap();
+            }
+            character => result.push(character),
+        }
+    }
+    result
+}
+
+impl<'a> Replacements<'a> {
+    fn get(self, path: &str) -> Option<&'a str> {
+        match self {
+            Self::None => None,
+            Self::Single(previous, next) => (previous == path).then_some(next),
+            Self::Many(paths) => paths.get(path).map(String::as_str),
+        }
+        .filter(|next| *next != path)
+    }
+
+    fn removes(self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Single(_, next) => next.is_empty(),
+            Self::Many(paths) => paths.values().any(String::is_empty),
+        }
+    }
+
+    fn decoded<'source>(
+        self,
+        target: &'source str,
+        syntax: TargetSyntax,
+    ) -> Option<TargetRewrite<'a, 'source>> {
+        if matches!(self, Self::None) {
+            None
+        } else {
+            let split = syntax.suffix_start(target);
+            self.get(&unquote(&syntax.decode(&target[..split])))
+                .map(|path| TargetRewrite {
+                    path,
+                    suffix: &target[split..],
+                })
+        }
+    }
 }
 
 /// Recognize actual image references while excluding Markdown and HTML literals.
@@ -61,10 +241,20 @@ fn next_content<'a>(
             let tail = &source[index..end];
             if let Some(rest) = tail.strip_prefix('\\') {
                 index += 1 + rest.chars().next().map_or(0, char::len_utf8);
-            } else if let Some(length) = code_span_end(tail).or_else(|| html_literal_end(tail)) {
+            } else if let Some(length) =
+                code_span_end(&source[index..]).or_else(|| html_literal_end(&source[index..]))
+            {
                 index += length;
+                if index > end {
+                    end = end_of_line(index);
+                }
             } else if let Some(reference) = html_reference(&source[index..]) {
                 index += reference.tag_end;
+                if index > end {
+                    end = end_of_line(index);
+                }
+            } else if let Some(length) = html_tag_end(&source[index..]) {
+                index += length;
                 if index > end {
                     end = end_of_line(index);
                 }
@@ -190,10 +380,9 @@ fn definition(line: &str) -> Option<Definition<'_>> {
 fn definitions(markdown: &str) -> HashMap<String, String> {
     let mut result = HashMap::new();
     let mut context = LiteralContext::default();
-    for line in markdown.split_inclusive('\n') {
-        if !context.literal(line)
-            && let Some(definition) = definition(line)
-        {
+    let mut cursor = 0;
+    while let Some((line, literal)) = next_content(markdown, &mut cursor, &mut context) {
+        if !literal && let Some(definition) = definition(line) {
             result
                 .entry(definition.label)
                 .or_insert_with(|| unquote(&unescape(definition.target)));
@@ -257,15 +446,15 @@ fn html_literal_end(text: &str) -> Option<usize> {
     if !text.starts_with('<') {
         return None;
     }
-    let lower = text.to_ascii_lowercase();
     for tag in ["pre", "code", "script", "style"] {
-        if lower
-            .strip_prefix(&format!("<{tag}"))
-            .is_some_and(|tail| tail.starts_with('>') || tail.starts_with(char::is_whitespace))
+        if text
+            .get(1..tag.len() + 1)
+            .is_some_and(|name| name.eq_ignore_ascii_case(tag))
+            && text[tag.len() + 1..].starts_with(|ch: char| ch == '>' || ch.is_whitespace())
         {
             let closing = format!("</{tag}>");
             return Some(
-                lower
+                text.to_ascii_lowercase()
                     .find(&closing)
                     .map_or(text.len(), |end| end + closing.len()),
             );
@@ -369,6 +558,29 @@ fn html_reference(text: &str) -> Option<HtmlReference<'_>> {
     None
 }
 
+fn html_tag_end(text: &str) -> Option<usize> {
+    let after = text.strip_prefix('<')?;
+    let after = after.strip_prefix('/').unwrap_or(after);
+    if !after
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+    {
+        return None;
+    }
+    let mut quote = None;
+    for (index, byte) in text.bytes().enumerate().skip(1) {
+        match (quote, byte) {
+            (Some(opening), closing) if opening == closing => quote = None,
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(index + 1),
+            (None, b'<') => return None,
+            _ => (),
+        }
+    }
+    None
+}
+
 fn html_unescape(value: &str) -> String {
     let mut result = String::new();
     let mut rest = value;
@@ -385,6 +597,8 @@ fn html_unescape(value: &str) -> String {
             "apos" => Some('\''),
             "lt" => Some('<'),
             "gt" => Some('>'),
+            "num" => Some('#'),
+            "quest" => Some('?'),
             _ => entity
                 .strip_prefix("#x")
                 .or_else(|| entity.strip_prefix("#X"))
@@ -420,19 +634,24 @@ fn html_escape(value: &str) -> String {
 }
 
 fn destination(value: &str, angle: bool) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_whitespace()
-                || matches!(ch, '<' | '>' | '\\')
-                || !angle && matches!(ch, '(' | ')' | '[' | ']' | '"' | '\'')
+    let mut result = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '%' => result.push_str("%25"),
+            '#' => result.push_str("%23"),
+            '?' => result.push_str("%3F"),
+            character
+                if character.is_ascii_whitespace()
+                    || matches!(character, '<' | '>' | '\\')
+                    || !angle && matches!(character, '(' | ')' | '[' | ']' | '"' | '\'') =>
             {
-                format!("%{:02X}", ch as u32)
-            } else {
-                ch.to_string()
+                use std::fmt::Write;
+                write!(result, "%{:02X}", character as u32).unwrap();
             }
-        })
-        .collect()
+            character => result.push(character),
+        }
+    }
+    result
 }
 
 fn inline_has_images(line: &str, definitions: &HashMap<String, String>) -> bool {
@@ -461,6 +680,8 @@ fn inline_has_images_nested(
                 return true;
             }
             index += reference.tag_end;
+        } else if let Some(end) = html_tag_end(tail) {
+            index += end;
         } else if tail.starts_with("![[") && tail.contains("]]") {
             return true;
         } else if let Some(reference) = reference(tail) {
@@ -573,25 +794,347 @@ impl LiteralContext {
     }
 }
 
+fn yaml_quote_end(text: &str, start: usize, quote: u8) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = start;
+    while let Some(&byte) = bytes.get(index) {
+        if quote == b'"' && byte == b'\\' {
+            index += 2;
+        } else if byte == quote {
+            if quote == b'\'' && bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+            } else {
+                return Some(index + 1);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn yaml_colon(text: &str, start: usize, flow: bool) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = start;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'\'' | b'"' => index = yaml_quote_end(text, index + 1, byte)?,
+            b':' if flow || bytes.get(index + 1).is_none_or(u8::is_ascii_whitespace) => {
+                return Some(index);
+            }
+            b'[' | b'{' | b']' | b'}' | b',' if flow => return None,
+            b'#' if index == start || bytes[index - 1].is_ascii_whitespace() => return None,
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn quoted_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/._~-".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(encoded, "%{byte:02X}").unwrap();
+        }
+    }
+    encoded
+}
+
+fn yaml_flow_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0;
+    let mut index = start;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'\'' | b'"' => {
+                index = yaml_quote_end(text, index + 1, byte)?;
+                continue;
+            }
+            b'#' if index == start || bytes[index - 1].is_ascii_whitespace() => {
+                index += text[index..].find('\n')?;
+            }
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => (),
+        }
+        index += 1;
+    }
+    None
+}
+
+fn yaml_value_start(text: &str, mut index: usize) -> usize {
+    let bytes = text.as_bytes();
+    loop {
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if !matches!(bytes.get(index), Some(b'!' | b'&')) {
+            return index;
+        }
+        if text[index..].starts_with("!<") {
+            let Some(end) = text[index..].find('>') else {
+                return text.len();
+            };
+            index += end + 1;
+        } else {
+            while bytes
+                .get(index)
+                .is_some_and(|byte| !byte.is_ascii_whitespace())
+            {
+                index += 1;
+            }
+        }
+    }
+}
+
+// Keep the source spelling around each scalar, including keys, comments and
+// quoting. Block scalars and multiline prose are deliberately not path fields.
+fn yaml_value_edits(
+    text: &str,
+    mut index: usize,
+    flow: bool,
+    replacement: Replacements<'_>,
+    edits: &mut Vec<(usize, usize, String)>,
+    depth: usize,
+) -> usize {
+    let bytes = text.as_bytes();
+    index = yaml_value_start(text, index);
+    if depth >= 64 {
+        return text.len();
+    }
+    let start = index;
+    let Some(&opening) = bytes.get(index) else {
+        return index;
+    };
+    if opening == b'[' || opening == b'{' {
+        let closing = if opening == b'[' { b']' } else { b'}' };
+        index += 1;
+        loop {
+            while bytes
+                .get(index)
+                .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b',')
+            {
+                index += 1;
+            }
+            if bytes.get(index) == Some(&b'#') {
+                if let Some(end) = text[index..].find('\n') {
+                    index += end + 1;
+                    continue;
+                }
+                return text.len();
+            }
+            if bytes.get(index) == Some(&closing) {
+                return index + 1;
+            }
+            if opening == b'{' {
+                let Some(colon) = yaml_colon(text, index, true) else {
+                    return text.len();
+                };
+                index = colon + 1;
+            }
+            let end = yaml_value_edits(text, index, true, replacement, edits, depth + 1);
+            if end <= index || end == text.len() {
+                return text.len();
+            }
+            index = end;
+        }
+    }
+    if matches!(opening, b'|' | b'>' | b'!' | b'&' | b'*' | b'#') {
+        return text.len();
+    }
+    let quoted = matches!(opening, b'\'' | b'"');
+    let end = if quoted {
+        let Some(end) = yaml_quote_end(text, index + 1, opening) else {
+            return text.len();
+        };
+        end
+    } else {
+        while let Some(&byte) = bytes.get(index) {
+            if flow && matches!(byte, b',' | b']' | b'}')
+                || byte == b'#' && (index == start || bytes[index - 1].is_ascii_whitespace())
+            {
+                break;
+            }
+            index += 1;
+        }
+        start + text[start..index].trim_end().len()
+    };
+    let token = &text[start..end];
+    let value = if quoted {
+        serde_yaml::from_str::<String>(token).ok()
+    } else {
+        Some(token.to_owned())
+    };
+    if let Some(value) = value {
+        let decoded = unquote(&value);
+        if let Some(next) = replacement.get(&decoded) {
+            let next = if decoded == value {
+                next.to_owned()
+            } else {
+                quoted_path(next)
+            };
+            let rendered = match opening {
+                b'\'' => format!("'{}'", next.replace('\'', "''")),
+                b'"' => serde_json::to_string(&next).unwrap(),
+                _ if (!flow || !next.contains([',', '[', ']', '{', '}']))
+                    && serde_yaml::from_str::<String>(&next).is_ok_and(|value| value == next) =>
+                {
+                    next
+                }
+                _ => serde_json::to_string(&next).unwrap(),
+            };
+            edits.push((start, end, rendered));
+        }
+    }
+    end
+}
+
+fn frontmatter_prefix(source: &str, replacement: Replacements<'_>) -> Option<(String, usize)> {
+    if matches!(replacement, Replacements::None) {
+        return None;
+    }
+    let first = source.split_inclusive('\n').next()?;
+    if first.trim_end_matches(['\r', '\n']) != "---" {
+        return None;
+    }
+    let mut end = first.len();
+    let mut closing = None;
+    for line in source[first.len()..].split_inclusive('\n') {
+        if matches!(line.trim_end_matches(['\r', '\n']), "---" | "...") {
+            closing = Some((end, end + line.len()));
+            break;
+        }
+        end += line.len();
+    }
+    let (content_end, prefix_end) = closing?;
+    let content = &source[first.len()..content_end];
+    if !matches!(
+        serde_yaml::from_str::<serde_yaml::Value>(content),
+        Ok(serde_yaml::Value::Mapping(_))
+    ) {
+        return Some((source[..prefix_end].to_owned(), prefix_end));
+    }
+    let mut output = first.to_owned();
+    let mut block_indent = None;
+    let mut multiline_quote = None;
+    let mut cursor = 0;
+    while cursor < content.len() {
+        let line_start = cursor;
+        cursor += content[cursor..]
+            .find('\n')
+            .map_or(content.len() - cursor, |end| end + 1);
+        let mut line = &content[line_start..cursor];
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if let Some(quote) = multiline_quote {
+            if yaml_quote_end(line, 0, quote).is_some() {
+                multiline_quote = None;
+            }
+            output.push_str(line);
+            continue;
+        }
+        if let Some(previous) = block_indent {
+            if line.trim().is_empty() || indent > previous {
+                output.push_str(line);
+                continue;
+            }
+            block_indent = None;
+        }
+        let mut start = indent;
+        let sequence = line[start..].starts_with("- ");
+        while line[start..].starts_with("- ") {
+            start += 2;
+        }
+        let value_start = if line[start..].starts_with(['[', '{']) {
+            Some(start)
+        } else {
+            yaml_colon(line, start, false)
+                .map(|colon| colon + 1)
+                .or(sequence.then_some(start))
+        };
+        let Some(start) = value_start else {
+            output.push_str(line);
+            continue;
+        };
+        let start = yaml_value_start(line, start);
+        if !line[start..].trim().is_empty()
+            && !line[start..].starts_with(['\'', '"', '[', '{', '|', '>'])
+            && content[cursor..]
+                .lines()
+                .find(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+                .is_some_and(|next| next.len() - next.trim_start_matches(' ').len() > indent)
+        {
+            block_indent = Some(indent);
+            output.push_str(line);
+            continue;
+        }
+        if line[start..].starts_with(['[', '{'])
+            && let Some(end) = yaml_flow_end(&content[line_start..], start)
+            && end > line.len()
+        {
+            let tail = &content[line_start + end..];
+            cursor = line_start + end + tail.find('\n').map_or(tail.len(), |end| end + 1);
+            line = &content[line_start..cursor];
+        }
+        match line.as_bytes().get(start).copied() {
+            Some(b'|' | b'>') => block_indent = Some(indent),
+            Some(quote @ (b'\'' | b'"')) if yaml_quote_end(line, start + 1, quote).is_none() => {
+                multiline_quote = Some(quote);
+            }
+            _ => (),
+        }
+        let mut edits = Vec::new();
+        yaml_value_edits(line, start, false, replacement, &mut edits, 0);
+        let mut copied = 0;
+        for (start, end, next) in edits {
+            output.push_str(&line[copied..start]);
+            output.push_str(&next);
+            copied = end;
+        }
+        output.push_str(&line[copied..]);
+    }
+    output.push_str(&source[content_end..prefix_end]);
+    Some((output, prefix_end))
+}
+
 fn transform(
     source: &str,
     visible: bool,
     wiki: bool,
     rag: bool,
-    replacement: Option<(&str, &str)>,
+    replacement: Replacements<'_>,
 ) -> String {
     let mut context = LiteralContext::default();
     let mut output = String::with_capacity(source.len());
-    let removed: HashSet<_> = if let Some((previous, "")) = replacement {
-        definitions(source)
-            .into_iter()
-            .filter(|(_, target)| target == previous)
-            .map(|(label, _)| label)
-            .collect()
-    } else {
-        HashSet::new()
-    };
+    let mut removed = HashSet::new();
+    if replacement.removes() {
+        let mut context = LiteralContext::default();
+        let mut cursor = 0;
+        let mut seen = HashSet::new();
+        while let Some((line, literal)) = next_content(source, &mut cursor, &mut context) {
+            if !literal
+                && let Some(definition) = definition(line)
+                && seen.insert(definition.label.clone())
+                && replacement
+                    .decoded(definition.target, TargetSyntax::Markdown)
+                    .is_some_and(|next| next.path.is_empty())
+            {
+                removed.insert(definition.label);
+            }
+        }
+    }
     let mut cursor = 0;
+    if let Some((prefix, end)) = frontmatter_prefix(source, replacement) {
+        output.push_str(&prefix);
+        cursor = end;
+    }
     while let Some((line, literal)) = next_content(source, &mut cursor, &mut context) {
         if literal {
             output.push_str(line);
@@ -603,8 +1146,8 @@ fn transform(
                 continue;
             }
             let next = replacement
-                .filter(|(previous, _)| *previous == unquote(&unescape(definition.target)))
-                .map(|(_, next)| destination(next, definition.angle))
+                .decoded(definition.target, TargetSyntax::Markdown)
+                .map(|next| next.markdown(definition.angle))
                 .or_else(|| visible.then(|| visible_target(definition.target)).flatten());
             if let Some(next) = next {
                 output.push_str(&line[..definition.start]);
@@ -800,7 +1343,7 @@ fn inline(
     visible: bool,
     wiki: bool,
     rag: bool,
-    replacement: Option<(&str, &str)>,
+    replacement: Replacements<'_>,
     removed: &HashSet<String>,
 ) -> String {
     inline_nested(line, visible, wiki, rag, replacement, removed, 0)
@@ -811,7 +1354,7 @@ fn inline_nested(
     visible: bool,
     wiki: bool,
     rag: bool,
-    replacement: Option<(&str, &str)>,
+    replacement: Replacements<'_>,
     removed: &HashSet<String>,
     depth: usize,
 ) -> String {
@@ -850,13 +1393,20 @@ fn inline_nested(
             continue;
         }
         if let Some(reference) = html_reference(tail) {
-            let next = replacement
-                .filter(|(previous, _)| *previous == unquote(&html_unescape(reference.target)))
-                .map(|(_, next)| next.to_owned())
+            let replaced = replacement.decoded(reference.target, TargetSyntax::Html);
+            let next = replaced
+                .map(|next| {
+                    if next.path.is_empty() {
+                        String::new()
+                    } else {
+                        next.html()
+                    }
+                })
                 .or_else(|| {
                     visible
                         .then(|| visible_target(&html_unescape(reference.target)))
                         .flatten()
+                        .map(|next| html_escape(&next))
                 });
             if let Some(next) = next {
                 if next.is_empty() {
@@ -866,7 +1416,7 @@ fn inline_nested(
                     }
                 } else {
                     output.push_str(&tail[..reference.start]);
-                    output.push_str(&html_escape(&next));
+                    output.push_str(&next);
                     output.push_str(&tail[reference.end..reference.tag_end]);
                 }
             } else {
@@ -875,27 +1425,38 @@ fn inline_nested(
             index += reference.tag_end;
             continue;
         }
-        if let Some(rest) = tail.strip_prefix("![[")
+        if let Some(end) = html_tag_end(tail) {
+            output.push_str(&tail[..end]);
+            index += end;
+            continue;
+        }
+        if let Some((rest, opening, image)) = tail
+            .strip_prefix("![[")
+            .map(|rest| (rest, "![[", true))
+            .or_else(|| tail.strip_prefix("[[").map(|rest| (rest, "[[", false)))
             && let Some(end) = rest.find("]]")
         {
             let body = &rest[..end];
             let (target, alias) = body
                 .split_once('|')
                 .map_or((body, None), |(a, b)| (a, Some(b)));
-            if replacement.is_some_and(|(from, to)| from == unquote(target) && to.is_empty()) {
-                index += end + 5;
+            let replaced = replacement.decoded(target, TargetSyntax::Wiki);
+            if replaced.is_some_and(|next| next.path.is_empty()) {
+                if !image {
+                    output.push_str(alias.unwrap_or(target));
+                }
+                index += end + opening.len() + 2;
                 continue;
             }
-            let new = replacement
-                .filter(|(from, _)| *from == unquote(target))
-                .map(|(_, to)| to.to_owned())
+            let new = replaced
+                .map(TargetRewrite::wiki)
                 .or_else(|| visible.then(|| visible_target(target)).flatten())
                 .unwrap_or_else(|| target.to_owned());
             output.push_str(&format!(
-                "![[{new}{}]]",
+                "{opening}{new}{}]]",
                 alias.map(|value| format!("|{value}")).unwrap_or_default()
             ));
-            index += end + 5;
+            index += end + opening.len() + 2;
             continue;
         }
         if !removed.is_empty()
@@ -909,20 +1470,17 @@ fn inline_nested(
             continue;
         }
         if let Some(reference) = reference(tail) {
-            if replacement.is_some_and(|(from, to)| {
-                from == unquote(&unescape(reference.target)) && to.is_empty()
-            }) {
+            let replaced = replacement.decoded(reference.target, TargetSyntax::Markdown);
+            if replaced.is_some_and(|next| next.path.is_empty()) {
                 if !reference.image {
                     output.push_str(reference.alt);
                 }
                 index += reference.end;
                 continue;
             }
-            let target = replacement
-                .filter(|(from, _)| *from == unquote(&unescape(reference.target)))
-                .map(|(_, to)| {
-                    destination(
-                        to,
+            let target = replaced
+                .map(|next| {
+                    next.markdown(
                         reference.target_start > 0
                             && tail.as_bytes()[reference.target_start - 1] == b'<',
                     )
@@ -1057,6 +1615,228 @@ fn table_cells(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(from, to)| ((*from).into(), (*to).into()))
+            .collect()
+    }
+
+    #[test]
+    fn bulk_references_use_original_destinations_and_keep_titles_aliases_and_prose() {
+        let replacements = paths(&[
+            ("assets/a.png", "assets/b.png"),
+            ("assets/b.png", "assets/c.png"),
+        ]);
+        let input = "![a](assets/a.png \"assets/a.png\") [b](assets/b.png)\n![ref][picture]\n[picture]: <assets/a.png> 'Keep title'\n![[assets/a.png|Alias]] [[assets/b.png|Download]]\n<img src='assets/a.png' alt='assets/a.png'> <a href=\"assets/b.png\">assets/a.png</a>\nPlain assets/a.png; ![long](assets/a.png.extra)\n";
+        let expected = "![a](assets/b.png \"assets/a.png\") [b](assets/c.png)\n![ref][picture]\n[picture]: <assets/b.png> 'Keep title'\n![[assets/b.png|Alias]] [[assets/c.png|Download]]\n<img src='assets/b.png' alt='assets/a.png'> <a href=\"assets/c.png\">assets/a.png</a>\nPlain assets/a.png; ![long](assets/a.png.extra)\n";
+        assert_eq!(rewrite_asset_references(input, &replacements), expected);
+    }
+
+    #[test]
+    fn encoded_destinations_decode_once_and_matching_is_case_sensitive() {
+        let replacements = paths(&[
+            ("assets/a b.png", "assets/空 格.png"),
+            ("assets/a%20b.png", "assets/literal-percent.png"),
+            ("assets/a&b.png", "assets/entity.png"),
+        ]);
+        let input = "![](<assets/a b.png>) ![](assets/a%20b.png) ![](assets/a%2520b.png) ![](assets/A%20b.png)\n![[assets/a%20b.png|保留]]\n<img src='assets/a&amp;b.png'>\n";
+        let result = rewrite_asset_references(input, &replacements);
+        assert_eq!(
+            result,
+            "![](<assets/空%20格.png>) ![](assets/空%20格.png) ![](assets/literal-percent.png) ![](assets/A%20b.png)\n![[assets/空 格.png|保留]]\n<img src='assets/entity.png'>\n"
+        );
+    }
+
+    #[test]
+    fn frontmatter_paths_rewrite_without_reserializing_keys_comments_or_examples() {
+        let replacements = paths(&[
+            ("assets/a.png", "assets/b.png"),
+            ("assets/b.png", "assets/c.png"),
+            ("assets/a b.png", "assets/新 图.png"),
+        ]);
+        let input = "---\r\nscreenshot: assets/a.png # keep\r\nquoted: 'assets/a.png'\r\nencoded: \"assets/a%20b.png\"\r\nassets/a.png: unchanged\r\ncaption: \"Use assets/a.png here\"\r\nnested:\r\n  image: assets/b.png\r\nimages:\r\n  - assets/a.png\r\nflow: [assets/a.png, {image: 'assets/b.png'}]\r\nmulti: [assets/a.png, # keep comment\r\n  assets/b.png]\r\n---\r\nscreenshot: assets/a.png\r\n";
+        let expected = "---\r\nscreenshot: assets/b.png # keep\r\nquoted: 'assets/b.png'\r\nencoded: \"assets/%E6%96%B0%20%E5%9B%BE.png\"\r\nassets/a.png: unchanged\r\ncaption: \"Use assets/a.png here\"\r\nnested:\r\n  image: assets/c.png\r\nimages:\r\n  - assets/b.png\r\nflow: [assets/b.png, {image: 'assets/c.png'}]\r\nmulti: [assets/b.png, # keep comment\r\n  assets/c.png]\r\n---\r\nscreenshot: assets/a.png\r\n";
+        let result = rewrite_asset_references(input, &replacements);
+        assert_eq!(result, expected);
+        let yaml = result
+            .strip_prefix("---\r\n")
+            .unwrap()
+            .split_once("\r\n---")
+            .unwrap()
+            .0;
+        let parsed: Value = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed["screenshot"], "assets/b.png");
+    }
+
+    #[test]
+    fn yaml_literals_and_multiline_prose_remain_byte_exact() {
+        let input = "---\nliteral: |\n  image: assets/a.png\n  ![](assets/a.png)\nfolded: >-\n  assets/a.png\nanchored: &example |\n  image: assets/a.png\nquoted: \"first line\n  image: assets/a.png\n  final line\"\nplain: first line\n  assets/a.png\ncontinued: assets/a.png\n  is an example\nactual: assets/a.png\n---\n";
+        let expected = input.replacen("actual: assets/a.png", "actual: assets/b.png", 1);
+        assert_eq!(
+            rewrite_asset_references(input, &paths(&[("assets/a.png", "assets/b.png")])),
+            expected
+        );
+        let malformed = "---\nimage: [assets/a.png\n---\n![](assets/a.png)\n";
+        assert_eq!(
+            rewrite_asset_references(malformed, &paths(&[("assets/a.png", "assets/b.png")])),
+            "---\nimage: [assets/a.png\n---\n![](assets/b.png)\n"
+        );
+    }
+
+    #[test]
+    fn unchanged_mappings_preserve_encoded_and_escaped_destination_spelling() {
+        let input = "---\nimage: 'assets/a%2epng' # spelling\n---\n![](<assets/a%2epng>) ![](assets/a\\(b\\).png)\n[ref]: assets/a%2epng \"title\"\n![[assets/a%2epng|Alias]]\n<img src='assets/a&#38;b.png'>\n";
+        let replacements = paths(&[
+            ("assets/a.png", "assets/a.png"),
+            ("assets/a(b).png", "assets/a(b).png"),
+            ("assets/a&b.png", "assets/a&b.png"),
+        ]);
+        assert_eq!(rewrite_asset_references(input, &replacements), input);
+    }
+
+    #[test]
+    fn replacement_percent_names_remain_distinct_from_space_names_in_each_syntax() {
+        let replacements = paths(&[
+            ("assets/percent.png", "assets/a%20b.png"),
+            ("assets/space.png", "assets/a b.png"),
+            ("assets/a%20b.png", "assets/a%20b.png"),
+            ("assets/a b.png", "assets/a b.png"),
+        ]);
+        let input = "![](assets/percent.png) ![](assets/space.png)\n[percent]: <assets/percent.png>\n![[assets/percent.png|Percent]] [[assets/space.png|Space]]\n<img src='assets/percent.png'> <a href='assets/space.png'>Space</a>\n![](assets/%61%2520b.png) ![](assets/a%20b.png)\n";
+        let expected = "![](assets/a%2520b.png) ![](assets/a%20b.png)\n[percent]: <assets/a%2520b.png>\n![[assets/a%2520b.png|Percent]] [[assets/a b.png|Space]]\n<img src='assets/a%2520b.png'> <a href='assets/a&#32;b.png'>Space</a>\n![](assets/%61%2520b.png) ![](assets/a%20b.png)\n";
+        assert_eq!(rewrite_asset_references(input, &replacements), expected);
+        assert_eq!(
+            profile(
+                "![](.markitai/assets/a%20b.png) <img src='.markitai/assets/a%20b.png'>",
+                "rag",
+                false
+            ),
+            "![](assets/a%20b.png) <img src='assets/a%20b.png'>"
+        );
+    }
+
+    #[test]
+    fn uri_suffixes_survive_bulk_collisions_without_chained_mapping() {
+        let replacements = paths(&[
+            ("assets/a.svg", "assets/b.svg"),
+            ("assets/b.svg", "assets/c.svg"),
+        ]);
+        let input = "![crop](assets/a.svg?size=2%20x#view \"Keep title\") [next](assets/b.svg#page=2)\n[ref]: <assets/a.svg#view> 'Title'\n![[assets/a.svg#view|Alias]] [[assets/b.svg?dl=1#top|File]]\n<img src='assets/a.svg?x=1&amp;y=%23keep#v' alt='assets/a.svg'> <a href=\"assets/b.svg#top\">Download</a>\n![](assets/a.svg.extra#view)\n`![](assets/a.svg#view)`\n";
+        let expected = "![crop](assets/b.svg?size=2%20x#view \"Keep title\") [next](assets/c.svg#page=2)\n[ref]: <assets/b.svg#view> 'Title'\n![[assets/b.svg#view|Alias]] [[assets/c.svg?dl=1#top|File]]\n<img src='assets/b.svg?x=1&amp;y=%23keep#v' alt='assets/a.svg'> <a href=\"assets/c.svg#top\">Download</a>\n![](assets/a.svg.extra#view)\n`![](assets/a.svg#view)`\n";
+        assert_eq!(rewrite_asset_references(input, &replacements), expected);
+    }
+
+    #[test]
+    fn literal_uri_marker_filenames_are_encoded_before_original_suffixes() {
+        let replacements = paths(&[("assets/a#b?.png", "assets/c#d?%.png")]);
+        let input = "![](<assets/a%23b%3F.png?raw=%2523#view>)\n[ref]: assets/a%23b%3F.png#part \"Title\"\n![[assets/a%23b%3F.png#view|Alias]]\n<img src='assets/a%23b%3F.png?x=%26&amp;y=2#v'>\n";
+        let expected = "![](<assets/c%23d%3F%25.png?raw=%2523#view>)\n[ref]: assets/c%23d%3F%25.png#part \"Title\"\n![[assets/c%23d%3F%25.png#view|Alias]]\n<img src='assets/c%23d%3F%25.png?x=%26&amp;y=2#v'>\n";
+        assert_eq!(rewrite_asset_references(input, &replacements), expected);
+        assert_eq!(
+            rewrite_asset_target(input, "assets/a#b?.png", "assets/c#d?%.png"),
+            expected
+        );
+    }
+
+    #[test]
+    fn encoded_filename_markers_are_distinct_from_uri_delimiters() {
+        let replacements = paths(&[
+            ("assets/a.png", "assets/base.png"),
+            ("assets/a.png#view", "assets/literal#view"),
+            ("assets/a.png?query", "assets/literal?query"),
+            ("assets/a.png%23view", "assets/percent%23view"),
+        ]);
+        let input = "![](assets/a.png#view) ![](assets/a.png%23view) ![](assets/a.png?query) ![](assets/a.png%3Fquery) ![](assets/a.png%2523view)\n";
+        let expected = "![](assets/base.png#view) ![](assets/literal%23view) ![](assets/base.png?query) ![](assets/literal%3Fquery) ![](assets/percent%2523view)\n";
+        assert_eq!(rewrite_asset_references(input, &replacements), expected);
+    }
+
+    #[test]
+    fn syntax_escaped_uri_separators_keep_original_suffix_bytes() {
+        let replacements = paths(&[("assets/a&b.png", "assets/c&d#?.png")]);
+        let input = "<img src='assets/a&amp;b.png&#35;view?x=%23'>\n<a href=\"assets/a&#38;b.png&#0000000000000000063;x=1&amp;y=2#v\">x</a>\n<img src='assets/a&amp;b.png&quest;x=1&num;view'>\n![](assets/a&b.png\\#view) ![](assets/a&b.png\\?x=%3F#v)\n";
+        let expected = "<img src='assets/c&amp;d%23%3F.png&#35;view?x=%23'>\n<a href=\"assets/c&amp;d%23%3F.png&#0000000000000000063;x=1&amp;y=2#v\">x</a>\n<img src='assets/c&amp;d%23%3F.png&quest;x=1&num;view'>\n![](assets/c&d%23%3F.png\\#view) ![](assets/c&d%23%3F.png\\?x=%3F#v)\n";
+        assert_eq!(rewrite_asset_references(input, &replacements), expected);
+    }
+
+    #[test]
+    fn uri_identity_mappings_and_raw_frontmatter_filepaths_keep_their_semantics() {
+        let identity = "---\nimage: 'assets/a#b?.png'\n---\n![](assets/a%23b%3f.png?x=%2523#v) ![[assets/a%23b%3F.png#part|Alias]]\n<img src='assets/a%23b%3f.png&#35;v?x=1&#38;y=2'>\n";
+        assert_eq!(
+            rewrite_asset_references(identity, &paths(&[("assets/a#b?.png", "assets/a#b?.png")])),
+            identity
+        );
+        let input = "---\nraw: 'assets/a#b?.png' # literal filesystem name\nencoded: \"assets/a%23b%3F.png\"\nunrelated: 'assets/a.png#view'\n---\n![](assets/a%23b%3F.png#view)\n";
+        let replacements = paths(&[
+            ("assets/a#b?.png", "assets/c#d?%.png"),
+            ("assets/a.png", "assets/base.png"),
+        ]);
+        let expected = "---\nraw: 'assets/c#d?%.png' # literal filesystem name\nencoded: \"assets/c%23d%3F%25.png\"\nunrelated: 'assets/a.png#view'\n---\n![](assets/c%23d%3F%25.png#view)\n";
+        assert_eq!(rewrite_asset_references(input, &replacements), expected);
+    }
+
+    #[test]
+    fn removal_of_suffixed_links_uses_the_file_part_in_all_reference_forms() {
+        let input = "![photo][ref] [download][ref]\n[ref]: assets/a.png#view \"Title\"\n![direct](assets/a.png?size=2) ![[assets/a.png#view|Photo]]\n<img src='assets/a.png?x=1&amp;y=2'> <a href='assets/a.png#v'>link</a>\n![](assets/a%23b.png#view)\n";
+        let replacements = paths(&[("assets/a.png", "")]);
+        let result = rewrite_asset_references(input, &replacements);
+        assert_eq!(result, rewrite_asset_target(input, "assets/a.png", ""));
+        assert_eq!(
+            result,
+            " download\n\n \n <a >link</a>\n![](assets/a%23b.png#view)\n"
+        );
+    }
+
+    #[test]
+    fn multiline_literals_and_unrelated_html_attributes_are_not_destinations() {
+        let literals = "```md\n![](assets/a.png)\n```\n    ![](assets/a.png)\n`code starts\n![](assets/a.png)\nends`\n<!-- comment\n![](assets/a.png)\n[id]: assets/a.png\n-->\n<div title=\"![example](assets/a.png)\"\n data-text='![[assets/a.png]]'>literal</div>\n<code>\n![](assets/a.png)\n</code>\n";
+        let input = format!("{literals}![](assets/a.png)\n");
+        let replacements = paths(&[("assets/a.png", "assets/b.png")]);
+        assert_eq!(
+            rewrite_asset_references(&input, &replacements),
+            format!("{literals}![](assets/b.png)\n")
+        );
+        assert_eq!(
+            rewrite_asset_target(&input, "assets/a.png", "assets/b.png"),
+            rewrite_asset_references(&input, &replacements)
+        );
+    }
+
+    #[test]
+    fn bulk_removals_keep_reference_labels_and_single_target_contract() {
+        let input = "![photo][id] [download][id]\n[id]: assets/a.png \"Title\"\n<img src='assets/a.png'> <a href='assets/a.png'>Download</a>\n![[assets/a.png|Photo]] [[assets/a.png|Alias]]\n`![literal](assets/a.png)`\n";
+        let replacements = paths(&[("assets/a.png", "")]);
+        let result = rewrite_asset_references(input, &replacements);
+        assert_eq!(result, rewrite_asset_target(input, "assets/a.png", ""));
+        assert!(result.contains(" download\n\n"));
+        assert!(result.contains("<a >Download</a>"));
+        assert!(result.contains(" Alias\n"));
+        assert!(result.contains("`![literal](assets/a.png)`"));
+    }
+
+    #[test]
+    fn large_mapping_does_not_cascade_or_substitute_path_prefixes() {
+        let mut replacements = HashMap::new();
+        let mut input = String::new();
+        let mut expected = String::new();
+        for index in 0..1024 {
+            replacements.insert(
+                format!("assets/{index}.png"),
+                format!("assets/{}.png", index + 1),
+            );
+            input.push_str(&format!(
+                "![](assets/{index}.png) ![](assets/{index}.png.extra)\n"
+            ));
+            expected.push_str(&format!(
+                "![](assets/{}.png) ![](assets/{index}.png.extra)\n",
+                index + 1
+            ));
+        }
+        assert_eq!(rewrite_asset_references(&input, &replacements), expected);
+        assert_eq!(rewrite_asset_references(&input, &HashMap::new()), input);
+    }
 
     #[test]
     fn multiline_html_attributes_remain_complete_and_literals_stay_unchanged() {

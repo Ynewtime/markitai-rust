@@ -24,6 +24,7 @@ markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 - 四种输入模式支持持久 JSON 报告。`output.report` 为 null 或省略时，目录/URL 列表默认启用，单文件/URL 默认关闭；true/false 显式覆盖。报告写入输出目录的 `.markitai/reports/`，各模式的字段和计数差异见 [reports.md](reports.md)。
 - 报告发布失败保留已完成文件及 stdout JSON 条目，并退出非零；报告不替代 stdout envelope。stdout 转换、dry run、无可恢复状态的空目录和失败/跳过的单项不生成报告；批量部分失败仍可生成报告。报告的 skip 冲突策略保留已有报告。
 - Unix 目录/URL 列表每次保存恢复状态；`--resume` 合并新发现任务、保留完成项并重试未完成项。输出归属凭证保护隐式重试，旧状态按普通冲突策略升级。首次 Ctrl-C 停止派发、同步状态并等待在途转换，退出 130；再次中断立即退出。详见 [恢复状态](state-storage.md) 与 [输出归属](output-ownership.md)。
+- `--record-history` 将本次实际处理项保存到隔离 home 下的 `serve/jobs/`，包含独立的最终文档、资产和兼容元数据；归档失败只警告，stdout/dry-run/中断不归档。开关覆盖环境和配置，详见 [历史归档](history.md)。
 - 配置优先级由核心解析；根级 `-c` 和 `--config-json` 对子命令同样生效。布尔参数支持显式否定；重复正反开关以最后一个为准，preset 应用后显式参数覆盖。
 - `config list/get/path/validate/set` 可用；list 支持 JSON/YAML/table；默认隐藏凭据。set 原子更新配置，不写入临时 `--config-json` 内容。
 - `init --yes [--local|-o path]` 创建最小配置；已有文件不覆盖。
@@ -36,9 +37,9 @@ markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 
 ## 明确的迁移缺口
 
-URL 抓取的其他策略、图片/URL 的 LLM 缓存、历史、非 Unix 断点恢复、Batch API、交互配置、订阅登录、serve、MCP、文件日志仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取的其他策略、图片/URL 的 LLM 缓存、非 Unix 断点恢复、Batch API、交互配置、订阅登录、serve、MCP、文件日志仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
 
-持久报告和 Unix 批量恢复已实现；历史导出、单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
+持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 
 具体文件格式支持取决于核心当前实现，注册参考扩展名不意味着全部可用。性能与质量对比未完成前，不承诺生产替代、完整旧版兼容或具体加速比。
 

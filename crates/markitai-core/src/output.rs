@@ -8,6 +8,15 @@ use std::sync::Mutex;
 
 static OUTPUT_LOCK: Mutex<()> = Mutex::new(());
 
+/// Relocate complete asset destinations when archiving Markdown and its assets.
+#[doc(hidden)]
+pub fn rewrite_asset_references(
+    markdown: &str,
+    replacements: &std::collections::HashMap<String, String>,
+) -> String {
+    crate::output_profiles::rewrite_asset_references(markdown, replacements)
+}
+
 pub fn check_path(path: &Path, allow_symlinks: bool) -> Result<()> {
     if allow_symlinks {
         return Ok(());

@@ -35,6 +35,9 @@ pub(crate) struct RunItem {
     pub(crate) source_file: Option<String>,
     pub(crate) status: ItemStatus,
     pub(crate) output: Option<PathBuf>,
+    // Private archive projection; never serialized into stdout or reports.
+    pub(crate) history_output: Option<PathBuf>,
+    pub(crate) history_eligible: bool,
     pub(crate) error: Option<String>,
     pub(crate) warnings: Vec<String>,
     pub(crate) skip_reason: Option<String>,
@@ -1216,6 +1219,8 @@ mod tests {
             source_file: None,
             status: ItemStatus::Completed,
             output: Some(PathBuf::from("out/final.md")),
+            history_output: None,
+            history_eligible: true,
             error: None,
             warnings: vec!["not in reports".into()],
             skip_reason: None,

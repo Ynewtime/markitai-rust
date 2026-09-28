@@ -16,12 +16,13 @@
 - [Reports](reports.md): four CLI report formats, publication and validation limits.
 - [Output ownership](output-ownership.md): member leases, prepared receipts and safe retries.
 - [Recovery storage](state-storage.md): checkpoint codec, journal, replay and durability boundaries.
+- [History](history.md): optional independent output/asset archives and metadata.
 - [CLI](cli.md) and [bindings](bindings.md): current user interfaces.
 - [Validation](validation/README.md): differential checks and measured evidence.
 - [Performance plan](performance-plan.md): profile tradeoffs, binding costs and long-lived memory checks.
 - Decisions: [native core](decisions/0001-native-core.md),
   [document LLM cache](decisions/0002-persistent-llm-cache.md),
   [static-page fetch cache](decisions/0003-persistent-fetch-cache.md), and
-  [run reports, recovery and planned history](decisions/0004-run-persistence.md).
+  [run reports, recovery and history](decisions/0004-run-persistence.md).
 
 Documentation describes verified behavior separately from planned behavior.

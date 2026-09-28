@@ -274,7 +274,10 @@ must cover competing hashes/overlapping roots, member collisions, crash windows,
 changed files and independent-output concurrency. No portable pre-rename check
 eliminates a hostile noncooperating writer's race; keep that limitation explicit.
 
-## Optional history export (planned)
+## Optional history export
+
+The native implementation follows this design. See [history](../history.md) for
+the current interfaces, resource limits and remaining validation boundaries.
 
 Publish one job under `config::home()/serve/jobs/<12-hex-uuid-prefix>/`, honoring
 `MARKITAI_HOME` and independent of `cache.global_dir`. Never use the reference's

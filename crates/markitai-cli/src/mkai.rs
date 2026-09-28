@@ -1,4 +1,5 @@
 mod app;
+mod history;
 mod output_claims;
 mod report;
 mod report_store;
