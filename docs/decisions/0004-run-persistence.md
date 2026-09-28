@@ -1,14 +1,13 @@
 # Run reports, resume state and history
 
-Status: **reports and recovery storage implemented; CLI resume and
-history pending**. The CLI publishes
-all four report projections, including mixed file/URL directories. Source-level
-acceptance tests and a four-success-case clean-release differential audit pass
-at `0ab59a0`; rebuilt host packages also pass their scoped checks. See
-[validation](../validation/reports-round7.md) and [reports](../reports.md) for
-current runtime behavior and exact validation limits. The CLI still rejects
-`--resume` and enabled history. Structural configuration support does not imply
-runtime support for those remaining features.
+Status: **reports, recovery storage and Unix CLI scheduling implemented;
+history pending**. The CLI publishes all four report projections and connects
+native state to directory/URL-list `--resume`. Public binding requests remain
+unchanged. The original clean report and storage validation records are historical
+baselines; new scheduling and ownership gate status belongs in the
+[control center](../CONTROL.md). See [recovery](../state-storage.md) and
+[output ownership](../output-ownership.md) for the implemented guarantees and
+remaining crash/platform boundaries. Enabled history is still rejected.
 
 This design follows a read-only audit of reference revision
 `ba374322f884b0e720b45466cc1196f4574a3da5`, against native baseline `658cf00`.
@@ -30,8 +29,8 @@ The implemented report model retains raw source identity, relative file key, raw
 URL custom name, source list, actual output, status, start/end time, duration,
 image/screenshot counts, usage, independent fetch/LLM cache hits, warnings and
 skip reason. Workers return typed terminal records; the coordinator serializes
-the report once. Recovery will additionally retain claimed base targets and
-persist claim/start/terminal events before allowing dependent work.
+the report once. Recovery additionally retains claimed base targets and
+persists claim/start/terminal events before allowing dependent work.
 
 Keep persistence in the CLI initially. Public `ConvertOptions`, conversion JSON
 and Node/Python/Go calls must not gain report/history side effects. This work does
@@ -43,17 +42,17 @@ workspace. History uses the compatible job export format without requiring them.
 | Control | Behavior | Status |
 |---|---|---|
 | `output.report = null` | Off for one file/URL; on for directory/URL-list batches | Implemented |
-| `output.report = true/false` | Explicit report selection; future batch state remains independent | Reports implemented; state planned |
-| `--resume` | Load and merge directory/URL-list state; unavailable/corrupt state starts fresh with a diagnostic | Planned; request rejected |
+| `output.report = true/false` | Explicit report selection; batch state remains independent | Implemented on Unix |
+| `--resume` | Load and merge directory/URL-list state; unavailable/corrupt state starts fresh with a diagnostic | Implemented on Unix; unsupported for single-item and non-Unix resume |
 | `--record-history` / `--no-record-history` | Override environment/configuration; preserve paired-flag precedence | Enabled history rejected; disabling supported |
 | `MARKITAI_RECORD_HISTORY` | Trimmed nonempty value overrides config; `1,true,yes,on` enable, other nonempty values disable | Precedence implemented; enabled history rejected |
 | `history.record` | Default false; applies without a CLI/environment override | Enabled history rejected |
 | Stdout conversion | No single-item report side effects | Implemented; history remains unsupported |
 | Dry run / empty discovery | No report; no recovery/history files are currently written | Implemented |
-| Conversion failures | Exit 1 for a failed single item, 10 for any failed batch, including an all-failed batch; otherwise 0 | Implemented |
+| Conversion failures | Exit 1 for a failed single item, 10 for ordinary batch conversion failures; fatal state errors exit 1, signals 130/143; otherwise 0 | Implemented |
 | History write failure | Warning; preserve the conversion exit status | Planned |
 | Report write failure | Preserve completed output and JSON items; surface error, exit 1 or retain batch failure 10 | Implemented |
-| State write failure | Surface normal write failures; abort-time save failure must not mask the original interruption/error | Planned |
+| State write failure | Stop dispatch and preserve observed outcomes; do not publish a partial success report; retain the original interruption exit | Implemented on Unix |
 
 The planned history stage will publish after normal success or partial failure
 using only this invocation's outcomes. The reference interruption path flushes
@@ -67,7 +66,7 @@ Sources: `cli/main.py:950,1429`, `runs/report.py:209`,
 ## Identity and physical paths
 
 Reports belong to the output directory. The state paths below are implemented
-by the internal store but are not yet created by CLI dispatch:
+by the store and are created by Unix batch dispatch:
 
 ```text
 <output>/.markitai/reports/markitai.<hash>.report.json
@@ -160,7 +159,7 @@ skip reasons, so a resumed report must not fabricate those values.
 Sources: `runs/report.py:19,31,58,82,164`, `json_order.py:161,242,268,329`,
 `batch.py:338,1288,1330,1635`, `cli/processors/url.py:1193,1370`.
 
-## Recovery journal and planned scheduler
+## Recovery journal and scheduler
 
 Base state contains `version,options,documents,urls`. A file entry always has
 `status`; a URL entry additionally has `source_file`. Completed entries retain
@@ -188,7 +187,8 @@ in-progress entries become failed and are eligible for retry.
 4. Reserve completed output names before new claims. Retry a failed/interrupted
    item at its recorded, validated owned target without `.v2`; absent a target,
    use normal conflict policy. Another item in the run always gets a distinct
-   name under rename, overwrite and skip alike. A merely pending entry with a
+   name when producing a new output under every policy. Several items may skip
+   the same preexisting file without claiming new names. A merely pending entry with a
    target does not acquire the failed-item overwrite privilege.
 5. Publish the full merged base before any newly discovered work. Persist claims
    before expensive conversion, then append dirty status records. Compact by
@@ -230,32 +230,26 @@ untagged events. The Python reader ignores added keys but does not implement thi
 fence, so native crash guarantees do not apply to reopening these files in Python.
 No state filename/discovery change is intended.
 
-The storage implementation is an unreachable-from-CLI codec/store with
-authored legacy fixtures, bounded reads, scope checks, an OS-backed process lock
-and deterministic crash/failure tests around claim sync, base rename and journal
-cleanup. Keep the lock inode stable rather than deleting a held lock file. A
-per-state lock does not protect different task hashes or overlapping output
-roots; output claims require a separately tested ownership policy before CLI
-integration. Stored paths and six-hex hashes alone cannot prove an existing file
-still belongs to a prior run. Preserve corrupt state before fresh replacement,
-and distinguish foreign-scope state from ordinary corruption.
-
-Only after storage is validated should the scheduler add durable claim
-acknowledgements, periodic flushes, observed versus recovered outcomes and
-controlled interruption. Scoped threads do not themselves provide cancellation;
-blocking core work needs an explicit drain/cancellation policy. Keep `--resume`
-guarded until process-level retry, interruption and ownership gates pass.
+The storage implementation has authored legacy fixtures, bounded reads, scope
+checks, an OS-backed process lock and deterministic crash/failure tests around
+claim sync, base rename and journal cleanup. It keeps the lock inode stable.
+The Unix scheduler now adds durable admissions, periodic flushes, recovered versus
+observed outcomes, member ownership and explicit signal handling. A first signal
+drains active blocking core work and suppresses report publication; it cannot
+cancel an already submitted provider request. Separate member leases cover
+cooperating writers across different hashes and overlapping roots. Corrupt state
+is preserved before replacement, while foreign scope remains a hard error.
 
 Sources: `batch.py:51,193,208,220,314,406,444,1048,1137,1214,1263`,
 `cli/processors/batch.py:118,147,1005,1140,1210,1428`,
 `cli/processors/url.py:1186,1257,1270`, `security.py:130,192`,
 `utils/output.py:125`, `config.py:530`, `constants.py:18`.
 
-### Output ownership before scheduler integration (planned)
+### Output ownership in the scheduler
 
 Preserve independent CLI processes writing unrelated files in the same output
 directory. A whole-parent lock held across conversion or network/model requests
-would unnecessarily make those invocations fail as busy. Plan ownership around
+would unnecessarily make those invocations fail as busy. Ownership follows
 the actual Markdown member paths instead, using stable OS locks and deterministic
 all-or-release acquisition. The parent identity must be physical and respect the
 original symlink policy; case/Unicode aliases need filesystem-level validation.
@@ -268,8 +262,8 @@ bytes. Merely reading a matching digest/path from edited state is insufficient.
 Persist prepared-write evidence before atomic publication so a kill between
 rename and receipt finalization can be recovered. A prepared receipt can remain
 the evidence when its staged file identity matches the published file, avoiding
-a mandatory second receipt write just to rename its phase. These protocols still
-need bounded implementation and process tests; they are not current guarantees.
+a mandatory second receipt write just to rename its phase. The bounded protocol
+and its limits are described in [output ownership](../output-ownership.md).
 
 Observe publication inside the core write path: the existing model failure path
 can save base Markdown and then return an error, so recording only successful
@@ -324,7 +318,7 @@ Compatibility does not make these reference limitations new guarantees:
   but validate stored run scope and output ownership; do not infer ownership from
   a hash match. Keep completed-output reuse behavior documented.
 - Directory resume may append new-key events without first saving merged keys,
-  which replay then ignores after a hard kill. The native coordinator will save
+  which replay then ignores after a hard kill. The native coordinator saves
   merged keys first, matching the safer existing URL-list path.
 - Reference locks are process-local and JSONL is not explicitly bounded. Planned
   native ownership/limits need their own tests, separately from schema parity.
@@ -343,7 +337,7 @@ Compatibility does not make these reference limitations new guarantees:
   rather than inventing recovered totals. URL-list grouping/hash quirks remain
   compatibility targets, not reasons to redesign all serialized output.
 
-Reports and planned recovery/history metadata can contain plaintext URLs, custom
+Reports, recovery and planned history metadata can contain plaintext URLs, custom
 names, local paths and errors; history additionally copies document contents and
 assets. Reports do not serialize document bodies or complete provider settings.
 Hash filenames provide no confidentiality. Keep global history opt-in; test only
@@ -368,11 +362,10 @@ output containment/symlink policy before every publication.
    release binary; host packages also passed their scoped checks. See the
    [release evidence](../validation/reports-round7.md). This does not establish
    differential coverage of all failure, mixed-input and model-usage branches;
-   resume/history guards remain in place.
-3. **Recovery storage — scoped checks passed; scheduling pending:** the internal
+   this historical run predates resume integration.
+3. **Recovery storage and scheduling — implemented:** the internal
    codec/store passes 57 shared tests and 13 authored reference snapshot/replay
-   pairs; see [storage validation](../validation/state-round8.md). Remaining process
-   gates must test
+   pairs; see [storage validation](../validation/state-round8.md). Real-process acceptance tests now cover
    failure-only retries, already-completed runs, mixed file/URL collisions,
    custom-name identities, legacy adoption, changed cwd, corrupt/oversized and
    truncated journals, claim ownership, interruption, merge-before-work and
@@ -386,9 +379,9 @@ Current CLI integration uses `app.rs`'s `Task`, `parse_urls`,
 `reserve_batch_names`, `convert_item`, `outcome` and `finish_report`. `report.rs`
 owns the typed terminal records and ordered projections; `report_store.rs` owns
 hashing and atomic report publication. Failure timing and original usage survive
-until projection. Future recovery must extend the existing reservation path
-with durable ownership and lifecycle events rather than inventing a second
-filename allocator. Its stable checkpoint replacement has a different lifecycle
+until projection. `batch_run.rs` extends the existing naming plan with physical
+member leases, durable dispatch and recovery; it applies independent file/URL
+concurrency caps with two queues. Its stable checkpoint replacement has a different lifecycle
 from versioned report publication.
 
 Reference test anchors, relative to `packages/markitai/tests/unit/`:

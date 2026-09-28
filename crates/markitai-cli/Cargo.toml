@@ -26,6 +26,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 md-5 = "0.11"
 uuid = { version = "1", features = ["v4"] }
 indexmap = { version = "2", features = ["serde"] }
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

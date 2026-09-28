@@ -135,4 +135,11 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   26 harness tests and 13 matching authored legacy state/replay pairs at clean
   `0b38e00`; [build](state-round8-build.json) and
   [differential](state-round8-r2.json) records retain exact identities.
-  The store remains internal; CLI resume, scheduling and history are pending.
+  That historical store-only checkpoint predates CLI resume integration.
+
+## Round-nine recovery scheduling
+
+- [Scheduling and publication validation](recovery-round9.md): 515 Rust executions /
+  395 distinct tests, 26 harness tests, 19 real CLI recovery cases, private
+  member/receipt protocols and deterministic shared-asset process races. See the
+  record for Unix scope, signal limits and remaining crash boundaries.

@@ -729,6 +729,480 @@ pub(crate) fn render(
     serde_json::to_vec_pretty(&object(fields)).map_err(|e| e.to_string())
 }
 
+// Recovered state is a report projection, not another completed conversion.
+// Keeping the variants separate prevents absent measurements from becoming a
+// fabricated RunItem with this run's timestamps or elapsed time.
+enum ResumedEntry<'a> {
+    Observed(&'a RunItem),
+    Recovered(&'a crate::run_state::Entry),
+}
+
+struct ResumedView<'a> {
+    key: &'a str,
+    kind: ItemKind,
+    entry: ResumedEntry<'a>,
+}
+
+impl ResumedView<'_> {
+    fn status(&self, mode: RunMode) -> &'static str {
+        match self.entry {
+            ResumedEntry::Observed(item) => status(item, mode),
+            ResumedEntry::Recovered(entry) => match entry.status {
+                crate::run_state::Status::Pending => "pending",
+                crate::run_state::Status::InProgress => "in_progress",
+                crate::run_state::Status::Completed => "completed",
+                crate::run_state::Status::Failed => "failed",
+            },
+        }
+    }
+
+    fn source(&self, mode: RunMode) -> &str {
+        if mode == RunMode::UrlList {
+            return "unknown.urls";
+        }
+        match self.entry {
+            ResumedEntry::Observed(item) => item.source_file.as_deref(),
+            ResumedEntry::Recovered(entry) => entry.source_file.as_deref(),
+        }
+        .unwrap_or("unknown.urls")
+    }
+
+    fn elapsed(&self) -> Result<Option<f64>, String> {
+        match self.entry {
+            ResumedEntry::Observed(item) => Ok(Some(item.elapsed_s)),
+            ResumedEntry::Recovered(entry) => match entry.observations.get("duration") {
+                None | Some(Value::Null) => Ok(None),
+                Some(measurement) => {
+                    let seconds = measurement
+                        .as_f64()
+                        .filter(|number| number.is_finite() && *number >= 0.0)
+                        .ok_or("Recovered report duration is invalid")?;
+                    Ok(Some(seconds))
+                }
+            },
+        }
+    }
+
+    fn cache_hit(&self) -> bool {
+        match self.entry {
+            ResumedEntry::Observed(item) => item.llm_cache_hit,
+            ResumedEntry::Recovered(entry) => entry
+                .observations
+                .get("cache_hit")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
+    }
+}
+
+fn resumed_views<'a>(
+    mode: RunMode,
+    items: &'a [RunItem],
+    state: &'a crate::run_state::Snapshot,
+    active_url_keys: &'a [String],
+) -> Result<Vec<ResumedView<'a>>, String> {
+    let mut observed = BTreeMap::new();
+    for item in items {
+        if mode == RunMode::UrlList && item.kind != ItemKind::Url {
+            return Err("Report item kind does not match run mode".into());
+        }
+        if observed
+            .insert((item.kind == ItemKind::Url, item.report_key.as_str()), item)
+            .is_some()
+        {
+            return Err("Duplicate report item identity".into());
+        }
+        if !item.elapsed_s.is_finite() || item.elapsed_s < 0.0 || !item.usage.cost_usd.is_finite() {
+            return Err("Report item contains an invalid numeric measurement".into());
+        }
+    }
+    let mut views = Vec::new();
+    if mode == RunMode::UrlList {
+        let mut seen = BTreeSet::new();
+        for key in active_url_keys {
+            if !seen.insert(key.as_str()) {
+                return Err("Duplicate active URL report identity".into());
+            }
+            let entry = if let Some(item) = observed.remove(&(true, key.as_str())) {
+                ResumedEntry::Observed(item)
+            } else {
+                ResumedEntry::Recovered(
+                    state
+                        .urls
+                        .get(key)
+                        .ok_or("Active URL is absent from recovery state and observations")?,
+                )
+            };
+            views.push(ResumedView {
+                key,
+                kind: ItemKind::Url,
+                entry,
+            });
+        }
+    } else {
+        for (key, entry) in &state.documents {
+            let entry = observed
+                .remove(&(false, key.as_str()))
+                .map(ResumedEntry::Observed)
+                .unwrap_or(ResumedEntry::Recovered(entry));
+            views.push(ResumedView {
+                key,
+                kind: ItemKind::File,
+                entry,
+            });
+        }
+        for (key, entry) in &state.urls {
+            let entry = observed
+                .remove(&(true, key.as_str()))
+                .map(ResumedEntry::Observed)
+                .unwrap_or(ResumedEntry::Recovered(entry));
+            views.push(ResumedView {
+                key,
+                kind: ItemKind::Url,
+                entry,
+            });
+        }
+        let mut newly_observed: Vec<_> = observed.into_values().collect();
+        newly_observed.sort_by_key(|item| item.index);
+        views.extend(newly_observed.into_iter().map(|item| ResumedView {
+            key: &item.report_key,
+            kind: item.kind,
+            entry: ResumedEntry::Observed(item),
+        }));
+    }
+    Ok(views)
+}
+
+fn saved_value(entry: &crate::run_state::Entry, key: &str, default: Value) -> Ordered {
+    value(entry.observations.get(key).cloned().unwrap_or(default))
+}
+
+type SavedUsage<'a> = (Option<&'a Map<String, Value>>, f64);
+
+fn saved_usage(entry: &crate::run_state::Entry) -> Result<SavedUsage<'_>, String> {
+    let records = entry
+        .observations
+        .get("llm_usage")
+        .map(|value| {
+            value
+                .as_object()
+                .ok_or("Recovered model usage must be an object")
+        })
+        .transpose()?;
+    for usage in records.into_iter().flat_map(Map::values) {
+        let usage = usage
+            .as_object()
+            .ok_or("Recovered model measurement must be an object")?;
+        for key in [
+            "requests",
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+        ] {
+            if usage.get(key).is_some_and(|value| value.as_u64().is_none()) {
+                return Err("Recovered usage counter is invalid".into());
+            }
+        }
+        if usage
+            .get("cost_usd")
+            .is_some_and(|value| value.as_f64().is_none_or(|number| !number.is_finite()))
+        {
+            return Err("Recovered model cost is invalid".into());
+        }
+    }
+    let cost = entry
+        .observations
+        .get("cost_usd")
+        .map(|value| {
+            value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or("Recovered report cost is invalid")
+        })
+        .transpose()?
+        .unwrap_or(0.0);
+    Ok((records, cost))
+}
+
+fn resumed_entry(view: &ResumedView<'_>, mode: RunMode) -> Result<Ordered, String> {
+    let entry = match view.entry {
+        ResumedEntry::Observed(item) => {
+            return Ok(if mode == RunMode::UrlList {
+                list_entry(item)
+            } else {
+                directory_entry(item)
+            });
+        }
+        ResumedEntry::Recovered(entry) => entry,
+    };
+    if mode == RunMode::UrlList {
+        if view.status(mode) != "completed" {
+            return Ok(object([
+                ("status", value(view.status(mode))),
+                ("error", option_string(entry.error.as_deref())),
+            ]));
+        }
+        return Ok(object([
+            ("status", value("completed")),
+            ("output", path_value(entry.output.as_deref())),
+            ("error", value(Value::Null)),
+            (
+                "fetch_strategy",
+                saved_value(entry, "fetch_strategy", Value::Null),
+            ),
+            ("images", saved_value(entry, "images", json!(0))),
+            ("screenshots", saved_value(entry, "screenshots", json!(0))),
+        ]));
+    }
+    let mut fields = vec![
+        ("status", value(view.status(mode))),
+        ("cache_hit", saved_value(entry, "cache_hit", json!(false))),
+        ("output", path_value(entry.output.as_deref())),
+        ("error", option_string(entry.error.as_deref())),
+    ];
+    if view.kind == ItemKind::Url {
+        fields.push((
+            "fetch_strategy",
+            saved_value(entry, "fetch_strategy", Value::Null),
+        ));
+    }
+    let (usage, cost) = saved_usage(entry)?;
+    fields.extend([
+        ("started_at", saved_value(entry, "started_at", Value::Null)),
+        (
+            "completed_at",
+            saved_value(entry, "completed_at", Value::Null),
+        ),
+        (
+            "duration",
+            view.elapsed()?
+                .map(duration)
+                .unwrap_or_else(|| value(Value::Null)),
+        ),
+        ("images", saved_value(entry, "images", json!(0))),
+        ("screenshots", saved_value(entry, "screenshots", json!(0))),
+        ("cost_usd", value(cost)),
+        ("llm_usage", usage.map(models).unwrap_or_else(|| object([]))),
+    ]);
+    Ok(object(fields))
+}
+
+fn resumed_usage(views: &[ResumedView<'_>], mode: RunMode) -> Result<Ordered, String> {
+    let observed: Vec<_> = views
+        .iter()
+        .filter_map(|view| match view.entry {
+            ResumedEntry::Observed(item) => Some(item),
+            ResumedEntry::Recovered(_) => None,
+        })
+        .collect();
+    let (mut combined, mut cost) = aggregate(&observed, mode)?;
+    for view in views {
+        if mode == RunMode::UrlList && view.status(mode) != "completed" {
+            continue;
+        }
+        let ResumedEntry::Recovered(entry) = view.entry else {
+            continue;
+        };
+        let (records, saved_cost) = saved_usage(entry)?;
+        cost += saved_cost;
+        for (name, usage) in records.into_iter().flatten() {
+            let merged = combined.entry(name.clone()).or_insert_with(|| {
+                json!({
+                    "requests": 0, "input_tokens": 0, "output_tokens": 0,
+                    "cost_usd": 0.0, "cached_input_tokens": 0,
+                })
+            });
+            for key in [
+                "requests",
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+            ] {
+                merged[key] = json!(
+                    counter(merged, key)
+                        .checked_add(counter(usage, key))
+                        .ok_or("Report usage counter overflow")?
+                );
+            }
+            let model_cost = merged["cost_usd"].as_f64().unwrap_or(0.0)
+                + usage["cost_usd"].as_f64().unwrap_or(0.0);
+            if !model_cost.is_finite() {
+                return Err("Report model cost total is not finite".into());
+            }
+            merged["cost_usd"] = json!(model_cost);
+        }
+    }
+    if !cost.is_finite() {
+        return Err("Report usage total is not finite".into());
+    }
+    usage_block(&combined, cost)
+}
+
+fn resumed_summary(
+    mode: RunMode,
+    views: &[ResumedView<'_>],
+    finished: &RunFinished,
+) -> Result<Ordered, String> {
+    let count = |kind, wanted: Option<&str>| {
+        views
+            .iter()
+            .filter(|view| {
+                view.kind == kind && wanted.is_none_or(|wanted| view.status(mode) == wanted)
+            })
+            .count()
+    };
+    let mut fields = vec![
+        ("total_documents", value(count(ItemKind::File, None))),
+        (
+            "completed_documents",
+            value(count(ItemKind::File, Some("completed"))),
+        ),
+        (
+            "failed_documents",
+            value(count(ItemKind::File, Some("failed"))),
+        ),
+    ];
+    if mode == RunMode::Directory {
+        fields.push((
+            "pending_documents",
+            value(count(ItemKind::File, Some("pending")) + count(ItemKind::File, Some("failed"))),
+        ));
+    }
+    fields.extend([
+        ("total_urls", value(count(ItemKind::Url, None))),
+        (
+            "completed_urls",
+            value(count(ItemKind::Url, Some("completed"))),
+        ),
+        ("failed_urls", value(count(ItemKind::Url, Some("failed")))),
+    ]);
+    if mode == RunMode::Directory {
+        fields.extend([
+            (
+                "pending_urls",
+                value(count(ItemKind::Url, Some("pending")) + count(ItemKind::Url, Some("failed"))),
+            ),
+            (
+                "url_cache_hits",
+                value(
+                    views
+                        .iter()
+                        .filter(|view| {
+                            view.kind == ItemKind::Url
+                                && view.status(mode) == "completed"
+                                && view.cache_hit()
+                        })
+                        .count(),
+                ),
+            ),
+            (
+                "url_sources",
+                value(
+                    views
+                        .iter()
+                        .filter(|view| view.kind == ItemKind::Url)
+                        .map(|view| view.source(mode))
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                ),
+            ),
+        ]);
+    }
+    fields.push(("duration", duration(finished.duration_s)));
+    if mode == RunMode::Directory {
+        let elapsed = views.iter().try_fold(0.0, |sum, view| {
+            view.elapsed().map(|seconds| sum + seconds.unwrap_or(0.0))
+        })?;
+        if !elapsed.is_finite() {
+            return Err("Report processing time is invalid".into());
+        }
+        fields.push(("processing_time", duration(elapsed)));
+    }
+    Ok(object(fields))
+}
+
+pub(crate) fn render_resumed(
+    plan: &ReportPlan,
+    items: &[RunItem],
+    state: &crate::run_state::Snapshot,
+    active_url_keys: &[String],
+    finished: &RunFinished,
+) -> Result<Vec<u8>, String> {
+    let mode = plan.run.mode;
+    if !matches!(mode, RunMode::Directory | RunMode::UrlList) {
+        return Err("Recovered reports require a batch run".into());
+    }
+    if !finished.duration_s.is_finite() || finished.duration_s < 0.0 {
+        return Err("Report run duration is invalid".into());
+    }
+    let views = resumed_views(mode, items, state, active_url_keys)?;
+    let mut fields = vec![
+        ("version", value("1.0")),
+        ("generated_at", value(finished.updated_at.clone())),
+    ];
+    if mode == RunMode::Directory {
+        fields.extend([
+            ("started_at", value(plan.run.started_at.clone())),
+            ("updated_at", value(finished.updated_at.clone())),
+        ]);
+    }
+    fields.push(("log_file", path_value(plan.run.log_file.as_deref())));
+    if let Some(options) = options(plan, &[]) {
+        fields.push(("options", options));
+    }
+    fields.push(("summary", resumed_summary(mode, &views, finished)?));
+    fields.push(("llm_usage", resumed_usage(&views, mode)?));
+    if mode == RunMode::Directory {
+        let mut documents = views
+            .iter()
+            .filter(|view| view.kind == ItemKind::File)
+            .map(|view| Ok((view.key.to_owned(), resumed_entry(view, mode)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        documents.sort_by(|left, right| left.0.cmp(&right.0));
+        fields.push(("documents", Ordered::Object(documents)));
+    }
+    let mut groups = BTreeMap::<&str, Vec<&ResumedView<'_>>>::new();
+    for view in views.iter().filter(|view| view.kind == ItemKind::Url) {
+        groups.entry(view.source(mode)).or_default().push(view);
+    }
+    let groups = groups
+        .into_iter()
+        .map(|(source, views)| {
+            let urls = views
+                .iter()
+                .map(|view| Ok((view.key.to_owned(), resumed_entry(view, mode)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((
+                source.to_owned(),
+                object([
+                    ("total", value(views.len())),
+                    (
+                        "completed",
+                        value(
+                            views
+                                .iter()
+                                .filter(|view| view.status(mode) == "completed")
+                                .count(),
+                        ),
+                    ),
+                    (
+                        "failed",
+                        value(
+                            views
+                                .iter()
+                                .filter(|view| view.status(mode) == "failed")
+                                .count(),
+                        ),
+                    ),
+                    ("urls", Ordered::Object(urls)),
+                ]),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    fields.push(("url_sources", Ordered::Object(groups)));
+    serde_json::to_vec_pretty(&object(fields)).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,5 +1551,219 @@ mod tests {
                 "requests":3,"input_tokens":12,"output_tokens":7,"cost_usd":0.123456789,
             })
         );
+    }
+
+    fn recovered(status: crate::run_state::Status, observations: Value) -> crate::run_state::Entry {
+        crate::run_state::Entry {
+            status,
+            observations: observations.as_object().unwrap().clone(),
+            ..Default::default()
+        }
+    }
+
+    fn resumed_plan(root: &Path, mode: RunMode) -> ReportPlan {
+        plan(run(root, mode, json!({})), None, "rename", false)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn decode_resumed(
+        plan: &ReportPlan,
+        items: &[RunItem],
+        state: &crate::run_state::Snapshot,
+        active: &[String],
+    ) -> (String, Value) {
+        let bytes = render_resumed(plan, items, state, active, &finish()).unwrap();
+        (
+            String::from_utf8(bytes.clone()).unwrap(),
+            serde_json::from_slice(&bytes).unwrap(),
+        )
+    }
+
+    #[test]
+    fn completed_only_resume_preserves_rows_without_inventing_measurements() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = resumed_plan(root.path(), RunMode::Directory);
+        let mut state = crate::run_state::Snapshot::default();
+        let mut row = recovered(crate::run_state::Status::Completed, json!({}));
+        row.output = Some(root.path().join("previously-written.md"));
+        state.documents.insert("removed-from-input.txt".into(), row);
+        let (_, body) = decode_resumed(&plan, &[], &state, &[]);
+        let row = &body["documents"]["removed-from-input.txt"];
+        assert_eq!(row["status"], "completed");
+        assert_eq!(
+            row["output"],
+            root.path()
+                .join("previously-written.md")
+                .to_string_lossy()
+                .as_ref()
+        );
+        for key in ["started_at", "completed_at", "duration"] {
+            assert!(row.get(key).unwrap().is_null());
+        }
+        assert_eq!(row["images"], 0);
+        assert_eq!(row["screenshots"], 0);
+        assert_eq!(row["cache_hit"], false);
+        assert_eq!(row["llm_usage"], json!({}));
+        assert_eq!(body["summary"]["completed_documents"], 1);
+        assert_eq!(body["summary"]["failed_documents"], 0);
+        assert_eq!(body["summary"]["pending_documents"], 0);
+        assert_eq!(body["llm_usage"]["requests"], 0);
+        assert_eq!(body["llm_usage"]["cost_usd"], 0.0);
+    }
+
+    #[test]
+    fn resumed_directory_counts_real_pending_failed_and_in_progress_states() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = resumed_plan(root.path(), RunMode::Directory);
+        let mut state = crate::run_state::Snapshot::default();
+        for (key, status) in [
+            ("pending.txt", crate::run_state::Status::Pending),
+            ("failed.txt", crate::run_state::Status::Failed),
+            ("running.txt", crate::run_state::Status::InProgress),
+        ] {
+            state
+                .documents
+                .insert(key.into(), recovered(status, json!({})));
+        }
+        let (_, body) = decode_resumed(&plan, &[], &state, &[]);
+        assert_eq!(body["documents"]["pending.txt"]["status"], "pending");
+        assert_eq!(body["documents"]["running.txt"]["status"], "in_progress");
+        assert_eq!(body["summary"]["total_documents"], 3);
+        assert_eq!(body["summary"]["completed_documents"], 0);
+        assert_eq!(body["summary"]["failed_documents"], 1);
+        assert_eq!(body["summary"]["pending_documents"], 2);
+    }
+
+    #[test]
+    fn observed_identity_replaces_old_usage_instead_of_adding_it_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = resumed_plan(root.path(), RunMode::Directory);
+        let mut state = crate::run_state::Snapshot::default();
+        state.documents.insert("retry.txt".into(), recovered(crate::run_state::Status::Failed,
+            json!({"duration":100.0,"cost_usd":99.0,"images":99,"llm_usage":{"old":{"requests":99}}})));
+        state.documents.insert("retained.txt".into(), recovered(crate::run_state::Status::Completed,
+            json!({"duration":2.0,"images":4,"cost_usd":0.25,"llm_usage":{"m":{"requests":1,"input_tokens":7,"output_tokens":3,"cost_usd":0.25}}})));
+        let mut observed = item(0, ItemKind::File, "retry.txt");
+        observed.usage.cost_usd = 0.5;
+        observed.usage.by_model =
+            json!({"m":{"requests":2,"input_tokens":11,"output_tokens":5,"cost_usd":0.5}})
+                .as_object()
+                .unwrap()
+                .clone();
+        let (_, body) = decode_resumed(&plan, &[observed], &state, &[]);
+        assert_eq!(body["documents"]["retry.txt"]["status"], "completed");
+        assert_eq!(body["documents"]["retry.txt"]["images"], 2);
+        assert_eq!(body["documents"]["retry.txt"]["duration"], "1.2s");
+        assert_eq!(body["documents"]["retained.txt"]["duration"], "2.0s");
+        assert_eq!(body["summary"]["processing_time"], "3.2s");
+        assert_eq!(body["llm_usage"]["cost_usd"], 0.75);
+        assert_eq!(body["llm_usage"]["requests"], 3);
+        assert_eq!(body["llm_usage"]["input_tokens"], 18);
+        assert!(body["llm_usage"]["models"].get("old").is_none());
+    }
+
+    #[test]
+    fn resumed_url_list_keeps_only_current_raw_keys_in_requested_order() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = resumed_plan(root.path(), RunMode::UrlList);
+        let first = "https://example.test/shared name";
+        let second = "https://example.test/shared name.md";
+        let removed = "https://example.test/removed";
+        let mut state = crate::run_state::Snapshot::default();
+        state.urls.insert(
+            second.into(),
+            recovered(crate::run_state::Status::Pending, json!({})),
+        );
+        state.urls.insert(first.into(), recovered(crate::run_state::Status::Completed,
+            json!({"fetch_strategy":"static","cost_usd":0.125,"llm_usage":{"saved":{"requests":1}}})));
+        state.urls.insert(
+            removed.into(),
+            recovered(
+                crate::run_state::Status::Completed,
+                json!({"cost_usd":100.0,"llm_usage":{"removed":{"requests":100}}}),
+            ),
+        );
+        let active = vec![first.into(), second.into()];
+        let mut observed = item(0, ItemKind::Url, second);
+        observed.status = ItemStatus::Failed;
+        observed.error = Some("current failure".into());
+        let (text, body) = decode_resumed(&plan, &[observed], &state, &active);
+        let urls = &body["url_sources"]["unknown.urls"]["urls"];
+        assert_eq!(urls[first]["status"], "completed");
+        assert_eq!(urls[first]["images"], 0);
+        assert_eq!(urls[first]["screenshots"], 0);
+        assert_eq!(
+            urls[second],
+            json!({"status":"failed","error":"current failure"})
+        );
+        assert!(urls.get(removed).is_none());
+        assert!(
+            text.find(&format!("\"{first}\"")).unwrap()
+                < text.find(&format!("\"{second}\"")).unwrap()
+        );
+        assert_eq!(body["summary"]["total_urls"], 2);
+        assert_eq!(body["summary"]["completed_urls"], 1);
+        assert_eq!(body["summary"]["failed_urls"], 1);
+        assert_eq!(body["llm_usage"]["cost_usd"], 0.125);
+        assert_eq!(body["llm_usage"]["requests"], 1);
+        assert!(body["llm_usage"]["models"].get("removed").is_none());
+    }
+
+    #[test]
+    fn resumed_url_list_all_completed_still_renders_without_observed_items() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = resumed_plan(root.path(), RunMode::UrlList);
+        let key = "https://example.test/done";
+        let mut state = crate::run_state::Snapshot::default();
+        state.urls.insert(
+            key.into(),
+            recovered(crate::run_state::Status::Completed, json!({})),
+        );
+        let (_, body) = decode_resumed(&plan, &[], &state, &[key.into()]);
+        assert_eq!(body["summary"]["completed_urls"], 1);
+        assert_eq!(
+            body["url_sources"]["unknown.urls"]["urls"][key],
+            json!({
+                "status":"completed", "output":null, "error":null,
+                "fetch_strategy":null,"images":0,"screenshots":0,
+            })
+        );
+        assert!(
+            render_resumed(
+                &plan,
+                &[],
+                &state,
+                &["https://example.test/absent".into()],
+                &finish()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fully_observed_batch_projection_matches_existing_render_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        for mode in [RunMode::Directory, RunMode::UrlList] {
+            let plan = resumed_plan(root.path(), mode);
+            let mut first = item(0, ItemKind::Url, "https://example.test/z");
+            first.source_file = Some("links.urls".into());
+            let mut second = item(1, ItemKind::Url, "https://example.test/a");
+            second.source_file = Some("links.urls".into());
+            second.status = ItemStatus::Skipped;
+            let items = vec![first, second];
+            let mut state = crate::run_state::Snapshot::default();
+            let keys: Vec<_> = items.iter().map(|item| item.report_key.clone()).collect();
+            for key in &keys {
+                state.urls.insert(
+                    key.clone(),
+                    recovered(crate::run_state::Status::Pending, json!({})),
+                );
+            }
+            assert_eq!(
+                render(&plan, &items, &finish()).unwrap(),
+                render_resumed(&plan, &items, &state, &keys, &finish()).unwrap()
+            );
+        }
     }
 }

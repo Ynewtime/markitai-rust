@@ -1,3 +1,4 @@
+mod asset_store;
 pub mod config;
 mod fetch;
 pub mod fetch_cache;
@@ -28,6 +29,18 @@ pub fn convert_with_context(
     source: &str,
     options: ConvertOptions,
     context: ConvertContext<'_>,
+) -> Result<ConversionOutput> {
+    convert_with_publication(source, options, context, None)
+}
+
+/// Native callers may supply an already acquired document publication claim.
+/// Existing conversion and serialized adapter entrypoints remain independent.
+#[doc(hidden)]
+pub fn convert_with_publication(
+    source: &str,
+    options: ConvertOptions,
+    context: ConvertContext<'_>,
+    publication: Option<&dyn output::Publication>,
 ) -> Result<ConversionOutput> {
     let start = Instant::now();
     if source.trim().is_empty() {
@@ -129,7 +142,10 @@ pub fn convert_with_context(
             .into_owned()
     };
     if let Some(dir) = &output_dir
-        && output::should_skip(dir, &name, &cfg)?
+        && match publication {
+            Some(publication) => publication.skip_existing(),
+            None => output::should_skip(dir, &name, &cfg)?,
+        }
     {
         return Ok(ConversionOutput {
             source: source.into(),
@@ -279,7 +295,14 @@ pub fn convert_with_context(
                 if cfg["llm"]["on_failure"] == "fail" {
                     output::apply_profiles(&mut result, &cfg);
                     if let Some(dir) = &output_dir {
-                        output::write(dir, &name, &mut result, &doc.assets, &cfg)?;
+                        output::write_with_publication(
+                            dir,
+                            &name,
+                            &mut result,
+                            &doc.assets,
+                            &cfg,
+                            publication,
+                        )?;
                     }
                     return Err(error);
                 }
@@ -291,7 +314,7 @@ pub fn convert_with_context(
     }
     output::apply_profiles(&mut result, &cfg);
     if let Some(dir) = output_dir {
-        output::write(&dir, &name, &mut result, &doc.assets, &cfg)?;
+        output::write_with_publication(&dir, &name, &mut result, &doc.assets, &cfg, publication)?;
     }
     result.duration = start.elapsed().as_secs_f64();
     Ok(result)

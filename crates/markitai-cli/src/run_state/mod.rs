@@ -1,5 +1,5 @@
 //! Recovery storage primitives. CLI scheduling is connected in the next stage.
-mod codec;
+pub(crate) mod codec;
 mod store;
 
 use indexmap::IndexMap;

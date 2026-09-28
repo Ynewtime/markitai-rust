@@ -9,6 +9,7 @@ markitai document.docx -o output/
 markitai note.txt -o chosen.md --json
 markitai ./documents -o output/ -j 4 --glob '**/*.txt'
 markitai urls.urls -o output/ --url-concurrency 3
+markitai urls.urls -o output/ --resume
 markitai https://example.com/article -s static -o output/
 markitai -c isolated.json --config-json '{"output":{"on_conflict":"skip"}}' note.txt -o output/
 markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
@@ -19,9 +20,10 @@ markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 - 单文件和 URL 未给 `-o` 时输出 Markdown 到 stdout；`--pure` 去除 frontmatter；提供 `-o chosen.md` 可选择准确文件名。
 - `--json -o` 输出 version 1.0 envelope，字段名与参考接口一致。运行失败仍有机器可读条目；参数错误只输出 stderr 并退出 2。
 - 目录递归转换保留相对路径，支持重复 `--glob`、`!` 排除和 `--max-depth`，使用受限线程并发；目录中的 `.urls` 也会发现。同批任务预留独立名称，即使冲突策略为 overwrite/skip，也不会让两个新结果互相覆盖；大小写匹配按输出文件系统探测。URL 列表支持文本和 JSON 两种格式。
-- 目录/URL 列表任意项失败退出 10；单项失败退出 1，成功退出 0。`--quiet` 仍显示错误。
+- 目录/URL 列表普通转换项失败退出 10；单项失败退出 1，成功退出 0；状态存储致命错误退出 1，中断退出 130/143。`--quiet` 仍显示错误。
 - 四种输入模式支持持久 JSON 报告。`output.report` 为 null 或省略时，目录/URL 列表默认启用，单文件/URL 默认关闭；true/false 显式覆盖。报告写入输出目录的 `.markitai/reports/`，各模式的字段和计数差异见 [reports.md](reports.md)。
-- 报告发布失败保留已完成文件及 stdout JSON 条目，并退出非零；报告不替代 stdout envelope。stdout 转换、dry run、空目录和失败/跳过的单项不生成报告；批量部分失败仍可生成报告。报告的 skip 冲突策略保留已有报告。
+- 报告发布失败保留已完成文件及 stdout JSON 条目，并退出非零；报告不替代 stdout envelope。stdout 转换、dry run、无可恢复状态的空目录和失败/跳过的单项不生成报告；批量部分失败仍可生成报告。报告的 skip 冲突策略保留已有报告。
+- Unix 目录/URL 列表每次保存恢复状态；`--resume` 合并新发现任务、保留完成项并重试未完成项。输出归属凭证保护隐式重试，旧状态按普通冲突策略升级。首次 Ctrl-C 停止派发、同步状态并等待在途转换，退出 130；再次中断立即退出。详见 [恢复状态](state-storage.md) 与 [输出归属](output-ownership.md)。
 - 配置优先级由核心解析；根级 `-c` 和 `--config-json` 对子命令同样生效。布尔参数支持显式否定；重复正反开关以最后一个为准，preset 应用后显式参数覆盖。
 - `config list/get/path/validate/set` 可用；list 支持 JSON/YAML/table；默认隐藏凭据。set 原子更新配置，不写入临时 `--config-json` 内容。
 - `init --yes [--local|-o path]` 创建最小配置；已有文件不覆盖。
@@ -34,9 +36,9 @@ markitai note.txt -o output/ --config-json '{"output":{"report":true}}'
 
 ## 明确的迁移缺口
 
-URL 抓取的其他策略、图片/URL 的 LLM 缓存、历史、断点恢复、Batch API、交互配置、订阅登录、serve、MCP、文件日志仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取的其他策略、图片/URL 的 LLM 缓存、历史、非 Unix 断点恢复、Batch API、交互配置、订阅登录、serve、MCP、文件日志仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；图片和 URL 的 LLM 增强当前每次重新处理，静态页面缓存遵循独立规则，不能将文档缓存命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。本地 OCR、截图和 alt/desc 图片分析仍未完成；这些选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片可经 LLM 视觉模型读取。rich/standard preset 仍不是对所有格式可用的完整模式。
 
-持久报告已实现；恢复所需的 state/JSONL 和历史导出尚未实现，`--resume` 与启用历史的请求仍明确拒绝。同一目录内混合文件/URL 当前共享批量并发上限，尚未分别应用两类限制。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、进程中断清理及全部非 ASCII 终端行为仍需专门测试。
+持久报告和 Unix 批量恢复已实现；历史导出、单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 
 具体文件格式支持取决于核心当前实现，注册参考扩展名不意味着全部可用。性能与质量对比未完成前，不承诺生产替代、完整旧版兼容或具体加速比。
 
@@ -50,4 +52,4 @@ cargo build --release -p markitai-cli --bin markitai
 
 CLI 测试使用临时工作目录与 `MARKITAI_HOME`，不修改用户 `~/.markitai`。手动测试也应将 `MARKITAI_HOME` 指向项目的忽略目录，并按需只读传入测试凭据。
 
-本轮报告实现已通过源码检查门禁与四个成功场景的开发版差分审计；这不代表 clean-source release 产物已完成验证。准确的范围与剩余工作见 [报告验证说明](reports.md#validation-scope-and-remaining-work)。
+历史 round7 报告实现已通过源码门禁和四个成功场景的 clean-source release 差分审计。该证据早于本轮恢复调度；最新门禁与剩余范围见 [调度中心](CONTROL.md) 和 [报告验证说明](reports.md#validation-scope-and-remaining-work)。

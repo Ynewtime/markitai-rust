@@ -1,9 +1,9 @@
 mod app;
+mod output_claims;
 mod report;
 mod report_store;
-// Storage is validated independently before batch scheduling uses it.
-#[allow(dead_code, unused_imports)]
 mod run_state;
+mod signals;
 fn main() {
     std::process::exit(app::run());
 }

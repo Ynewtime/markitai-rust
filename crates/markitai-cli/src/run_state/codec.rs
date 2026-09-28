@@ -271,7 +271,7 @@ fn url_identity(key: &str, explicit: Option<&str>) -> Result<String> {
     Ok(bare.into())
 }
 
-fn entry_parent(
+pub(crate) fn entry_parent(
     key: &ItemKey,
     entry: &Entry,
     scope: &Scope,
@@ -700,6 +700,7 @@ pub(crate) fn encode(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn decode_event(line: &[u8]) -> Result<Option<Event>> {
     decode_event_limited(line, Limits::default().line_bytes)
 }
@@ -746,6 +747,7 @@ pub(crate) fn decode_event_limited(line: &[u8], limit: usize) -> Result<Option<E
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn encode_event(event: &Event) -> Result<Vec<u8>> {
     encode_event_limited(event, Limits::default().line_bytes)
 }

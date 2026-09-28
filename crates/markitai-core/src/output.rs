@@ -364,12 +364,31 @@ fn atomic_write(path: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
     Ok(())
 }
 
+/// Explicit native publication authority; no process-global callback is used.
+#[doc(hidden)]
+pub trait Publication: Send + Sync {
+    fn skip_existing(&self) -> bool;
+    fn publish(&self, path: &Path, bytes: &[u8]) -> Result<()>;
+}
+
 pub fn write(
     dir: &Path,
     name: &str,
     result: &mut ConversionOutput,
     assets: &[Asset],
     cfg: &Value,
+) -> Result<()> {
+    write_with_publication(dir, name, result, assets, cfg, None)
+}
+
+#[doc(hidden)]
+pub fn write_with_publication(
+    dir: &Path,
+    name: &str,
+    result: &mut ConversionOutput,
+    assets: &[Asset],
+    cfg: &Value,
+    publication: Option<&dyn Publication>,
 ) -> Result<()> {
     let _guard = OUTPUT_LOCK
         .lock()
@@ -401,7 +420,7 @@ pub fn write(
         let enhanced = dir.join(format!("{stem}.llm.md"));
         check_path(&base, allow_symlinks)?;
         check_path(&enhanced, allow_symlinks)?;
-        if !base.exists() && !enhanced.exists() || mode == "overwrite" {
+        if publication.is_some() || !base.exists() && !enhanced.exists() || mode == "overwrite" {
             break;
         }
         if mode == "skip" {
@@ -436,9 +455,7 @@ pub fn write(
         let path = dir.join(asset_prefix).join(&filename);
         check_path(&path, allow_symlinks)?;
         std::fs::create_dir_all(path.parent().unwrap())?;
-        if !path.exists() {
-            atomic_write(&path, &asset.bytes, false)?;
-        }
+        crate::asset_store::insert_or_verify(&path, &asset.bytes)?;
         let before = format!("{asset_prefix}/{}", asset.name);
         let after = format!("{asset_prefix}/{filename}");
         let replace =
@@ -454,7 +471,11 @@ pub fn write(
     if result.llm_markdown.is_none() || config::enabled(cfg, "/llm/keep_base") {
         let path = dir.join(format!("{stem}.md"));
         let content = content(result, cfg, false)?;
-        atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
+        if let Some(publication) = publication {
+            publication.publish(&path, content.as_bytes())?;
+        } else {
+            atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
+        }
         result.output_path = Some(path);
     }
     if result.llm_markdown.is_some() {
@@ -464,7 +485,11 @@ pub fn write(
             dir.join(format!("{stem}.llm.md"))
         };
         let content = content(result, cfg, true)?;
-        atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
+        if let Some(publication) = publication {
+            publication.publish(&path, content.as_bytes())?;
+        } else {
+            atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
+        }
         result.llm_output_path = Some(path);
     }
     Ok(())

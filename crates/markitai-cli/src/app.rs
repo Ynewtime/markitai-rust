@@ -1,3 +1,9 @@
+#[cfg_attr(unix, path = "batch_run.rs")]
+#[cfg_attr(not(unix), path = "batch_run_portable.rs")]
+mod batch_run;
+#[cfg(all(test, unix))]
+#[path = "batch_run_portable.rs"]
+mod batch_run_portable_tests;
 use crate::report::{
     self, ItemKind, ItemStatus, ReportOptions, RunFinished, RunInfo, RunItem, RunMode,
 };
@@ -7,11 +13,6 @@ use markitai_core::{ConversionOutput, ConversionUsage, ConvertContext, ConvertOp
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-    mpsc,
-};
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
@@ -281,7 +282,6 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     }
     for (requested, name) in [
         (cli.interactive, "--interactive"),
-        (cli.resume, "--resume"),
         (
             cli.llm_batch || cli.llm_batch_timeout.is_some() || cli.llm_batch_collect.is_some(),
             "LLM Batch API",
@@ -417,6 +417,9 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             || input_path
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("urls")));
+    if cli.resume && !batch {
+        return Err(unsupported("--resume for a single file or URL"));
+    }
     let mode = if directory {
         RunMode::Directory
     } else if batch {
@@ -501,7 +504,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         }
         return Ok(0);
     }
-    if tasks.is_empty() {
+    if tasks.is_empty() && !cli.resume {
         if cli.json {
             emit_json(&[], None);
         }
@@ -509,7 +512,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     }
     let run_clock = Instant::now();
     let started_at = timestamp();
-    let report_plan = if let Some(output_dir) = output {
+    let report_plan = if let Some(output_dir) = output.clone() {
         report::plan(
             RunInfo {
                 mode,
@@ -534,8 +537,18 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             .filter(|strategy| *strategy != "auto"),
     };
     if !batch {
-        let task = &tasks[0];
-        let (record, result) = convert_item(task, 0, &cfg, context);
+        let mut task = tasks.remove(0);
+        let claim =
+            batch_run::claim(&mut task, &cfg, None, None, &Default::default()).map_err(runtime)?;
+        let (record, result) = convert_item(
+            &task,
+            0,
+            &cfg,
+            context,
+            claim
+                .as_ref()
+                .map(|claim| claim as &dyn markitai_core::output::Publication),
+        );
         let item = outcome(&record);
         let failed = result.is_err();
         let report_error = if record.status == ItemStatus::Completed {
@@ -581,91 +594,23 @@ fn execute(cli: &Cli) -> CliResult<i32> {
             0
         });
     }
-    reserve_batch_names(&mut tasks, &cfg)?;
-    let tasks = Arc::new(tasks);
-    let cursor = AtomicUsize::new(0);
-    let (sender, receiver) = mpsc::channel();
-    let concurrency = if directory {
-        cfg["batch"]["concurrency"].as_u64().unwrap_or(10)
-    } else {
-        cfg["batch"]["url_concurrency"].as_u64().unwrap_or(5)
-    } as usize;
-    let exit_code = std::thread::scope(|scope| {
-        for _ in 0..concurrency.min(tasks.len()) {
-            let sender = sender.clone();
-            let tasks = &tasks;
-            let cfg = &cfg;
-            let cursor = &cursor;
-            scope.spawn(move || {
-                loop {
-                    let index = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some(task) = tasks.get(index) else {
-                        break;
-                    };
-                    let (record, _) = convert_item(task, index, cfg, context);
-                    if sender.send(record).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(sender);
-        let records: Vec<RunItem> = receiver.into_iter().collect();
-        let report_error = finish_report(
-            report_plan.as_ref(),
-            &records,
-            run_clock,
-            cli.verbose && !cli.quiet,
-        )
-        .err();
-        if let Some(error) = &report_error {
-            eprintln!("Error: {error}");
-        }
-        let items: Vec<Value> = records.iter().map(outcome).collect();
-        let failed = items.iter().filter(|i| i["status"] == "failed").count();
-        if cli.json {
-            emit_json(&items, report_error.as_deref());
-        } else {
-            for item in &items {
-                if !cli.quiet {
-                    for warning in item["warnings"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                    {
-                        eprintln!(
-                            "Warning: {}: {warning}",
-                            item["source"].as_str().unwrap_or("")
-                        );
-                    }
-                }
-                if item["status"] == "failed" {
-                    eprintln!(
-                        "Error: {}: {}",
-                        item["source"].as_str().unwrap_or(""),
-                        item["error"].as_str().unwrap_or("")
-                    );
-                }
-            }
-            if !cli.quiet {
-                eprintln!(
-                    "{} items, {} completed, {} failed",
-                    items.len(),
-                    items.iter().filter(|i| i["status"] == "completed").count(),
-                    failed
-                );
-            }
-        }
-        if failed > 0 {
-            10
-        } else if report_error.is_some() {
-            1
-        } else {
-            0
-        }
-    });
-    Ok(exit_code)
+    batch_run::run(
+        cli,
+        &cfg,
+        tasks,
+        BatchDestination {
+            mode,
+            output: output.as_deref().unwrap(),
+        },
+        report_plan.as_ref(),
+        run_clock,
+        context,
+    )
+}
+
+struct BatchDestination<'a> {
+    mode: RunMode,
+    output: &'a Path,
 }
 
 #[derive(Clone)]
@@ -684,6 +629,7 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
     use std::collections::{HashMap, HashSet};
     let mut claimed = HashSet::<(PathBuf, String)>::new();
     let mut case_rules = HashMap::<PathBuf, bool>::new();
+    let mut next_versions = HashMap::<(PathBuf, String), u64>::new();
     let mode = cfg["output"]["on_conflict"].as_str().unwrap_or("rename");
     for task in tasks {
         let Some(directory) = task.output.as_deref() else {
@@ -695,7 +641,7 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
         )
         .map_err(runtime)?;
         std::fs::create_dir_all(directory).map_err(runtime)?;
-        let directory = absolute(directory);
+        let directory = crate::report_store::resolve_path(directory).map_err(runtime)?;
         let folds = *case_rules.entry(directory.clone()).or_insert_with(|| {
             tempfile::Builder::new()
                 .prefix(".MarkitaiCaseProbe-")
@@ -737,7 +683,8 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
                 std::fs::symlink_metadata(directory.join(format!("{stem}{suffix}"))).is_ok()
             })
         };
-        let duplicate = claimed.contains(&key(&stem));
+        let members = |stem: &str| [key(&format!("{stem}.md")), key(&format!("{stem}.llm.md"))];
+        let duplicate = members(&stem).iter().any(|member| claimed.contains(member));
         let mut resolved = stem.clone();
         if !duplicate && mode == "skip" && occupied(&stem) {
             // No new result is claimed when this item will reuse an existing file.
@@ -745,10 +692,15 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
             continue;
         }
         if duplicate || (mode == "rename" && occupied(&stem)) {
-            let mut version = 2u64;
+            let mut version = *next_versions.entry(key(&stem)).or_insert(2);
             loop {
                 resolved = format!("{stem}.v{version}");
-                if !claimed.contains(&key(&resolved)) && !occupied(&resolved) {
+                if !members(&resolved)
+                    .iter()
+                    .any(|member| claimed.contains(member))
+                    && !occupied(&resolved)
+                {
+                    next_versions.insert(key(&stem), version.saturating_add(1));
                     break;
                 }
                 version = version
@@ -756,7 +708,7 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
                     .ok_or_else(|| runtime("Output version counter exhausted"))?;
             }
         }
-        claimed.insert(key(&resolved));
+        claimed.extend(members(&resolved));
         task.reserved_stem = Some(resolved);
     }
     Ok(())
@@ -766,14 +718,18 @@ fn convert_task(
     task: &Task,
     cfg: &Value,
     context: ConvertContext<'_>,
+    publication: Option<&dyn markitai_core::output::Publication>,
 ) -> Result<ConversionOutput, String> {
     let mut cfg = cfg.clone();
     if let Some(name) = &task.reserved_stem {
         cfg["output"]["reserved_stem"] = json!(name);
+        if cfg["output"]["filename"].is_string() {
+            cfg["output"]["filename"] = json!(format!("{name}.md"));
+        }
     } else if let Some(name) = &task.filename {
         cfg["output"]["reserved_stem"] = json!(name.strip_suffix(".md").unwrap_or(name));
     }
-    markitai_core::convert_with_context(
+    markitai_core::convert_with_publication(
         &task.source,
         ConvertOptions {
             output_dir: task.output.clone(),
@@ -781,6 +737,7 @@ fn convert_task(
             ..Default::default()
         },
         context,
+        publication,
     )
     .or_else(|error| match error {
         markitai_core::Error::ImageOnly(_) => {
@@ -801,10 +758,22 @@ fn convert_item(
     index: usize,
     cfg: &Value,
     context: ConvertContext<'_>,
+    publication: Option<&dyn markitai_core::output::Publication>,
 ) -> (RunItem, Result<ConversionOutput, String>) {
     let clock = Instant::now();
     let started_at = timestamp();
-    let result = convert_task(task, cfg, context);
+    let result = convert_task(task, cfg, context, publication);
+    let record = recorded(task, index, clock, started_at, &result);
+    (record, result)
+}
+
+fn recorded(
+    task: &Task,
+    index: usize,
+    clock: Instant,
+    started_at: String,
+    result: &Result<ConversionOutput, String>,
+) -> RunItem {
     let mut record = RunItem {
         index,
         kind: if is_url(&task.source) {
@@ -863,7 +832,7 @@ fn convert_item(
         }
         Err(error) => record.error = Some(error.clone()),
     }
-    (record, result)
+    record
 }
 
 fn outcome(item: &RunItem) -> Value {

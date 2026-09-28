@@ -2,8 +2,8 @@
 
 The CLI writes version `"1.0"` reports for single files, single URLs, directories
 and URL lists. Directory reports also include URLs discovered in `.urls` files.
-Reports summarize a finished invocation; they do not provide resume state or
-history export. Those features remain unsupported. Public core and
+Reports summarize a finished run; separate [recovery state](state-storage.md)
+supports Unix batch resume. History export remains unsupported. Public core and
 Node/Python/Go conversion calls do not publish CLI reports.
 
 ## Selection and lifecycle
@@ -24,8 +24,8 @@ markitai pages.urls -o output/ --config-json '{"output":{"report":false}}'
 A single-item report requires a completed conversion with an output directory;
 failed or skipped single items produce no new report. Batches report processed
 items even when some or all fail. Stdout-only conversion, dry runs and empty
-directory discovery publish no report. Empty or invalid URL lists fail without
-publishing one. Report selection does not enable a recovery journal.
+directory discovery without recoverable state publishes no report. Empty or invalid URL lists fail without
+publishing one. Report selection is independent of the Unix batch recovery journal.
 
 Publication occurs before the CLI's single stdout JSON envelope. A publication
 error preserves completed output files and their JSON items, sets an envelope
@@ -44,7 +44,8 @@ Reports live under the selected output directory:
 
 For an explicit `-o chosen.md`, the parent directory contains the report. Item
 `output` points at the actual finalized document, including LLM-enhanced output;
-relative path spelling is retained. Directory options contain resolved absolute
+newly observed paths retain relative spelling where supplied. Recovered outputs
+and saved URL provenance use the checkpoint's anchored paths. Directory options contain resolved absolute
 `input_dir` and `output_dir`.
 
 The filename hash matches the reference's first six MD5 hex digits over resolved
@@ -152,6 +153,11 @@ at clean `0ab59a0` passes the same four reference cases, and rebuilt host packag
 pass their integration checks. These cases do not establish mixed/failing-run
 differential parity, paid-provider behavior or performance.
 
-Resume journals, interruption recovery and history remain planned in
-[decision 0004](decisions/0004-run-persistence.md). Report publication does not
-remove their unsupported guards or close other conversion-format/runtime gaps.
+A resumed report includes saved completed entries and this invocation's observed
+outcomes, without inventing prior timing or provider usage. A prior skip appears
+as completed after reload because minimal state does not preserve its skip reason;
+a skip observed in the current invocation retains its normal report shape. URL-list reports use
+the active list order; directory reports retain stored entries. SIGINT/SIGTERM
+and fatal state-storage errors suppress report publication. See [decision
+0004](decisions/0004-run-persistence.md) for history and remaining runtime work.
+The historical report checks above predate scheduler integration.

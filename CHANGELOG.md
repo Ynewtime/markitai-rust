@@ -17,7 +17,9 @@
 - Native HTML math-source and structured BBCode recovery, plus presentation slide boundaries and shape-aware extraction.
 - Structured HTML footnotes with repeated-reference handling, safe definitions and preserved multi-block note content.
 - Persisted CLI reports for files, URLs, directories and URL lists, with mode-specific schemas, stable task hashes and atomic conflict handling.
-- Internal recovery-state codec and durable store with legacy ordering, process locks, bounded journals and crash replay fences; CLI resume integration remains pending.
+- Recovery-state codec and durable store with legacy ordering, process locks, bounded journals and crash replay fences.
+- Unix directory/URL-list resume with durable dispatch, separate file/URL concurrency limits, restored reports and controlled interruption.
+- Per-member CLI publication locks and prepared ownership receipts for safe failed-item retries across process restarts.
 
 ### Fixed
 
@@ -31,3 +33,4 @@
 - Report skip preserves existing bytes, and enhanced-output reports point to the finalized document.
 - Named URL identities retain their original spelling; HTTP URLs ending in `.urls` remain URLs, and empty-directory JSON stays machine-readable.
 - Pure URL conversions retain the actual fetch strategy for CLI reporting without adding a binding JSON field.
+- Concurrent writers reuse identical content-addressed assets after exact byte verification; conflicting stored bytes fail without replacement.

@@ -1,10 +1,12 @@
 # Recovery state storage
 
-This is the storage stage of batch recovery. The codec and store pass their
-scoped storage checks; they are not yet connected to CLI dispatch. `--resume` and history
-remain unsupported. The next stage must add output ownership, durable work claims,
-periodic flushes and controlled interruption before enabling those interfaces.
-Public conversion JSON and language bindings acquire no persistence side effects.
+The Unix CLI connects this store to directory and URL-list dispatch. Every batch
+persists merged work and flushes each admitted target before a worker can make
+provider requests; `--resume` retains completed entries and retries unfinished
+work. Reports remain independently selectable. History export is still pending.
+The native conversion API and language bindings do not acquire recovery state.
+See [output ownership](output-ownership.md) for the separate publication protocol
+and [the control center](CONTROL.md) for the current validation status.
 
 ## Files and run scope
 
@@ -26,7 +28,7 @@ The store holds an OS exclusive lock on the open lock file for its lifetime.
 It never removes that inode to release the lock. This excludes cooperating
 writers of one checkpoint, including processes that start a fresh run. It does
 not reserve document output names across different hashes or overlapping roots.
-Output-name ownership is a separate requirement for scheduler integration.
+Separate [member leases and receipts](output-ownership.md) protect document names across those run scopes.
 
 Original output path spelling is retained privately for symlink-policy checks,
 while the serialized scope contains resolved identities. Native checkpoint
@@ -75,8 +77,7 @@ retains the loaded generation. Legacy state is upgraded before new events.
 
 `record` validates and buffers one known-item mutation and returns its sequence.
 That return value is not a durable claim. `flush` appends pending events and syncs
-the journal and its directory before returning the durable sequence. The future
-scheduler must wait for this acknowledgment before starting work that relies on
+the journal and its directory before returning the durable sequence. The scheduler waits for this acknowledgment before starting work that relies on
 recovery, including provider requests. A dropped writer does not pretend to flush.
 
 Compaction writes the complete snapshot through sequence N to a same-directory
@@ -122,8 +123,12 @@ added. It calls the actual reference state codec and journal loader under privat
 compares the native codec's values, types, ordering and task hashes. It exercises
 state data, not conversion, paid requests or a working `--resume` command.
 
-The [persistence decision](decisions/0004-run-persistence.md) defines the remaining
-scheduler, history and ownership work. Connecting this store requires separating
-recovered entries from observed invocation outcomes, honoring flush intervals,
-claiming targets safely and testing actual interruption/restart with loopback
-request counters. Existing report publication does not supply those behaviors.
+The [persistence decision](decisions/0004-run-persistence.md) separates storage,
+scheduling and history. The CLI now keeps recovered entries separate from
+observed invocation outcomes, applies the configured flush interval and drains
+active work after a first SIGINT/SIGTERM. A second signal exits immediately.
+Interrupted runs do not publish a report and return 130/143; their stdout JSON
+contains observed results with an interruption error. Real-process acceptance
+uses local HTTP/model gates and request counters. The storage-only round-eight
+evidence above does not establish these new integration claims; current gate
+results belong in the control center and subsequent validation records.
