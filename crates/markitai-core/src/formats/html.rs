@@ -644,12 +644,8 @@ fn mathml(element: ElementRef<'_>, depth: usize) -> Result<String> {
     })
 }
 
-fn math_expression(element: ElementRef<'_>) -> Result<Option<(String, bool)>> {
-    if let Some(block) = tex_script(element) {
-        let text = element.text().collect::<String>();
-        return Ok((!text.trim().is_empty()).then(|| (text.trim().to_owned(), block)));
-    }
-    let recognized = element.value().name() == "math"
+fn math_container(element: ElementRef<'_>) -> bool {
+    element.value().name() == "math"
         || element.value().name() == "mjx-container"
         || [
             "katex",
@@ -660,8 +656,15 @@ fn math_expression(element: ElementRef<'_>) -> Result<Option<(String, bool)>> {
             "mwe-math-element",
         ]
         .into_iter()
-        .any(|class| has_class(element, class));
-    if !recognized {
+        .any(|class| has_class(element, class))
+}
+
+fn math_expression(element: ElementRef<'_>) -> Result<Option<(String, bool)>> {
+    if let Some(block) = tex_script(element) {
+        let text = element.text().collect::<String>();
+        return Ok((!text.trim().is_empty()).then(|| (text.trim().to_owned(), block)));
+    }
+    if !math_container(element) {
         return Ok(None);
     }
     let inner = if element.value().name() == "math" {
@@ -895,11 +898,63 @@ fn in_literal(element: ElementRef<'_>) -> bool {
     std::iter::once(element)
         .chain(element.ancestors().filter_map(ElementRef::wrap))
         .any(|parent| {
-            matches!(
-                parent.value().name(),
-                "pre" | "code" | "math" | "script" | "style"
-            )
+            matches!(parent.value().name(), "pre" | "code" | "script" | "style")
+                || math_container(parent)
+                || duplicate_math_preview(parent)
         })
+}
+
+fn visible_reference(element: ElementRef<'_>) -> bool {
+    std::iter::once(element)
+        .chain(element.ancestors().filter_map(ElementRef::wrap))
+        .all(|parent| {
+            !is_hidden(parent)
+                && !matches!(
+                    parent.value().name(),
+                    "script"
+                        | "style"
+                        | "nav"
+                        | "footer"
+                        | "form"
+                        | "button"
+                        | "input"
+                        | "select"
+                        | "textarea"
+                        | "iframe"
+                        | "object"
+                        | "embed"
+                        | "head"
+                        | "template"
+                        | "noscript"
+                )
+        })
+}
+
+fn generic_note_section(element: ElementRef<'_>) -> bool {
+    let label = |heading: ElementRef<'_>| {
+        note_heading(heading)
+            || (matches!(
+                heading.value().name(),
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+            ) && matches!(
+                plain(heading).to_ascii_lowercase().as_str(),
+                "references and notes" | "notes and references" | "bibliography"
+            ))
+    };
+    note_context(element)
+        || ["id", "class"].iter().any(|attr| {
+            element.value().attr(attr).is_some_and(|value| {
+                value
+                    .split_ascii_whitespace()
+                    .any(|token| matches!(token, "note" | "notes" | "endnotes" | "bibliography"))
+            })
+        })
+        || element.child_elements().any(label)
+        || element
+            .prev_siblings()
+            .filter_map(ElementRef::wrap)
+            .next()
+            .is_some_and(label)
 }
 
 fn note_has_content(element: ElementRef<'_>, markers: &[ElementRef<'_>], depth: usize) -> bool {
@@ -1048,9 +1103,7 @@ impl<'a> Footnotes<'a> {
             .filter(|element| {
                 !in_literal(*element)
                     && reference_candidate(*element)
-                    && !std::iter::once(*element)
-                        .chain(element.ancestors().filter_map(ElementRef::wrap))
-                        .any(is_hidden)
+                    && visible_reference(*element)
             })
             .collect::<Vec<_>>();
         let external = elements
@@ -1083,7 +1136,7 @@ impl<'a> Footnotes<'a> {
         for container in root.select(&selector(
             "span.footnote-container, span.sidenote-container, span.inline-footnote",
         )) {
-            if in_literal(container) {
+            if in_literal(container) || !visible_reference(container) {
                 continue;
             }
             if let Some(content) = container
@@ -1092,6 +1145,14 @@ impl<'a> Footnotes<'a> {
                 ))
                 .next()
             {
+                if content
+                    .ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .take_while(|ancestor| *ancestor != container)
+                    .any(is_hidden)
+                {
+                    continue;
+                }
                 notes.add(vec![content], vec![], vec![], vec![container]);
             }
         }
@@ -1196,7 +1257,9 @@ impl<'a> Footnotes<'a> {
                     .attr("start")
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(1);
-                aliases.push(format!("num:{}", start + index));
+                if let Some(number) = start.checked_add(index) {
+                    aliases.push(format!("num:{number}"));
+                }
             }
             if !aliases.is_empty() {
                 notes.add(vec![element], aliases, markers, vec![]);
@@ -1239,7 +1302,7 @@ impl<'a> Footnotes<'a> {
         // Generic numeric links need a concentrated definition section, not
         // merely numeric equation/theorem targets scattered through an article.
         let mut generic = Vec::new();
-        let mut numeric_targets = HashSet::new();
+        let mut numeric_references: HashMap<String, Vec<ElementRef<'_>>> = HashMap::new();
         for reference in &references {
             if reference.value().name() != "a" || note_number(&plain(*reference)).is_none() {
                 continue;
@@ -1247,7 +1310,10 @@ impl<'a> Footnotes<'a> {
             let Some(fragment) = note_fragment(*reference, base) else {
                 continue;
             };
-            numeric_targets.insert(fragment.clone());
+            numeric_references
+                .entry(fragment.clone())
+                .or_default()
+                .push(*reference);
             let Some(target) = ids
                 .get(&fragment)
                 .copied()
@@ -1291,16 +1357,18 @@ impl<'a> Footnotes<'a> {
                 .iter()
                 .filter(|(_, node, _)| contains_element(container, *node))
                 .collect::<Vec<_>>();
-            let external_count = numeric_targets
-                .iter()
-                .filter(|id| {
-                    references.iter().any(|reference| {
-                        !contains_element(container, *reference)
-                            && note_fragment(*reference, base).as_ref() == Some(*id)
-                    })
+            if matches.len() < 2 || !generic_note_section(container) {
+                continue;
+            }
+            let external_count = numeric_references
+                .values()
+                .filter(|references| {
+                    references
+                        .iter()
+                        .any(|reference| !contains_element(container, *reference))
                 })
                 .count();
-            if matches.len() < 2 || matches.len() * 4 < external_count * 3 {
+            if matches.len() * 4 < external_count * 3 {
                 continue;
             }
             // A common wrapper around all article content is not a notes list.
@@ -1432,17 +1500,6 @@ impl<'a> Footnotes<'a> {
             }
         }
         notes.definitions.retain(|note| !note.references.is_empty());
-        for (index, note) in notes.definitions.iter().enumerate() {
-            for reference in &note.references {
-                notes.references.insert(element_key(*reference), index + 1);
-            }
-            for node in &note.nodes {
-                notes.removed.insert(element_key(*node));
-            }
-            for marker in &note.markers {
-                notes.markers.insert(element_key(*marker));
-            }
-        }
         let reference_ids = notes
             .definitions
             .iter()
@@ -1453,7 +1510,7 @@ impl<'a> Footnotes<'a> {
             })
             .filter_map(|element| element.value().attr("id").map(str::to_owned))
             .collect::<HashSet<_>>();
-        for note in &notes.definitions {
+        for note in &mut notes.definitions {
             for root in &note.nodes {
                 for element in root.descendants().filter_map(ElementRef::wrap) {
                     let explicit = element.value().attr("role") == Some("doc-backlink")
@@ -1481,9 +1538,25 @@ impl<'a> Footnotes<'a> {
                                             .all(|ch| "^↩↥↑↵⤴⤵⏎\u{fe0e}\u{fe0f}".contains(ch)))
                             });
                     if explicit || link_back {
-                        notes.markers.insert(element_key(element));
+                        note.markers.push(element);
                     }
                 }
+            }
+        }
+        notes.definitions.retain(|note| {
+            note.nodes
+                .iter()
+                .any(|node| note_has_content(*node, &note.markers, 0))
+        });
+        for (index, note) in notes.definitions.iter().enumerate() {
+            for reference in &note.references {
+                notes.references.insert(element_key(*reference), index + 1);
+            }
+            for node in &note.nodes {
+                notes.removed.insert(element_key(*node));
+            }
+            for marker in &note.markers {
+                notes.markers.insert(element_key(*marker));
             }
         }
         // Delete separators only when the following structure consists solely
@@ -1571,6 +1644,9 @@ fn serialize_clean(
     notes: &Footnotes<'_>,
     definition: bool,
 ) -> Result<()> {
+    if is_hidden(element) && !(definition && depth == 0) {
+        return Ok(());
+    }
     let key = element_key(element);
     if !definition && let Some(number) = notes.references.get(&key) {
         output.push_str(&format!(
@@ -1590,7 +1666,7 @@ fn serialize_clean(
     }
     let value = element.value();
     let name = value.name();
-    if (is_hidden(element) && !(definition && depth == 0)) || duplicate_math_preview(element) {
+    if duplicate_math_preview(element) {
         return Ok(());
     }
     if !element
@@ -2946,5 +3022,112 @@ mod tests {
         )
         .unwrap();
         assert_eq!(markdown, "First [label](/x) tail;\nnext `x` tail;\nlast.");
+    }
+
+    #[test]
+    fn hidden_or_discarded_popover_references_do_not_restore_their_definitions() {
+        for hidden in [
+            r#"<span class="inline-footnote" hidden>1<span class="footnoteContent">Hidden secret</span></span>"#,
+            r#"<div hidden><span class="inline-footnote">1<span class="footnoteContent">Hidden secret</span></span></div>"#,
+            r#"<div style="display:none"><span class="footnote-container"><span class="footnote">Hidden secret</span></span></div>"#,
+            r#"<nav><span class="inline-footnote">1<span class="footnoteContent">Hidden secret</span></span></nav>"#,
+            r#"<span class="inline-footnote"><span hidden><span class="footnoteContent">Hidden secret</span></span></span>"#,
+        ] {
+            let doc =
+                extract_html(&format!("<article><p>Visible.</p>{hidden}</article>"), None).unwrap();
+            assert_eq!(doc.markdown, "Visible.", "{hidden}");
+        }
+        let visible = extract_html(r#"<article><p>Visible<span class="inline-footnote">1<span class="footnoteContent" hidden>Intended note.</span></span>.</p></article>"#, None).unwrap();
+        assert_eq!(visible.markdown, "Visible[^1].\n\n[^1]: Intended note.");
+    }
+
+    #[test]
+    fn ordinary_numbered_navigation_does_not_turn_instructions_into_notes() {
+        for targets in [
+            r#"<section><h2>Instructions</h2><p id="step1">Install app.</p><p id="step2">Launch app.</p></section>"#,
+            r#"<ol><li id="step1">Install app.</li><li id="step2">Launch app.</li></ol>"#,
+        ] {
+            let source = format!(
+                r##"<article><p>Steps <a href="#step1">1</a> and <a href="#step2">2</a>.</p>{targets}</article>"##
+            );
+            let doc = extract_html(&source, None).unwrap();
+            assert!(!doc.markdown.contains("[^"), "{}", doc.markdown);
+            assert!(doc.markdown.contains("[1](#step1) and [2](#step2)"));
+            assert_eq!(doc.markdown.matches("Install app.").count(), 1);
+            assert_eq!(doc.markdown.matches("Launch app.").count(), 1);
+        }
+    }
+
+    #[test]
+    fn footnote_detection_excludes_all_recognized_math_wrappers() {
+        for wrapper in [
+            "math-inline",
+            "math-block",
+            "katex",
+            "katex-display",
+            "hurmet-tex",
+            "mwe-math-element",
+        ] {
+            for visual in ["<sup>2</sup>", "x<sup>2</sup>"] {
+                let source = format!(
+                    r#"<article><p>Formula <span class="{wrapper}" data-math="x^2">{visual}</span>.</p><ol class="footnotes"><li id="fn-1">Unused one.</li><li id="fn-2">Unused two.</li></ol></article>"#
+                );
+                let doc = extract_html(&source, None).unwrap();
+                assert!(!doc.markdown.contains("[^"), "{wrapper}: {}", doc.markdown);
+                assert_eq!(doc.markdown.matches("x^2").count(), 1);
+                assert!(doc.markdown.contains("Unused two."));
+            }
+        }
+        let doc = extract_html(r#"<article><p><mjx-container data-math="x^2"><sup>2</sup></mjx-container></p><ol class="footnotes"><li id="fn-1">Unused one.</li><li id="fn-2">Unused two.</li></ol></article>"#, None).unwrap();
+        assert!(doc.markdown.contains("$x^2$"));
+        assert!(!doc.markdown.contains("[^"));
+    }
+
+    #[test]
+    fn backlink_only_definitions_do_not_leave_dangling_or_skipped_numbers() {
+        let doc = extract_html(r##"<article><p>See <a id="ref1" href="#fn-1">1</a> and <a href="#fn-2">2</a>.</p>
+            <ol class="footnotes"><li id="fn-1"><a href="#ref1">Back</a></li><li id="fn-2">Real note.</li></ol></article>"##, None).unwrap();
+        assert!(
+            doc.markdown.contains("[1](#fn-1) and [^1]"),
+            "{}",
+            doc.markdown
+        );
+        assert!(doc.markdown.ends_with("[^1]: Real note."));
+        assert!(!doc.markdown.contains("[^2]"));
+        assert!(doc.markdown.contains("[Back](#ref1)"));
+    }
+
+    #[test]
+    fn oversized_footnote_list_start_does_not_overflow_or_drop_definitions() {
+        let source = format!(
+            r##"<article><p>A<a href="#a">1</a> and B<a href="#b">2</a>.</p><ol class="footnotes" start="{}"><li id="a">First.</li><li id="b">Second.</li></ol></article>"##,
+            usize::MAX
+        );
+        let doc = extract_html(&source, None).unwrap();
+        assert!(
+            doc.markdown.contains("A[^1] and B[^2]."),
+            "{}",
+            doc.markdown
+        );
+        assert!(doc.markdown.ends_with("[^1]: First.\n\n[^2]: Second."));
+    }
+
+    #[test]
+    fn footnotes_ignore_duplicate_mathjax_previews_with_tex_source() {
+        for wrapper in [
+            "MathJax_Preview",
+            "MathJax",
+            "MathJax_Display",
+            "MathJax_SVG",
+            "MathJax_MathML",
+        ] {
+            let source = format!(
+                r#"<article><p>Formula <span class="{wrapper}"><sup>2</sup></span><script type="math/tex">x^2</script>.</p><ol class="footnotes"><li id="fn-1">Unused one.</li><li id="fn-2">Unused two.</li></ol></article>"#
+            );
+            let doc = extract_html(&source, None).unwrap();
+            assert!(!doc.markdown.contains("[^"), "{wrapper}: {}", doc.markdown);
+            assert!(doc.markdown.starts_with("Formula $x^2$."));
+            assert_eq!(doc.markdown.matches("Unused two.").count(), 1);
+        }
     }
 }

@@ -103,17 +103,24 @@ backlinks, Google Docs notes, WordPress/Easy Footnotes lists, standalone
 footnote section outside the selected article can supply definitions, while
 unrelated external content stays outside the article.
 
-Unlabeled numeric anchor targets need at least two matched definitions in a
-shared section and coverage of at least three quarters of the external numeric
-targets. A wrapper containing the article references itself does not qualify.
-This keeps ordinary equation/theorem links from becoming footnotes. Loose
+Generic numeric anchor targets need a note/reference signal in the section's
+role, identifier, class or heading, at least two matched definitions, and coverage
+of at least three quarters of the external numeric targets. Concentration alone
+is insufficient: ordinary numbered instructions and navigation remain links.
+A wrapper containing the article references itself does not qualify. This also
+keeps ordinary equation/theorem links from becoming footnotes. Fragment identities
+are parsed once for this scan, and sections with fewer than two matching targets
+are rejected before coverage checks. Loose
 numbered paragraphs require at least two corroborating body superscripts; an
 explicit footnote class can identify a single definition. Section delimiters
 allow continuation paragraphs/lists to move with the definition; otherwise only
 the numbered paragraph moves and following updates remain in the article.
 
-Only resolved definitions are removed from their original positions. Missing
-targets and unreferenced definitions remain visible. Return links and numeric
+Only resolved definitions with readable content after backlink removal are
+removed from their original positions. Missing targets, unreferenced definitions
+and backlink-only entries remain visible; they do not create dangling references.
+Ordered-list start offsets use checked arithmetic, and output numbers are assigned
+after empty definitions have been excluded. Return links and numeric
 labels are removed within resolved definitions, while ordinary body links remain.
 A duplicate inline sidenote is removed only when its text matches the adjacent
 resolved definition. Lists, block quotes, code and later paragraphs receive
@@ -122,8 +129,13 @@ the footnote. This can differ from the source renderer's unindented continuation
 
 Footnote bodies use the same URL validation, script removal, depth bound and
 math/code handling as the article. An explicitly linked hidden definition may
-expose its own content root; unrelated hidden descendants remain hidden. Detection
-excludes code, MathML and scripts. Remote URLs with matching fragment names do not
+expose its own content root; unrelated hidden descendants remain hidden. The
+reference itself and its ancestors must remain visible and outside discarded
+navigation/forms. Hidden inline popovers cannot reintroduce their definitions.
+Detection excludes code, scripts, MathML and every recognized math wrapper,
+including KaTeX and MathJax. Duplicate MathJax previews with a sibling TeX source
+are excluded as well; visual superscripts cannot introduce references or move
+otherwise unreferenced definitions. Remote URLs with matching fragment names do not
 become local references unless they identify the current page or carry explicit
 HTMLBook `noteref` semantics.
 
