@@ -141,5 +141,10 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
 
 - [Scheduling and publication validation](recovery-round9.md): 515 Rust executions /
   395 distinct tests, 26 harness tests, 19 real CLI recovery cases, private
-  member/receipt protocols and deterministic shared-asset process races. See the
-  record for Unix scope, signal limits and remaining crash boundaries.
+  member/receipt protocols and deterministic shared-asset process races. Clean
+  `361c924` release passes 4/4 reference report pairs, two release recovery cases
+  and rebuilt installed Python/Node/Go checks; all 16 prior archives are retained.
+  [Build](recovery-round9-build.json), [gate](recovery-round9-gate.json),
+  [reports](recovery-round9-reports.json), [release recovery](recovery-round9-release.json)
+  and [packages](recovery-round9-packages.json) retain unmodified records. See the
+  narrative for Unix scope, signal limits, artifact size and remaining boundaries.

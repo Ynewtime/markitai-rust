@@ -131,4 +131,4 @@ Interrupted runs do not publish a report and return 130/143; their stdout JSON
 contains observed results with an interruption error. Real-process acceptance
 uses local HTTP/model gates and request counters. The storage-only round-eight
 evidence above does not establish these new integration claims; current gate
-results belong in the control center and subsequent validation records.
+results are recorded in the [round-nine validation](validation/recovery-round9.md).

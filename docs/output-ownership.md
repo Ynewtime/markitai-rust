@@ -5,9 +5,8 @@ batch recovery additionally records evidence of the exact file object and bytes
 published by an item. A saved output path, the six-character state hash, matching
 frontmatter, or a content digest alone cannot authorize implicit replacement.
 
-This document describes the implementation contract. Test, process-crash and
-release validation results are recorded separately; this document supplies no
-claim that those gates have passed.
+This document describes the implementation contract. Source, process and release
+checks are separately scoped in [round-nine validation](validation/recovery-round9.md).
 
 ## Where the protocol applies
 
