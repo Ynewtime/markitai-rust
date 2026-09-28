@@ -2,8 +2,11 @@
 mod files;
 mod http;
 mod jobs;
+mod rerun;
 mod security;
+mod sidecar;
 mod store;
+mod transaction;
 mod types;
 
 use axum::{
@@ -98,6 +101,14 @@ async fn serve(cfg: Value, options: ServeOptions) -> Result<(), String> {
         .route("/api/jobs", post(http::create))
         .route("/api/jobs/{job_id}", get(http::snapshot))
         .route("/api/jobs/{job_id}/events", get(http::events))
+        .route(
+            "/api/jobs/{job_id}/items/{item_id}/retry",
+            post(rerun::retry),
+        )
+        .route(
+            "/api/jobs/{job_id}/items/{item_id}",
+            axum::routing::delete(rerun::delete),
+        )
         .route(
             "/api/jobs/{job_id}/items/{item_id}/result",
             get(files::result),

@@ -1,0 +1,499 @@
+use super::{
+    State, files, http,
+    jobs::{self, Job},
+    security::Trusted,
+    store, transaction,
+    types::{ApiError, ApiResult, Item, JobOptions, now},
+};
+use axum::{
+    Json,
+    extract::{Path, Request, State as ExtractState},
+    http::StatusCode,
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{
+    collections::HashSet,
+    fs,
+    io::{self, Read},
+    path::Path as FsPath,
+    sync::{Arc, atomic::Ordering},
+    time::Instant,
+};
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RetryBody {
+    options: Option<JobOptions>,
+    operation: Operation,
+}
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Operation {
+    #[default]
+    Retry,
+    Enhance,
+}
+impl Operation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Enhance => "enhance",
+        }
+    }
+}
+pub(super) struct Work {
+    index: usize,
+    prior: Item,
+    cfg: Value,
+    base: String,
+    operation: Operation,
+    runtime: Arc<markitai_core::LlmRuntime>,
+    explicit: Option<String>,
+}
+
+pub(super) async fn retry(
+    ExtractState(state): ExtractState<Arc<State>>,
+    Path((id, item_id)): Path<(String, String)>,
+    request: Request,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    if state.closing.load(Ordering::SeqCst) {
+        return Err(ApiError::new(503, "server is shutting down"));
+    }
+    let trusted = request.extensions().get::<Trusted>().is_some_and(|v| v.0);
+    let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| ApiError::new(413, "retry body exceeds limit"))?;
+    let body = if bytes.is_empty() {
+        RetryBody::default()
+    } else {
+        serde_json::from_slice::<Option<RetryBody>>(&bytes)
+            .map_err(|e| ApiError::new(422, format!("invalid retry body: {e}")))?
+            .unwrap_or_default()
+    };
+    http::refresh(&state).await?;
+    let job = jobs::get(&state, &id)?;
+    let admission_state = state.clone();
+    let admission_job = job.clone();
+    let (created,drain)=tokio::task::spawn_blocking(move|| {
+        let job=admission_job;let state=admission_state;
+        let _access=job.access.lock().unwrap();
+        if state.closing.load(Ordering::SeqCst){return Err(ApiError::new(503,"server is shutting down"));}
+        if !state.jobs.lock().unwrap().get(&id).is_some_and(|known|Arc::ptr_eq(known,&job)){return Err(ApiError::new(404,"job not found"));}
+        let mut data=job.data.lock().unwrap();
+        if data.persistence_error.is_some(){return Err(ApiError::new(409,"job persistence failed; restart to recover before retrying"));}
+        let index=data.items.iter().position(|i|i.item_id==item_id).ok_or_else(||ApiError::new(404,"item not found"))?;
+        let prior=data.items[index].clone();
+        if !["done","error"].contains(&prior.status.as_str())||job.retry_pending.lock().unwrap().contains(&item_id){return Err(ApiError::new(409,"item has not reached a terminal state yet; retry when done"));}
+        if !prior.retryable{return Err(ApiError::new(409,"file items recorded from a CLI run cannot be retried or enhanced here; run the markitai CLI on the file again"));}
+        if prior.kind=="file" {store::safe_file(&job.folder.join("uploads"),&prior.name).map_err(|_|ApiError::new(404,"original upload is no longer on disk"))?;}
+        else if prior.kind=="url" {
+            if !trusted{return Err(ApiError::new(403,"URL conversion requires loopback or token authentication; safe remote URL fetching is not yet available"));}
+            let parsed=url::Url::parse(&prior.name).map_err(|_|ApiError::new(422,"invalid URL"))?;
+            if !["http","https"].contains(&parsed.scheme())||parsed.host_str().is_none(){return Err(ApiError::new(422,"URLs must use http or https"));}
+        } else {return Err(ApiError::new(409,"item has no supported original source"));}
+        let opts=match body.options {Some(opts)=>opts,None=>{
+            let saved=data.item_options.get(&item_id).unwrap_or(&data.options);
+            let mut known=serde_json::to_value(JobOptions::default()).unwrap();
+            if let Some(fields)=saved.as_object(){for (key,value) in fields{if let Some(target)=known.get_mut(key){*target=value.clone();}}}
+            serde_json::from_value(known).map_err(|_|ApiError::new(422,"saved item options are invalid"))?
+        }};
+        let mut cfg=opts.config(&state.cfg)?;
+        if body.operation==Operation::Enhance&& (cfg["llm"]["enabled"]!=true||!markitai_core::llm_capabilities(&cfg).routable){return Err(ApiError::new(409,"LLM enhancement is unavailable; enable a routable LLM first"));}
+        let base=files::item_base(&data,&prior);
+        if base.is_empty()||FsPath::new(&base).components().count()!=1||base.contains(['/', '\\'])||matches!(base.as_str(),"."|"..") {return Err(ApiError::new(409,"saved output identity is not safe to retry"));}
+        let family=[format!("{base}.md"),format!("{base}.llm.md")].map(|s|caseless::default_case_fold_str(&s));
+        for sibling in data.items.iter().filter(|i|i.item_id!=item_id){let other=files::item_base(&data,sibling);if [format!("{other}.md"),format!("{other}.llm.md")].iter().any(|s|family.contains(&caseless::default_case_fold_str(s))){return Err(ApiError::new(409,"saved output family overlaps another item"));}}
+        let runtime=job.runtime.get_or_init(||Arc::new(markitai_core::LlmRuntime::new(cfg["llm"]["concurrency"].as_u64().unwrap_or(10).max(1) as usize).expect("validated LLM concurrency"))).clone();
+        cfg["output"]["on_conflict"]=json!("overwrite");
+        cfg["output"]["filename"]=json!(format!("{base}.md"));
+        if body.operation==Operation::Retry{
+            let inherited=data.options.clone();let ids=data.items.iter().map(|i|i.item_id.clone()).collect::<Vec<_>>();
+            for id in ids{data.item_options.entry(id).or_insert_with(||inherited.clone());}
+            let options=serde_json::to_value(&opts).unwrap();data.options=options.clone();data.item_options.insert(item_id.clone(),options);
+        }
+        data.bases.insert(item_id.clone(),base.clone());
+        let job_id=data.id.clone();
+        let item=&mut data.items[index];item.status="queued".into();item.error=None;item.output=None;item.duration_ms=None;item.finished_at=None;item.cost_usd=None;item.llm_enhanced=false;item.operation=body.operation.name().into();item.skipped=false;item.skip_reason=None;item.warnings.clear();
+        let created=json!({"job_id":job_id,"items":[item.created()]});
+        let payload=json!(item);
+        data.status="running".into();data.finished_at=None;data.persistence_error=None;
+        job.active.fetch_add(1,Ordering::SeqCst);job.retry_pending.lock().unwrap().insert(item_id);
+        let _=job.events.send(("item",payload));let _=job.events.send(("job",data.progress()));
+        let mut queue=job.retry_queue.lock().unwrap();
+        queue.push_back(Work{index,prior,cfg,base,operation:body.operation,runtime,explicit:opts.strategy});
+        let drain=!job.retry_draining.swap(true,Ordering::SeqCst);
+        Ok((created,drain))
+    }).await.map_err(ApiError::internal)??;
+    if drain {
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let work = {
+                    let mut queue = job.retry_queue.lock().unwrap();
+                    let work = queue.pop_front();
+                    if work.is_none() {
+                        job.retry_draining.store(false, Ordering::SeqCst);
+                    }
+                    work
+                };
+                let Some(work) = work else { break };
+                run(task_state.clone(), job.clone(), work).await;
+                jobs::complete(&task_state, job.clone()).await;
+            }
+        });
+        state.tasks.lock().unwrap().push(task);
+    }
+    Ok((StatusCode::ACCEPTED, Json(created)))
+}
+
+fn equal_files(left: &FsPath, right: &FsPath) -> io::Result<bool> {
+    let mut a = fs::File::open(left)?;
+    let mut b = fs::File::open(right)?;
+    if a.metadata()?.len() != b.metadata()?.len() {
+        return Ok(false);
+    }
+    let mut x = [0u8; 65536];
+    let mut y = [0u8; 65536];
+    loop {
+        let n = a.read(&mut x)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut y[..n])?;
+        if x[..n] != y[..n] {
+            return Ok(false);
+        }
+    }
+}
+
+async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
+    let slots = if work.prior.kind == "url" {
+        state.url_slots.clone()
+    } else {
+        state.file_slots.clone()
+    };
+    let mut closing = state.shutdown.subscribe();
+    let permit = if state.closing.load(Ordering::SeqCst) {
+        None
+    } else {
+        tokio::select! {biased;_=closing.changed()=>None,permit=slots.acquire_owned()=>permit.ok()}
+    };
+    if permit.is_none() || state.closing.load(Ordering::SeqCst) {
+        failed(
+            &job,
+            work.index,
+            &work.prior,
+            "cancelled (server shutdown)".into(),
+            0,
+        );
+        return;
+    }
+    {
+        let mut data = job.data.lock().unwrap();
+        data.items[work.index].status = "running".into();
+        let _ = job.events.send(("item", json!(data.items[work.index])));
+    }
+    let worker = job.clone();
+    let fallback = (work.index, work.prior.clone());
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let started = Instant::now();
+        let result = (|| -> ApiResult<()> {
+            let stage = transaction::stage(&worker.folder).map_err(ApiError::internal)?;
+            let out = stage.path().join("out");
+            store::private_dir(&out).map_err(ApiError::internal)?;
+            let source = if work.prior.kind == "url" {
+                work.prior.name.clone()
+            } else {
+                store::safe_file(&worker.folder.join("uploads"), &work.prior.name)?
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let explicit = work.explicit.as_deref();
+            let converted = match markitai_core::convert_with_context(
+                &source,
+                markitai_core::ConvertOptions {
+                    output_dir: Some(out.clone()),
+                    config: Some(work.cfg.clone()),
+                    ..Default::default()
+                },
+                markitai_core::ConvertContext {
+                    explicit_fetch_strategy: explicit,
+                    llm_runtime: Some(&work.runtime),
+                },
+            ) {
+                Ok(result) => result,
+                Err(markitai_core::Error::ImageOnly(_)) if work.operation == Operation::Retry => {
+                    let mut data = worker.data.lock().unwrap();
+                    let item = &mut data.items[work.index];
+                    item.status = "done".into();
+                    item.skipped = true;
+                    item.skip_reason = Some("image_only".into());
+                    item.error = Some("skipped (image_only)".into());
+                    item.duration_ms =
+                        Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                    item.finished_at = Some(now());
+                    worker
+                        .retry_pending
+                        .lock()
+                        .unwrap()
+                        .remove(&work.prior.item_id);
+                    let _ = worker.events.send(("item", json!(item)));
+                    let _ = worker.events.send(("job", data.progress()));
+                    return Ok(());
+                }
+                Err(error) => return Err(ApiError::new(500, error.to_string())),
+            };
+            if work.operation == Operation::Enhance
+                && (converted.llm_output_path.is_none() || converted.skip_reason.is_some())
+            {
+                return Err(ApiError::new(
+                    500,
+                    "LLM enhancement did not produce an enhanced result",
+                ));
+            }
+            let relative = |path: &FsPath| {
+                path.strip_prefix(&out)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            };
+            let selected = converted
+                .llm_output_path
+                .as_deref()
+                .or(converted.output_path.as_deref())
+                .and_then(relative);
+            if selected.is_none() {
+                return Err(ApiError::new(500, "conversion produced no output"));
+            }
+            let mut replacements = store::files(&out)
+                .map_err(ApiError::internal)?
+                .into_iter()
+                .map(|(name, path)| (format!("out/{name}"), path))
+                .collect::<Vec<_>>();
+            let _access = worker.access.lock().unwrap();
+            let mut data = worker.data.lock().unwrap();
+            let _sidecar_locks = super::sidecar::prepare(&out, &worker.folder.join("out"))
+                .map_err(ApiError::internal)?;
+            replacements.retain(|(name, _)| files::public_member(name));
+            let mut shared = HashSet::new();
+            for sibling in data
+                .items
+                .iter()
+                .filter(|i| i.item_id != work.prior.item_id)
+            {
+                shared.extend(files::owned_files(&worker.folder, &data, sibling)?);
+            }
+            let mut retained = Vec::new();
+            for (name, path) in replacements.drain(..) {
+                let raw = name.strip_prefix("out/").unwrap();
+                if shared.contains(raw) {
+                    let existing = store::safe_file(&worker.folder.join("out"), raw)?;
+                    if !equal_files(&existing, &path).map_err(ApiError::internal)? {
+                        return Err(ApiError::new(
+                            409,
+                            "retry would replace another item's artifact",
+                        ));
+                    }
+                } else {
+                    retained.push((name, path));
+                }
+            }
+            let stale = format!("{}.llm.md", work.base);
+            let removals = if converted.llm_output_path.is_none()
+                && !shared.contains(&stale)
+                && store::safe_file(&worker.folder.join("out"), &stale).is_ok()
+            {
+                vec![format!("out/{stale}")]
+            } else {
+                Vec::new()
+            };
+            let id = match transaction::publish(
+                &worker.folder,
+                stage,
+                worker.sequence.fetch_add(1, Ordering::SeqCst),
+                retained,
+                removals,
+            ) {
+                Ok(id) => id,
+                Err(error) => {
+                    if transaction::requires_recovery(&error) {
+                        data.persistence_error = Some(
+                            "output rollback failed; restart to recover the previous result".into(),
+                        );
+                    }
+                    return Err(ApiError::internal(error));
+                }
+            };
+            data.transactions.push(id);
+            let assets = converted
+                .assets
+                .iter()
+                .chain(&converted.screenshots)
+                .filter_map(|p| relative(p))
+                .collect();
+            data.assets.insert(work.prior.item_id.clone(), assets);
+            let item = &mut data.items[work.index];
+            item.status = "done".into();
+            item.output = selected;
+            item.llm_enhanced = converted.llm_output_path.is_some();
+            item.duration_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+            item.finished_at = Some(now());
+            item.cost_usd = Some(converted.usage.cost_usd);
+            item.skipped = converted.skip_reason.is_some();
+            item.skip_reason = converted.skip_reason;
+            item.error = item.skip_reason.as_ref().map(|v| format!("skipped ({v})"));
+            item.warnings = converted.warnings;
+            worker
+                .retry_pending
+                .lock()
+                .unwrap()
+                .remove(&work.prior.item_id);
+            let _ = worker.events.send(("item", json!(item)));
+            let _ = worker.events.send(("job", data.progress()));
+            Ok(())
+        })();
+        if let Err(error) = result {
+            failed(
+                &worker,
+                work.index,
+                &work.prior,
+                error.detail,
+                started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            );
+        }
+    })
+    .await;
+    if result.is_err() {
+        failed(
+            &job,
+            fallback.0,
+            &fallback.1,
+            "internal retry worker failure".into(),
+            0,
+        );
+    }
+}
+fn failed(job: &Job, index: usize, prior: &Item, error: String, duration: u64) {
+    let mut data = job.data.lock().unwrap();
+    let recoverable = data.persistence_error.is_none();
+    let item = &mut data.items[index];
+    if recoverable && prior.status == "done" && prior.output.is_some() && !prior.skipped {
+        *item = prior.clone();
+    } else {
+        item.status = "error".into();
+        item.error = Some(error);
+        item.finished_at = Some(now());
+        item.duration_ms = Some(duration);
+    }
+    job.retry_pending.lock().unwrap().remove(&prior.item_id);
+    let _ = job.events.send(("item", json!(item)));
+    let _ = job.events.send(("job", data.progress()));
+}
+
+pub(super) async fn delete(
+    ExtractState(state): ExtractState<Arc<State>>,
+    Path((id, item_id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    http::refresh(&state).await?;
+    let job = jobs::get(&state, &id)?;
+    tokio::task::spawn_blocking(move || {
+        let _access = job.access.lock().unwrap();
+        if !state
+            .jobs
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|known| Arc::ptr_eq(known, &job))
+        {
+            return Err(ApiError::new(404, "job not found"));
+        }
+        let mut data = job.data.lock().unwrap();
+        let index = data
+            .items
+            .iter()
+            .position(|i| i.item_id == item_id)
+            .ok_or_else(|| ApiError::new(404, "item not found"))?;
+        if data.status == "running"
+            || job.active.load(Ordering::SeqCst) > 0
+            || !["done", "error"].contains(&data.items[index].status.as_str())
+        {
+            return Err(ApiError::new(409, "job is still running; retry when done"));
+        }
+        if data.items.len() == 1 {
+            markitai_core::output::check_path(&job.folder, false).map_err(ApiError::internal)?;
+            fs::remove_dir_all(&job.folder).map_err(ApiError::internal)?;
+            drop(data);
+            state.jobs.lock().unwrap().remove(&id);
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        let selected = data.items[index].clone();
+        let mut owned = files::owned_files(&job.folder, &data, &selected)?;
+        for sibling in data.items.iter().filter(|i| i.item_id != item_id) {
+            for name in files::owned_files(&job.folder, &data, sibling)? {
+                owned.remove(&name);
+            }
+        }
+        let mut removals = owned.iter().map(|n| format!("out/{n}")).collect::<Vec<_>>();
+        if selected.kind == "file"
+            && !data
+                .items
+                .iter()
+                .any(|i| i.item_id != item_id && i.kind == "file" && i.name == selected.name)
+            && store::safe_file(&job.folder.join("uploads"), &selected.name).is_ok()
+        {
+            removals.push(format!("uploads/{}", selected.name));
+        }
+        if store::safe_file(&job.folder, "archive.zip").is_ok() {
+            removals.push("archive.zip".into());
+        }
+        let prior = data.clone();
+        let stage = transaction::stage(&job.folder).map_err(ApiError::internal)?;
+        let staged = stage.path().join("out");
+        store::private_dir(&staged).map_err(ApiError::internal)?;
+        let _sidecar_locks = super::sidecar::prune(&staged, &job.folder.join("out"), &owned)
+            .map_err(ApiError::internal)?;
+        let replacements = store::files(&staged)
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .map(|(name, path)| (format!("out/{name}"), path))
+            .collect();
+        let transaction = transaction::publish(
+            &job.folder,
+            stage,
+            job.sequence.fetch_add(1, Ordering::SeqCst),
+            replacements,
+            removals,
+        )
+        .map_err(ApiError::internal)?;
+        data.transactions.push(transaction);
+        data.items.remove(index);
+        data.bases.remove(&item_id);
+        data.assets.remove(&item_id);
+        data.item_options.remove(&item_id);
+        let saved = store::measure(&job.folder).and_then(|size| {
+            data.size = size;
+            store::persist(&job.folder, &data)
+        });
+        if let Err(error) = saved {
+            let transaction = data.transactions.last().unwrap().clone();
+            if let Err(error) = transaction::abort(&job.folder, &transaction) {
+                data.status = "error".into();
+                data.persistence_error =
+                    Some("item deletion rollback failed; restart to recover".into());
+                state.persistence_failed.store(true, Ordering::SeqCst);
+                return Err(ApiError::internal(error));
+            }
+            *data = prior;
+            // persist may have renamed metadata before directory fsync failed.
+            // Put the matching old row back along with its restored bytes.
+            store::persist(&job.folder, &data).map_err(ApiError::internal)?;
+            return Err(ApiError::internal(error));
+        }
+        transaction::committed(&job.folder, &mut data);
+        let _ = job.events.send(("job", data.progress()));
+        Ok(StatusCode::NO_CONTENT)
+    })
+    .await
+    .map_err(ApiError::internal)?
+}

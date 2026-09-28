@@ -1,13 +1,14 @@
 //! Bounded image decoding and shared asset preparation.
 
 mod svg;
+mod tiff;
 
 use crate::{Asset, Document, Error, Result, config, output_profiles};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Rgb, RgbImage};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const MAX_PIXELS: u64 = 32_000_000;
@@ -100,6 +101,15 @@ fn encode(
     cfg: &Value,
     force_png: bool,
 ) -> Result<(Vec<u8>, &'static str, &'static str)> {
+    encode_limited(image, cfg, force_png, tiff::MAX_ENCODED)
+}
+
+fn encode_limited(
+    image: &DynamicImage,
+    cfg: &Value,
+    force_png: bool,
+    limit: usize,
+) -> Result<(Vec<u8>, &'static str, &'static str)> {
     let width = dimension(cfg, "/image/max_width", 1920).max(1);
     let height = dimension(cfg, "/image/max_height", 99999).max(1);
     let resized;
@@ -116,30 +126,59 @@ fn encode(
             .and_then(Value::as_str)
             .unwrap_or("jpeg")
     };
-    let mut bytes = Vec::new();
+    let mut buffer = EncodedBuffer {
+        inner: Cursor::new(Vec::new()),
+        limit,
+    };
     let (extension, mime) = match format {
         "png" => {
             image
-                .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+                .write_to(&mut buffer, ImageFormat::Png)
                 .map_err(error)?;
             ("png", "image/png")
         }
         "webp" => {
             // The Rust encoder is lossless; callers disclose this quality difference.
             image
-                .write_to(&mut Cursor::new(&mut bytes), ImageFormat::WebP)
+                .write_to(&mut buffer, ImageFormat::WebP)
                 .map_err(error)?;
             ("webp", "image/webp")
         }
         _ => {
             let quality = dimension(cfg, "/image/quality", 75).clamp(1, 100) as u8;
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, quality)
                 .encode_image(&rgb_on_white(image))
                 .map_err(error)?;
             ("jpg", "image/jpeg")
         }
     };
-    Ok((bytes, extension, mime))
+    Ok((buffer.inner.into_inner(), extension, mime))
+}
+
+struct EncodedBuffer {
+    inner: Cursor<Vec<u8>>,
+    limit: usize,
+}
+impl Write for EncodedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self
+            .inner
+            .position()
+            .checked_add(bytes.len() as u64)
+            .is_none_or(|end| end > self.limit as u64)
+        {
+            return Err(std::io::Error::other("Encoded image byte budget exceeded"));
+        }
+        self.inner.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl Seek for EncodedBuffer {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(position)
+    }
 }
 
 fn notice(doc: &mut Document, message: &str) {
@@ -170,6 +209,24 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
         {
             replacements.entry(from).or_insert_with(|| target.clone());
             continue;
+        }
+        // Compression applies to page previews, never the TIFF document itself.
+        if tiff::signature(&asset.bytes) {
+            match tiff::multiple(&asset.bytes) {
+                Ok(false) => {}
+                result => {
+                    if result.is_err() {
+                        notice(
+                            doc,
+                            "A TIFF asset could not be decoded; it was preserved unchanged and was not filtered or compressed.",
+                        );
+                    }
+                    replacements.entry(from.clone()).or_insert(from.clone());
+                    seen.entry(digest).or_insert(from);
+                    prepared.push(asset);
+                    continue;
+                }
+            }
         }
         let (image, format) = match decode(&asset.bytes) {
             Ok(value) => value,
@@ -230,55 +287,124 @@ pub(crate) fn prepare_assets(doc: &mut Document, cfg: &Value) {
     doc.assets = prepared;
 }
 
-pub(crate) fn extract(path: &Path, cfg: &Value) -> Result<(Document, VisionImage)> {
-    let bytes = std::fs::read(path)?;
+pub(crate) fn extract(
+    path: &Path,
+    cfg: &Value,
+    local_ocr: bool,
+) -> Result<(Document, Vec<VisionImage>)> {
+    let mut bytes = Vec::new();
+    // The shared input policy bounds ordinary files. A growing input cannot
+    // bypass that ceiling while being read.
+    std::fs::File::open(path)?
+        .take(500 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 500 * 1024 * 1024 {
+        return Err(error("image input exceeds 500 MiB"));
+    }
+    if tiff::signature(&bytes) && tiff::multiple(&bytes)? {
+        return extract_tiff(path, bytes, cfg, local_ocr);
+    }
+    let (image, svg) = single_vision(&bytes, path, cfg)?;
+    let (name, asset) = if svg {
+        ("image.svg".into(), bytes.clone())
+    } else {
+        (
+            format!("image.{}", mime_extension(image.mime)),
+            image.bytes.clone(),
+        )
+    };
+    let mut doc = image_document(path, &name, asset);
+    if svg {
+        doc.metadata.insert("format".into(), "SVG".into());
+    }
+    if !svg {
+        webp_notice(&mut doc, cfg);
+    }
+    if local_ocr {
+        let recognized = if tiff::signature(&bytes) {
+            crate::ocr::recognize_rgb(rgb_on_white(&tiff::Pages::new(&bytes)?.decode(0)?), cfg)?
+        } else {
+            crate::ocr::recognize(if svg { &image.bytes } else { &bytes }, cfg)?
+        };
+        if recognized.text.trim().is_empty() {
+            doc.warnings.push(
+                "Local OCR found no readable text; the output retains the image reference.".into(),
+            );
+        } else {
+            doc.markdown.push('\n');
+            doc.markdown.push_str(&recognized.text);
+            if !doc.markdown.ends_with('\n') {
+                doc.markdown.push('\n');
+            }
+        }
+        ocr_metadata(&mut doc, cfg);
+        Ok((doc, Vec::new()))
+    } else {
+        Ok((doc, vec![image]))
+    }
+}
+
+/// Prepare every document page for one image-analysis request. Animated image
+/// formats retain their existing first-frame policy when transcoding.
+pub(crate) fn prepare_vision(bytes: &[u8], name: &str, cfg: &Value) -> Result<Vec<VisionImage>> {
+    if tiff::signature(bytes) {
+        let pages = tiff::Pages::new(bytes)?;
+        pages.check_vision_limit(cfg)?;
+        if pages.len() > 1 {
+            let mut images = Vec::with_capacity(pages.len());
+            let mut remaining = tiff::MAX_ENCODED;
+            for index in 0..pages.len() {
+                let image = pages.decode(index)?;
+                let (bytes, _, mime) = encode_limited(
+                    &image,
+                    cfg,
+                    !config::enabled(cfg, "/image/compress"),
+                    remaining,
+                )?;
+                remaining -= bytes.len();
+                images.push(VisionImage { mime, bytes });
+            }
+            return Ok(images);
+        }
+    }
+    Ok(vec![single_vision(bytes, Path::new(name), cfg)?.0])
+}
+
+fn single_vision(bytes: &[u8], path: &Path, cfg: &Value) -> Result<(VisionImage, bool)> {
     let extension = path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let detected = image::guess_format(&bytes).ok();
-    if detected.is_none() && (extension == "svg" || svg::is_svg(&bytes)) {
-        let image = svg::render(&bytes)?;
-        let (vision_bytes, _, mime) = encode(&image, cfg, true)?;
-        let mut doc = image_document(path, "image.svg", bytes);
-        doc.metadata.insert("format".into(), "SVG".into());
-        return Ok((
-            doc,
-            VisionImage {
-                mime,
-                bytes: vision_bytes,
-            },
-        ));
+    let detected = image::guess_format(bytes)
+        .ok()
+        .or_else(|| tiff::signature(bytes).then_some(ImageFormat::Tiff));
+    if detected.is_none() && (extension == "svg" || svg::is_svg(bytes)) {
+        let rendered = svg::render(bytes)?;
+        let (bytes, _, mime) = encode(&rendered, cfg, true)?;
+        return Ok((VisionImage { mime, bytes }, true));
     }
     if detected == Some(ImageFormat::Avif)
         || detected.is_none() && matches!(extension.as_str(), "heic" | "heif" | "avif")
     {
-        let extension = if detected == Some(ImageFormat::Avif) {
-            "avif"
-        } else {
-            &extension
-        };
-        return Err(Error::Unsupported(format!(
-            "Native {extension} rasterization is not implemented yet"
-        )));
+        return Err(Error::Unsupported(
+            "HEIF/AVIF decoding is not enabled in this build; no image has been sent to a model"
+                .into(),
+        ));
     }
-    if detected == Some(ImageFormat::Tiff) {
-        let decoder = tiff::decoder::Decoder::new(Cursor::new(&bytes)).map_err(error)?;
-        if decoder.more_images() {
-            return Err(Error::Unsupported("Multi-page TIFF vision routing is not implemented yet; no pages were sent to a model".into()));
-        }
-    }
-    let (image, format) = decode(&bytes)?;
+    let (image, format) = if detected == Some(ImageFormat::Tiff) {
+        (tiff::Pages::new(bytes)?.decode(0)?, ImageFormat::Tiff)
+    } else {
+        decode(bytes)?
+    };
     let preserve = !config::enabled(cfg, "/image/compress");
-    let (vision_bytes, vision_extension, mime) = if preserve
+    let (bytes, mime) = if preserve
         && matches!(
             format,
             ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Gif
         ) {
         (
-            bytes.clone(),
-            format.extensions_str()[0],
+            bytes.to_vec(),
             match format {
                 ImageFormat::Jpeg => "image/jpeg",
                 ImageFormat::WebP => "image/webp",
@@ -287,24 +413,115 @@ pub(crate) fn extract(path: &Path, cfg: &Value) -> Result<(Document, VisionImage
             },
         )
     } else {
-        encode(&image, cfg, preserve)?
+        let (bytes, _, mime) = encode(&image, cfg, preserve)?;
+        (bytes, mime)
     };
-    // An internal content name avoids interpreting source filename punctuation as Markdown.
-    let asset_name = format!("image.{vision_extension}");
-    let mut doc = image_document(path, &asset_name, vision_bytes.clone());
-    if cfg["image"]["format"] == "webp" && config::enabled(cfg, "/image/compress") {
+    Ok((VisionImage { mime, bytes }, false))
+}
+
+fn mime_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    }
+}
+
+fn webp_notice(doc: &mut Document, cfg: &Value) {
+    if config::enabled(cfg, "/image/compress")
+        && cfg.pointer("/image/format").and_then(Value::as_str) == Some("webp")
+    {
         notice(
-            &mut doc,
-            "WebP output uses lossless native encoding; image.quality does not affect WebP in this build.",
+            doc,
+            "WebP output uses the native lossless encoder; image.quality applies to JPEG output.",
         );
     }
-    Ok((
-        doc,
-        VisionImage {
-            mime,
-            bytes: vision_bytes,
+}
+
+fn ocr_metadata(doc: &mut Document, cfg: &Value) {
+    doc.metadata.insert("ocr_used".into(), true.into());
+    doc.metadata
+        .insert("ocr_path".into(), crate::ocr::backend().into());
+    if config::enabled(cfg, "/llm/enabled") {
+        doc.warnings.push(
+            "VLM OCR is disabled; only locally recognized text is sent for LLM enhancement.".into(),
+        );
+    }
+}
+
+fn extract_tiff(
+    path: &Path,
+    bytes: Vec<u8>,
+    cfg: &Value,
+    local_ocr: bool,
+) -> Result<(Document, Vec<VisionImage>)> {
+    let pages = tiff::Pages::new(&bytes)?;
+    if !local_ocr {
+        pages.check_vision_limit(cfg)?;
+    }
+    let mut doc = image_document(path, "original.tiff", Vec::new());
+    let title = doc.metadata["title"].as_str().unwrap_or_default();
+    doc.markdown = format!("# {title}\n\n[Original TIFF](.markitai/assets/original.tiff)\n");
+    doc.assets.clear();
+    doc.metadata.insert("format".into(), "TIFF".into());
+    doc.metadata.insert("page_count".into(), pages.len().into());
+    let mut vision = Vec::with_capacity(if local_ocr { 0 } else { pages.len() });
+    let mut remaining = tiff::MAX_ENCODED - bytes.len();
+    for index in 0..pages.len() {
+        let image = pages.decode(index)?;
+        let (encoded, extension, mime) = encode_limited(
+            &image,
+            cfg,
+            !config::enabled(cfg, "/image/compress"),
+            remaining / if local_ocr { 1 } else { 2 },
+        )?;
+        let name = format!("page{:04}.{extension}", index + 1);
+        doc.markdown.push_str(&format!(
+            "\n<!-- Page number: {} -->\n\n![Page {}](.markitai/assets/{name})\n",
+            index + 1,
+            index + 1
+        ));
+        if local_ocr {
+            let recognized = crate::ocr::recognize_rgb(rgb_on_white(&image), cfg)?;
+            if recognized.text.trim().is_empty() {
+                doc.warnings.push(format!("Local OCR found no readable text on TIFF page {}; the output retains its image reference.", index + 1));
+            } else {
+                if doc.markdown.len().saturating_add(recognized.text.len()) > 64 * 1024 * 1024 {
+                    return Err(error("TIFF OCR text exceeds 64 MiB"));
+                }
+                doc.markdown.push('\n');
+                doc.markdown.push_str(&recognized.text);
+                if !doc.markdown.ends_with('\n') {
+                    doc.markdown.push('\n');
+                }
+            }
+        } else {
+            remaining -= encoded.len();
+            vision.push(VisionImage {
+                mime,
+                bytes: encoded.clone(),
+            });
+        }
+        remaining -= encoded.len();
+        doc.assets.push(Asset {
+            name,
+            bytes: encoded,
+        });
+    }
+    // Move the original only after the borrowing decoder session has finished.
+    doc.assets.insert(
+        0,
+        Asset {
+            name: "original.tiff".into(),
+            bytes,
         },
-    ))
+    );
+    if local_ocr {
+        ocr_metadata(&mut doc, cfg);
+    }
+    webp_notice(&mut doc, cfg);
+    Ok((doc, vision))
 }
 
 fn image_document(path: &Path, asset_name: &str, bytes: Vec<u8>) -> Document {
@@ -547,9 +764,9 @@ mod tests {
         for extension in ["tiff", "heic", "svg", "avif"] {
             let path = dir.path().join(format!("renamed.{extension}"));
             std::fs::write(&path, &bytes).unwrap();
-            let (doc, vision) = extract(&path, &cfg).unwrap();
+            let (doc, vision) = extract(&path, &cfg, false).unwrap();
             assert_eq!(doc.assets[0].bytes, bytes);
-            assert_eq!(vision.mime, "image/png");
+            assert_eq!(vision[0].mime, "image/png");
         }
     }
 
@@ -564,11 +781,11 @@ mod tests {
             DynamicImage::new_rgb8(200, 100)
                 .save_with_format(&path, format)
                 .unwrap();
-            let (_, vision) = extract(&path, &cfg).unwrap();
-            let (image, _) = decode(&vision.bytes).unwrap();
+            let (_, vision) = extract(&path, &cfg, false).unwrap();
+            let (image, _) = decode(&vision[0].bytes).unwrap();
             assert_eq!((image.width(), image.height()), (200, 100));
             if extension == "jpg" {
-                assert_eq!(vision.bytes, std::fs::read(&path).unwrap());
+                assert_eq!(vision[0].bytes, std::fs::read(&path).unwrap());
             }
         }
     }

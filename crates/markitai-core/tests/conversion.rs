@@ -10,6 +10,12 @@ mod pdf_media;
 #[path = "conversion/url_pdf.rs"]
 mod url_pdf;
 
+#[path = "conversion/multipage_image.rs"]
+mod multipage_image;
+
+#[path = "conversion/image_enrichment.rs"]
+mod image_enrichment;
+
 fn options() -> ConvertOptions {
     ConvertOptions {
         config: Some(json!({})),

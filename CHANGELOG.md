@@ -34,6 +34,10 @@
 - Native macOS PDF page rendering, local per-page OCR and bounded JPEG/PNG/WebP screenshots with typed page references and complete-page vision requests.
 - Static/automatic URL PDF media processing reuses bounded downloaded bytes, supports redirects and extensionless downloads, and preserves URL identity and pure-mode precedence.
 
+- Complete bounded TIFF page decoding, orientation, original-file retention and per-page OCR/vision previews.
+- Image caption/description analysis with real-reference updates, shared document request budgets and atomic cross-process images.json merging.
+- Persistent REST item retry/enhance and deletion with per-item options, shared-asset ownership and recoverable output transactions.
+
 ### Fixed
 
 - PDF page-number cleanup preserves substantive Page N paragraphs; nonpainting text modes persist across text blocks and nested Forms without changing glyph positions.

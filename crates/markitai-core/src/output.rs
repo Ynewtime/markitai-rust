@@ -8,6 +8,7 @@ use std::path::{Component, Path};
 use std::sync::Mutex;
 
 static OUTPUT_LOCK: Mutex<()> = Mutex::new(());
+mod image_metadata;
 
 /// Relocate complete asset destinations when archiving Markdown and its assets.
 #[doc(hidden)]
@@ -122,6 +123,18 @@ pub fn content(result: &ConversionOutput, cfg: &Value, enhanced: bool) -> Result
 }
 
 pub(crate) fn apply_profiles(result: &mut ConversionOutput, cfg: &Value) {
+    if matches!(
+        cfg.pointer("/output/profile").and_then(Value::as_str),
+        Some("rag" | "obsidian")
+    ) {
+        for image in &mut result.images {
+            if let Some(asset) = image.get("asset").and_then(Value::as_str)
+                && let Some(suffix) = asset.strip_prefix(".markitai/assets/")
+            {
+                image["asset"] = format!("assets/{suffix}").into();
+            }
+        }
+    }
     if let Some(markdown) = &mut result.llm_markdown {
         if let Some(base) = &mut result.base_frontmatter {
             crate::output_profiles::apply(&mut result.markdown, base, cfg);
@@ -506,6 +519,19 @@ pub(crate) fn write_document(
             *md = rewrite_asset_references(md, &replacements);
         }
     }
+    for image in &mut result.images {
+        let asset = image
+            .get("asset")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Conversion("Image analysis has no associated asset".into()))?;
+        let published = replacements.get(asset).ok_or_else(|| {
+            Error::Conversion("Image analysis refers to an asset that was not published".into())
+        })?;
+        image["asset"] = std::path::absolute(dir.join(published))?
+            .to_string_lossy()
+            .as_ref()
+            .into();
+    }
     let (screenshots, published) = match screenshots {
         Screenshots::New(shots) => (shots, false),
         Screenshots::PublishedPdf(shots) => (shots, true),
@@ -552,6 +578,26 @@ pub(crate) fn write_document(
             atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
         }
         result.llm_output_path = Some(path);
+    }
+    if config::enabled(cfg, "/image/desc_enabled") && !result.images.is_empty() {
+        let source = if crate::is_url(&result.source) {
+            result
+                .llm_output_path
+                .as_ref()
+                .or(result.output_path.as_ref())
+                .and_then(|path| path.file_stem())
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            result.source.clone()
+        };
+        image_metadata::publish(
+            &dir.join(asset_prefix),
+            &result.images,
+            &source,
+            allow_symlinks,
+        )?;
     }
     Ok(())
 }

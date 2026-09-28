@@ -90,11 +90,15 @@ pub(super) fn files(root: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
 pub(super) fn persist(folder: &Path, data: &JobData) -> std::io::Result<()> {
     let mut items = serde_json::to_value(&data.items).map_err(std::io::Error::other)?;
     for item in items.as_array_mut().unwrap() {
-        item["options"] = data.options.clone();
+        item["options"] = data
+            .item_options
+            .get(item["item_id"].as_str().unwrap_or(""))
+            .unwrap_or(&data.options)
+            .clone();
     }
     let meta = json!({"job_id":data.id,"created_at":data.created_at,"finished_at":data.finished_at,
         "status":data.status,"options":data.options,"dir_size_bytes":data.size,"version":2,"items":items,
-        "native_bases":data.bases,"native_assets":data.assets});
+        "native_bases":data.bases,"native_assets":data.assets,"native_transactions":data.transactions});
     let mut temporary = tempfile::NamedTempFile::new_in(folder)?;
     #[cfg(unix)]
     {
@@ -131,6 +135,12 @@ pub(super) fn rehydrate(
             continue;
         }
         let folder = entry.path();
+        if !entry.file_type()?.is_dir()
+            || markitai_core::output::check_path(&folder, false).is_err()
+        {
+            continue;
+        }
+        super::transaction::recover(&folder)?;
         let Ok(path) = safe_file(&folder, "meta.json") else {
             continue;
         };
@@ -197,6 +207,18 @@ pub(super) fn rehydrate(
             size,
             bases: serde_json::from_value(value["native_bases"].clone()).unwrap_or_default(),
             assets: serde_json::from_value(value["native_assets"].clone()).unwrap_or_default(),
+            item_options: raw_items
+                .iter()
+                .filter_map(|item| {
+                    Some((
+                        item["item_id"].as_str()?.to_owned(),
+                        item.get("options")?
+                            .as_object()
+                            .map(|value| Value::Object(value.clone()))?,
+                    ))
+                })
+                .collect(),
+            transactions: Vec::new(),
         };
         known
             .lock()
@@ -207,18 +229,27 @@ pub(super) fn rehydrate(
     Ok(())
 }
 
-pub(super) fn finish(job: &Job) -> std::io::Result<()> {
-    let calculated = (|| {
-        let mut size = 0u64;
-        for (name, path) in files(&job.folder)? {
-            if name != "meta.json" && name != "archive.zip" {
-                size = size
-                    .checked_add(fs::metadata(path)?.len())
-                    .ok_or_else(|| std::io::Error::other("job size overflow"))?;
-            }
+pub(super) fn measure(folder: &Path) -> std::io::Result<u64> {
+    let mut size = 0u64;
+    for name in ["out", "uploads"] {
+        let path = folder.join(name);
+        if !path.try_exists()? {
+            continue;
         }
-        Ok::<u64, std::io::Error>(size)
-    })();
+        for (_, file) in files(&path)? {
+            size = size
+                .checked_add(fs::metadata(file)?.len())
+                .ok_or_else(|| std::io::Error::other("job size overflow"))?;
+        }
+    }
+    Ok(size)
+}
+pub(super) fn finish(job: &Job) -> std::io::Result<()> {
+    let calculated = if job.data.lock().unwrap().persistence_error.is_some() {
+        Err(std::io::Error::other("job requires recovery"))
+    } else {
+        measure(&job.folder)
+    };
     let mut data = job.data.lock().unwrap();
     data.finished_at = Some(now());
     let result = calculated.and_then(|size| {
@@ -233,6 +264,9 @@ pub(super) fn finish(job: &Job) -> std::io::Result<()> {
             "history could not be persisted; completed artifacts remain available until shutdown"
                 .into(),
         );
+    }
+    if result.is_ok() {
+        super::transaction::committed(&job.folder, &mut data);
     }
     let mut progress = data.progress();
     if let Some(error) = &data.persistence_error {

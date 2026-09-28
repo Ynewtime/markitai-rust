@@ -1,8 +1,9 @@
 # Images and shared assets
 
 Raster preparation lives in the Rust core, so CLI and language adapters use the
-same decoding, resize and asset rules. No Python process, image editor or remote
-image fetch is involved. The enabled codecs are JPEG, PNG, GIF, BMP, TIFF and
+same decoding, resize and asset rules. Native decoding uses no Python process or
+external image editor. Optional [image enrichment](image-enrichment.md) can fetch
+actual remote image references before passing their bytes to these decoders. The enabled codecs are JPEG, PNG, GIF, BMP, TIFF and
 WebP. Static SVG inputs are rendered natively with resvg. HEIF/AVIF decoding
 remains unfinished.
 
@@ -15,9 +16,8 @@ base document retains a local image reference, while the enhanced document is
 the model's Markdown. Standalone inputs bypass embedded-image size filtering.
 When re-encoding GIF or animated WebP, the first image supplies the pixels.
 With compression disabled their original streams are retained; provider-specific
-animation handling has not been validated. Multi-page TIFF is rejected before
-upload until all-page routing is implemented. The reader never presents the
-first TIFF page as a complete multi-page document.
+animation handling has not been validated. Multi-page TIFF follows the document
+page workflow below; animated GIF/WebP frames are not treated as document pages.
 
 With both LLM and OCR disabled, CLI image items are skipped with
 `skip_reason="image_only"`; no Markdown file is written. The shared library API
@@ -27,9 +27,49 @@ reference Python API. Missing files still report a missing-file error.
 `ocr=True` without LLM selects [local image OCR](ocr.md) on macOS. With LLM
 enabled, it selects image vision unless `MARKITAI_NO_VLM_OCR` disables that
 upload; then local OCR supplies text for enhancement without image blocks.
-PDF page OCR, HEIF/AVIF conversion, document screenshots, alt-text and
-image-description enrichment remain unfinished. [Browser screenshots](browser.md)
+[PDF page OCR and screenshots](pdf-rendering.md) use the native macOS renderer.
+HEIF/AVIF conversion remains unfinished. [Browser screenshots](browser.md)
 are available with an installed Chromium executable.
+
+## Multi-page TIFF
+
+TIFF and BigTIFF content is detected from bytes, including under a misleading
+supported image suffix. All linked page directories are inspected before OCR,
+preview encoding or a model request. Pages retain their file order and each
+page's EXIF orientation. Grayscale, RGB, RGBA and CMYK use the existing native
+TIFF/image codecs; unsupported sample layouts or compression methods fail
+explicitly. Additional TIFF SubIFD thumbnails are not extra document pages.
+
+A multi-page document contains an original TIFF download link, then a page marker
+and preview for every page. The original bytes are retained even when compression
+is enabled. Page previews use the configured encoder, or lossless PNG at original
+upright dimensions when compression is disabled. MIME types describe the encoded
+bytes. Single-page TIFF retains its existing one-preview output.
+
+Local OCR recognizes each upright page before advancing to the next page. It
+receives original-resolution RGB pixels composited over white, independently of
+preview resizing. Blank pages retain their marker and preview with a page-specific
+warning. With vision enabled, all page previews are sent in order in one request;
+`MARKITAI_NO_VLM_OCR` selects local OCR and sends only recognized text for LLM
+enhancement. This extends the reference vision route, which previously prepared
+only one TIFF preview. The reference local OCR route already reads all TIFF pages.
+
+Limits are 1,000 pages, 32 million pixels per page, 2 billion cumulative pixels,
+100 MiB of multi-page input, and 256 MiB of retained original/encoded asset and
+vision bytes combined. Decoding retains one page's pixels at a time, with the
+existing 256 MiB decoder allocation ceiling. Encoders fail at their remaining
+byte budget rather than returning a truncated image. OCR Markdown is bounded to
+64 MiB. These are resource budgets, not a measured peak-RSS guarantee: codec
+workspaces, orientation/white-background buffers and request serialization need
+additional memory. A positive `llm.max_vision_pages_per_document` is checked before
+any page pixels are decoded for vision; it does not restrict local OCR. Malformed
+later pages or exhausted limits fail the whole operation, rather than reporting
+earlier pages as a complete document.
+
+Embedded multi-page TIFF assets are preserved unchanged during ordinary asset
+compression, so that pass cannot flatten them to the first frame. Image analysis
+uses the same all-page vision preparation. No external decoder or Python runtime
+is used. HEIF/AVIF support and cross-platform local OCR remain separate work.
 
 ## SVG inputs
 
@@ -54,8 +94,27 @@ animation, foreignObject, XML processing instructions/DTDs, external image/use
 references and nested SVG data images are rejected. Hyperlinks are preserved
 but never followed. Unsupported SVG features outside resvg's static support are
 not claimed to have browser fidelity. Embedded SVG assets inside other document
-formats retain the existing original-byte/warning path. Standalone SVG vision
-and local OCR use the separate bounded PNG; image enrichment remains unfinished.
+formats retain the existing original-byte/warning path. Standalone SVG vision, local OCR and [image enrichment](image-enrichment.md)
+use the separate bounded PNG.
+
+## Descriptions in history archives
+
+[Image enrichment](image-enrichment.md) can publish an `images.json` index beside
+the output assets. CLI history merges indexes from all copied source roots. It
+keeps the first index's header and all matching source records, including distinct
+descriptions of an asset whose identical bytes share one archived file. Each
+record's `path` is rewritten using the actual collision-renaming map to the final
+history directory; the remaining record fields are preserved. Indexes no longer
+point back to the original output directories after those directories are removed.
+
+Shared indexes may describe assets outside the current archive. Rows without an
+asset in the copied set, missing/invalid file paths, and URI paths are omitted;
+stderr reports the number omitted. Invalid JSON or a non-array `images` field
+fails the optional archive, preserving the source and converted outputs. Reading
+all source indexes has a combined 16 MiB limit, each merged index has a 16 MiB
+serialization limit, and index bytes also count toward the archive budget.
+Internal `.images.lock` files are validated as regular files and excluded from
+the archive. Symlinked index/lock leaves are rejected.
 
 ## Embedded assets
 

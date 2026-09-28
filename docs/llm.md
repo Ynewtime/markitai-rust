@@ -89,13 +89,14 @@ OpenAI-compatible requests carry a data URL; Anthropic receives native base64
 image blocks. JPEG, PNG, WebP and GIF MIME types are accepted. Deployments
 explicitly marked `supports_vision: false` are excluded from image requests.
 The caller supplies encoded image bytes; compression and image decoding belong
-to the image conversion stage. This path does not implement OCR engines,
-multi-page vision planning, caption/description pipelines or screenshot capture.
+to the image conversion stage. The orchestrator supplies complete PDF/TIFF page
+sets and screenshots; [image enrichment](image-enrichment.md) adds structured
+caption/description analysis through this same transport.
 
 The client applies configured request timeouts and a connect timeout capped at
 15 seconds. Redirects are rejected so credentials cannot be forwarded to an
-unexpected endpoint. Provider error bodies are inspected only for retry
-classification and are never included in public errors. Public request errors
+unexpected endpoint. Provider error bodies are inspected for retry classification
+and structured token usage; they are never included in public errors. Public request errors
 omit URLs, authorization headers, document text and response payloads.
 
 ## Retries, budgets and usage
@@ -117,9 +118,9 @@ so an exhausted budget does not wait needlessly.
 
 `llm.max_requests_per_document` counts every HTTP attempt, including failed
 requests, transport retries and fallback groups. Zero disables this budget.
-The current text or standalone-image enhancement performs one logical operation
-per document. A future multi-stage OCR/metadata pipeline must share this budget
-across its operations rather than resetting it per call.
+One conversion-scoped counter is shared by document enhancement, image analysis
+and structured-answer fallback calls. Nested conversions restore the caller's
+counter on return or unwinding; each independent conversion starts a new budget.
 
 `LlmRuntime` supplies the request capacity for one caller-controlled run. A CLI
 run shares one instance across its file and URL workers, using `llm.concurrency`
@@ -149,17 +150,19 @@ routing metrics or a budget shared across unrelated documents.
 
 Public usage retains the existing four fields per model: `requests`,
 `input_tokens`, `output_tokens` and `cost_usd`. `usage.requests` counts parsed
-successful HTTP responses, including empty paid responses preceding a later
-successful retry; this differs intentionally from the attempt budget. Actual
+successful HTTP responses and HTTP error responses containing structured usage,
+including paid responses preceding successful retries or image-analysis fallback.
+This differs intentionally from the attempt budget. Actual
 response model identifiers are used when present. Anthropic cache-read and
 cache-creation input tokens are included in input totals without adding public
 fields. Costs remain zero because the native build has no pricing catalog.
 Configured cost limits therefore remain unsupported.
 
 A final error cannot return accumulated usage through the existing success-only
-`enhance` result shape. If an empty/truncated paid response is followed by a
-terminal failure, the outer conversion currently loses that accumulated usage.
-Malformed JSON cannot supply trustworthy token counts. These are known
+conversion result shape. If conversion itself returns a terminal error, no usage
+object can accompany it. A successful fallback result now retains usage from
+failed main/image stages through the shared scope. Malformed response JSON
+cannot supply trustworthy token counts. These are known
 accounting limits, not evidence that the provider charged nothing.
 
 ## Prompt selection

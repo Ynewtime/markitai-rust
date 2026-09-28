@@ -18,7 +18,7 @@ network policy and optional model enhancement belong to the orchestration layer.
 | EML | mail-parser | Decoded subject, body and MIME attachments; attachment bytes returned separately |
 | MSG | cfb + native properties | Outlook headers, Unicode/ANSI body, HTML fallback and bounded by-value attachments |
 | RST, Org, TeX | native markup readers | Structured sections, lists, code, math, links and tables; unsupported constructs retained with warnings |
-| JPEG, PNG, GIF, BMP, TIFF, WebP | image + native LLM transport + macOS Vision | Standalone vision inputs, shared raster assets and local image OCR; multi-page TIFF OCR remains unfinished |
+| JPEG, PNG, GIF, BMP, TIFF, WebP | image + native LLM transport + macOS Vision | Standalone vision inputs, shared raster assets and complete TIFF page OCR/vision with bounded decoding |
 | DOC, DOCX, DOCM | anydoc document model | Headings, styled text, lists, tables, links, formulas, notes and embedded assets |
 | PPT, PPS, POT | anydoc document model | Legacy presentation content through the shared Markdown renderer |
 | PPTX, PPTM, PPSX, PPSM | bounded ZIP + PresentationML reader | Ordered slide markers, title placeholders, plain text frames, grouped shapes, tables, referenced images, cached chart data and speaker notes |
@@ -115,10 +115,11 @@ including its documented accuracy gap. URL media preserves original request
 identity while processing downloaded bytes without a second download.
 Local image OCR is
 available on macOS through [Vision](ocr.md). Standalone SVG
-rasterization is implemented with bounded native rendering; embedded SVG vision
-and additional image pathways remain separate work.
-Multi-page TIFF vision routing is explicitly rejected pending complete page
-handling. `supports_extension` reports local text readers; standalone image
+rasterization is implemented with bounded native rendering; referenced embedded
+images can use [caption/description analysis](image-enrichment.md).
+Multi-page TIFF preserves its original download and every page preview, applying
+orientation before local OCR or complete-page model requests. Pixel, page and
+encoded-byte budgets reject oversized documents without silently omitting pages. `supports_extension` reports local text readers; standalone image
 classification and vision extraction are separate orchestration paths. See
 [images](images.md), [MSG](msg.md), [markup](markup.md) and [HTML](html.md) for
 their scoped contracts and limits.

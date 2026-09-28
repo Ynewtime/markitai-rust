@@ -39,7 +39,7 @@ impl Server {
         }
         let mut command = Command::new(env!("CARGO_BIN_EXE_markitai"));
         command.env_clear();
-        for key in ["PATH", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT"] {
+        for key in ["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT"] {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
@@ -784,3 +784,6 @@ fn legacy_visible_assets_and_multi_history_zip_names_follow_the_saved_contract()
     assert!(!files.keys().any(|name| name.starts_with("a.txt.llm/")));
     server.stop();
 }
+
+#[path = "serve/rerun.rs"]
+mod rerun;

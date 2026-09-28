@@ -55,9 +55,14 @@ pub(super) struct Budget {
     visited: usize,
     directories: HashMap<PathBuf, Directory>,
     fingerprints: HashMap<PathBuf, Fingerprint>,
+    image_indexes: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Budget {
+    pub(super) fn take_image_indexes(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        std::mem::take(&mut self.image_indexes)
+    }
+
     pub(super) fn bytes(&self) -> u64 {
         self.bytes
     }
@@ -550,6 +555,22 @@ impl Merge<'_> {
         for name in names(source, self.budget)? {
             let path = source.join(&name);
             let metadata = fs::symlink_metadata(&path)?;
+            let old = relative(&path, self.source)?;
+            if matches!(
+                old.as_str(),
+                ".markitai/assets/.images.lock" | "assets/.images.lock"
+            ) {
+                regular(&metadata)?;
+                continue;
+            }
+            if matches!(
+                old.as_str(),
+                ".markitai/assets/images.json" | "assets/images.json"
+            ) {
+                regular(&metadata)?;
+                self.budget.image_indexes.push((path, target.join(name)));
+                continue;
+            }
             if metadata.file_type().is_dir() {
                 let destination =
                     target_directory(target, &name, self.budget, self.allow_symlinks)?;
@@ -633,6 +654,41 @@ pub(super) fn merge_root(
         merge.walk(&input, &target, 0)?;
     }
     Ok(merge.replacements)
+}
+
+/// Read an index under the same no-follow and change-detection policy as assets.
+pub(super) fn read_index(path: &Path, limit: u64, allow_symlinks: bool) -> io::Result<Vec<u8>> {
+    let (mut file, before) = open_source(path, limit, allow_symlinks)?;
+    let mut bytes = Vec::new();
+    (&mut file).take(before.len() + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != before.len() {
+        return Err(invalid("History image index changed while reading"));
+    }
+    confirm(path, &file, &before)?;
+    Ok(bytes)
+}
+
+pub(super) fn write_index(
+    path: &Path,
+    bytes: &[u8],
+    budget: &mut Budget,
+    allow_symlinks: bool,
+) -> io::Result<()> {
+    budget.admit(bytes.len() as u64)?;
+    policy(path, allow_symlinks)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    budget.bytes += bytes.len() as u64;
+    budget.files += 1;
+    Ok(())
 }
 
 #[cfg(test)]

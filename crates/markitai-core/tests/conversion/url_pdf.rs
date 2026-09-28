@@ -126,6 +126,8 @@ impl Server {
                     }
                     Err(error) => panic!("mock accept failed: {error}"),
                 };
+                // macOS may inherit the listener's nonblocking mode.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();

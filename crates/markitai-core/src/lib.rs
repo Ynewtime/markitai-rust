@@ -4,6 +4,7 @@ pub mod config;
 mod fetch;
 pub mod fetch_cache;
 pub mod formats;
+mod image_enrichment;
 mod images;
 mod llm;
 pub mod llm_cache;
@@ -179,7 +180,9 @@ pub fn convert_with_publication(
             ..Default::default()
         });
     }
-    let mut vision = None;
+    let document_scope =
+        config::enabled(&cfg, "/llm/enabled").then(|| llm::DocumentScope::new(&cfg));
+    let mut vision = Vec::new();
     let mut screenshots = Vec::new();
     let mut fetch_cache_hit = false;
     let mut pdf_has_reliable_text = true;
@@ -190,38 +193,9 @@ pub fn convert_with_publication(
         && config::enabled(&cfg, "/ocr/enabled")
         && (!config::enabled(&cfg, "/llm/enabled") || vlm_disabled);
     let mut doc = if image_input {
-        let (mut doc, image) = images::extract(&input_path, &cfg)?;
-        if local_ocr {
-            // OCR reads the original pixels, independently of preview compression.
-            let source_bytes = std::fs::read(&input_path)?;
-            let bytes = if doc.metadata.get("format").and_then(Value::as_str) == Some("SVG") {
-                image.bytes.as_slice()
-            } else {
-                source_bytes.as_slice()
-            };
-            let recognized = ocr::recognize(bytes, &cfg)?;
-            if recognized.text.trim().is_empty() {
-                doc.warnings.push(
-                    "Local OCR found no readable text; the output retains the image reference."
-                        .into(),
-                );
-            } else {
-                doc.markdown.push('\n');
-                doc.markdown.push_str(&recognized.text);
-                if !doc.markdown.ends_with('\n') {
-                    doc.markdown.push('\n');
-                }
-            }
-            doc.metadata.insert("ocr_used".into(), true.into());
-            doc.metadata
-                .insert("ocr_path".into(), ocr::backend().into());
-            if config::enabled(&cfg, "/llm/enabled") {
-                doc.warnings.push("VLM OCR is disabled; only locally recognized text is sent for LLM enhancement.".into());
-            }
-        } else {
-            vision = Some(image);
-        }
-        doc
+        let (document, images) = images::extract(&input_path, &cfg, local_ocr)?;
+        vision = images;
+        document
     } else if is_url {
         let fetched = fetch::fetch_with_context(
             source,
@@ -317,22 +291,15 @@ pub fn convert_with_publication(
             "Document screenshots are not implemented in this development build".into(),
         ));
     }
+    let screenshot_only = is_url
+        && !pdf_input
+        && config::enabled(&cfg, "/screenshot/screenshot_only")
+        && !(config::enabled(&cfg, "/llm/enabled") && config::enabled(&cfg, "/llm/pure"));
+    if !screenshot_only {
+        image_enrichment::prepare(&mut doc, source, &cfg)?;
+    }
     if !image_input {
         images::prepare_assets(&mut doc, &cfg);
-    }
-    if config::enabled(&cfg, "/llm/enabled")
-        && (image_input || output_profiles::has_image_references(&doc.markdown))
-    {
-        for (path, feature) in [
-            ("/image/alt_enabled", "Image alt text"),
-            ("/image/desc_enabled", "Image descriptions"),
-        ] {
-            if config::enabled(&cfg, path) {
-                return Err(Error::Unsupported(format!(
-                    "{feature} is not implemented in this development build"
-                )));
-            }
-        }
     }
     let fetch_strategy = if is_url {
         doc.metadata
@@ -342,10 +309,6 @@ pub fn convert_with_publication(
     } else {
         None
     };
-    let screenshot_only = is_url
-        && !pdf_input
-        && config::enabled(&cfg, "/screenshot/screenshot_only")
-        && !(config::enabled(&cfg, "/llm/enabled") && config::enabled(&cfg, "/llm/pure"));
     if screenshot_only && !config::enabled(&cfg, "/llm/enabled") && output_dir.is_none() {
         return Err(Error::InvalidInput(
             "Screenshot-only conversion without LLM requires output_dir to retain captured images"
@@ -364,13 +327,16 @@ pub fn convert_with_publication(
     let mut result = output::prepare(source, &name, &mut doc, &cfg);
     result.fetch_cache_hit = fetch_cache_hit;
     result.fetch_strategy = fetch_strategy;
+    let standalone_analysis = image_input && image_enrichment::enabled(source, &cfg);
     if config::enabled(&cfg, "/llm/enabled") {
+        result.base_frontmatter = Some(result.frontmatter.clone());
+    }
+    if config::enabled(&cfg, "/llm/enabled") && !standalone_analysis {
         let source_context = if is_url {
             output::redact_url(source)
         } else {
             name.clone()
         };
-        result.base_frontmatter = Some(result.frontmatter.clone());
         let pure = config::enabled(&cfg, "/llm/pure");
         let pdf_screenshot_only = pdf_input
             && !(is_url && pure)
@@ -403,12 +369,15 @@ pub fn convert_with_publication(
                 context.llm_runtime,
             )
             .map(without_cache)
-        } else if let Some(image) = &vision {
-            llm::enhance_image_with_source_and_runtime(
+        } else if !vision.is_empty() {
+            let images = vision
+                .iter()
+                .map(|image| (image.mime, image.bytes.as_slice()))
+                .collect::<Vec<_>>();
+            llm::enhance_images_with_source_and_runtime(
                 input,
                 &source_context,
-                image.mime,
-                &image.bytes,
+                &images,
                 &cfg,
                 context.llm_runtime,
             )
@@ -462,9 +431,6 @@ pub fn convert_with_publication(
                     }
                 }
                 result.usage = enhancement.usage;
-                if !result.llm_cache_hit {
-                    result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
-                }
             }
             Err(error) => {
                 if matches!(error, Error::NoModelConfigured | Error::Unsupported(_)) {
@@ -502,6 +468,47 @@ pub fn convert_with_publication(
                     format!("LLM enhancement failed; base Markdown retained: {error}")
                 });
             }
+        }
+    }
+    if let Err(error) = image_enrichment::analyze(
+        &doc,
+        &mut result,
+        source,
+        image_input,
+        &cfg,
+        context.llm_runtime,
+    ) {
+        if matches!(error, Error::NoModelConfigured | Error::Unsupported(_)) || output_dir.is_none()
+        {
+            return Err(error);
+        }
+        if cfg["llm"]["on_failure"] == "fail" {
+            output::apply_profiles(&mut result, &cfg);
+            if let Some(dir) = &output_dir {
+                output::write_document(
+                    dir,
+                    &name,
+                    &mut result,
+                    &doc.assets,
+                    if pdf_input {
+                        output::Screenshots::PublishedPdf(&screenshots)
+                    } else {
+                        output::Screenshots::New(&screenshots)
+                    },
+                    &cfg,
+                    publication,
+                )?;
+            }
+            return Err(error);
+        }
+        result.warnings.push(format!(
+            "Image analysis failed; base Markdown and assets retained: {error}"
+        ));
+    }
+    if let Some(scope) = document_scope {
+        result.usage = scope.usage();
+        if result.usage.requests > 0 {
+            result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
         }
     }
     output::apply_profiles(&mut result, &cfg);

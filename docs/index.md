@@ -34,3 +34,5 @@
   [run reports, recovery and history](decisions/0004-run-persistence.md).
 
 Documentation describes verified behavior separately from planned behavior.
+
+- [Image captions and descriptions](image-enrichment.md): resource localization, prompts, shared budgets and metadata publication.

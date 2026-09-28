@@ -348,11 +348,13 @@ mod tests {
         for name in ["input.svg", "actually-vector.png", "actually-vector.heic"] {
             let path = temp.path().join(name);
             std::fs::write(&path, &source).unwrap();
-            let (document, vision) = super::super::extract(&path, &cfg).unwrap();
+            let (document, vision) = super::super::extract(&path, &cfg, false).unwrap();
             assert_eq!(document.assets.len(), 1);
             assert_eq!(document.assets[0].bytes, source.as_bytes());
             assert_eq!(document.assets[0].name, "image.svg");
             assert!(document.markdown.contains(".markitai/assets/image.svg"));
+            assert_eq!(vision.len(), 1);
+            let vision = &vision[0];
             assert_eq!(vision.mime, "image/png");
             let pixels = image::load_from_memory(&vision.bytes).unwrap().to_rgba8();
             assert_eq!(pixels.dimensions(), (2048, 1639));

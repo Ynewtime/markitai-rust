@@ -5,13 +5,17 @@ use super::{
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::Ordering},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 use tokio::sync::broadcast;
 
+#[derive(Clone)]
 pub(super) struct JobData {
     pub id: String,
     pub created_at: String,
@@ -23,6 +27,8 @@ pub(super) struct JobData {
     pub size: u64,
     pub bases: HashMap<String, String>,
     pub assets: HashMap<String, Vec<String>>,
+    pub item_options: HashMap<String, Value>,
+    pub transactions: Vec<String>,
 }
 impl JobData {
     pub fn progress(&self) -> Value {
@@ -94,6 +100,12 @@ pub(super) struct Job {
     pub folder: PathBuf,
     pub data: Mutex<JobData>,
     pub access: Mutex<()>,
+    pub active: AtomicUsize,
+    pub sequence: AtomicU64,
+    pub retry_queue: Mutex<VecDeque<super::rerun::Work>>,
+    pub retry_draining: AtomicBool,
+    pub retry_pending: Mutex<HashSet<String>>,
+    pub runtime: OnceLock<Arc<markitai_core::LlmRuntime>>,
     pub events: broadcast::Sender<(&'static str, Value)>,
 }
 impl Job {
@@ -103,6 +115,12 @@ impl Job {
             folder,
             data: Mutex::new(data),
             access: Mutex::new(()),
+            active: AtomicUsize::new(0),
+            sequence: AtomicU64::new(0),
+            retry_queue: Mutex::new(VecDeque::new()),
+            retry_draining: AtomicBool::new(false),
+            retry_pending: Mutex::new(HashSet::new()),
+            runtime: OnceLock::new(),
             events,
         }
     }
@@ -207,6 +225,7 @@ async fn convert_one(
     index: usize,
     cfg: Value,
     runtime: Arc<markitai_core::LlmRuntime>,
+    explicit: Option<String>,
 ) {
     let item = job.data.lock().unwrap().items[index].clone();
     let semaphore = if item.kind == "url" {
@@ -243,9 +262,6 @@ async fn convert_one(
     } else {
         upload.to_string_lossy().into_owned()
     };
-    let explicit = job.data.lock().unwrap().options["strategy"]
-        .as_str()
-        .map(str::to_owned);
     let mut cfg = cfg;
     cfg["output"]["filename"] = json!(format!("{base}.md"));
     let result = tokio::task::spawn_blocking(move || {
@@ -327,7 +343,12 @@ pub(super) fn start(state: Arc<State>, job: Arc<Job>, cfg: Value) -> ApiResult<(
     let concurrency = cfg["llm"]["concurrency"].as_u64().unwrap_or(10).max(1) as usize;
     let runtime =
         Arc::new(markitai_core::LlmRuntime::new(concurrency).map_err(ApiError::internal)?);
+    let _ = job.runtime.set(runtime.clone());
     let count = job.data.lock().unwrap().items.len();
+    job.active.fetch_add(count, Ordering::SeqCst);
+    let explicit = job.data.lock().unwrap().options["strategy"]
+        .as_str()
+        .map(str::to_owned);
     let task_state = state.clone();
     let task = tokio::spawn(async move {
         let mut pending = FuturesUnordered::new();
@@ -338,17 +359,29 @@ pub(super) fn start(state: Arc<State>, job: Arc<Job>, cfg: Value) -> ApiResult<(
                 index,
                 cfg.clone(),
                 runtime.clone(),
+                explicit.clone(),
             ));
         }
-        while pending.next().await.is_some() {}
-        let finalized = job.clone();
-        if !matches!(
-            tokio::task::spawn_blocking(move || store::finish(&finalized)).await,
-            Ok(Ok(()))
-        ) {
-            task_state.persistence_failed.store(true, Ordering::SeqCst);
+        while pending.next().await.is_some() {
+            complete(&task_state, job.clone()).await;
         }
     });
     state.tasks.lock().unwrap().push(task);
     Ok(())
+}
+
+// Admission and finalization take access before data; no network work holds either.
+pub(super) async fn complete(state: &Arc<State>, job: Arc<Job>) {
+    let finalized = tokio::task::spawn_blocking(move || {
+        let _access = job.access.lock().unwrap();
+        if job.active.fetch_sub(1, Ordering::SeqCst) == 1 {
+            store::finish(&job)
+        } else {
+            Ok(())
+        }
+    })
+    .await;
+    if !matches!(finalized, Ok(Ok(()))) {
+        state.persistence_failed.store(true, Ordering::SeqCst);
+    }
 }

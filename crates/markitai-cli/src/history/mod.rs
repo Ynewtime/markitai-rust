@@ -1,5 +1,6 @@
 //! Optional, self-contained CLI archives. Conversion never depends on this store.
 mod assets;
+mod image_metadata;
 
 use crate::report::{ItemKind, ItemStatus, RunItem, RunMode};
 use chrono::{DateTime, Local, SecondsFormat};
@@ -102,6 +103,7 @@ impl Plan {
         let out = stage.path().join("out");
         private_directory(&out)?;
         let mut budget = assets::Budget::default();
+        let mut image_indexes = image_metadata::Indexes::default();
         let mut names = OutputNames::default();
         let mut items = Vec::with_capacity(records.len());
         // Insertion order matters: a later root receives collision suffixes.
@@ -178,6 +180,12 @@ impl Plan {
                 return Ok(None);
             }
             let mapping = assets::merge_root(&root, &out, &mut budget, self.allow_symlinks)?;
+            image_indexes.merge(
+                &root,
+                &mapping,
+                budget.take_image_indexes(),
+                self.allow_symlinks,
+            )?;
             if mapping.is_empty() {
                 continue;
             }
@@ -244,6 +252,7 @@ impl Plan {
                 Ok(_) => continue,
             }
         };
+        image_indexes.publish(&out, &target.join("out"), &mut budget, self.allow_symlinks)?;
         let metadata = Metadata {
             job_id: &job_id,
             created_at: &self.started_at,
@@ -869,5 +878,139 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn image_indexes_merge_relocate_collisions_and_survive_source_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut records = Vec::new();
+        for (index, folder) in ["a", "b"].iter().enumerate() {
+            let source = root.join("output").join(folder);
+            let document = source.join("doc.md");
+            put(&document, b"![image](.markitai/assets/p.png)\n");
+            let picture = source.join(".markitai/assets/p.png");
+            let shared = source.join(".markitai/assets/shared.png");
+            put(&picture, folder.as_bytes());
+            put(&shared, b"identical");
+            put(&source.join(".markitai/assets/.images.lock"), b"");
+            let images = serde_json::json!({
+                "version":"1.0", "created":folder, "header_custom":{"kept":folder},
+                "images":[
+                    {"path":picture,"alt":format!("Picture {folder}"),"source":format!("source-{folder}"),"custom":{"nested":[1,true]},"expected":folder},
+                    {"path":shared,"desc":format!("Shared {folder}"),"expected":"identical"},
+                    {"path":root.join("not-in-this-archive.png"),"desc":"unrelated shared index record"},
+                    {"path":"https://example.invalid/image.png","desc":"remote, not copied"}
+                ]
+            });
+            put(
+                &source.join(".markitai/assets/images.json"),
+                images.to_string().as_bytes(),
+            );
+            records.push(record(
+                index,
+                &format!("{folder}/source.txt"),
+                Some(document),
+            ));
+        }
+        let job = plan(root, RunMode::Directory)
+            .publish(&records)
+            .unwrap()
+            .unwrap();
+        fs::remove_dir_all(root.join("output")).unwrap();
+        let value: Value = serde_json::from_slice(
+            &fs::read(job.join("out/.markitai/assets/images.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["created"], "a");
+        assert_eq!(value["header_custom"]["kept"], "a");
+        let images = value["images"].as_array().unwrap();
+        assert_eq!(images.len(), 4);
+        let physical_out = job.join("out").canonicalize().unwrap();
+        for item in images {
+            let path = Path::new(item["path"].as_str().unwrap());
+            assert!(path.is_absolute());
+            assert!(path.starts_with(&physical_out));
+            assert_eq!(
+                fs::read(path).unwrap(),
+                item["expected"].as_str().unwrap().as_bytes()
+            );
+        }
+        assert!(images[0]["path"].as_str().unwrap().ends_with("/p.png"));
+        assert!(images[2]["path"].as_str().unwrap().ends_with("/p-2.png"));
+        assert_eq!(images[1]["path"], images[3]["path"]);
+        assert_eq!(images[0]["custom"], serde_json::json!({"nested":[1,true]}));
+        assert_eq!(images[2]["source"], "source-b");
+        assert!(!job.join("out/.markitai/assets/.images.lock").exists());
+        assert!(!job.join("out/.markitai/assets/images-2.json").exists());
+        let size: u64 = fs::read_dir(job.join("out/.markitai/assets"))
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum::<u64>()
+            + fs::metadata(job.join("out/doc.md")).unwrap().len()
+            + fs::metadata(job.join("out/doc (2).md")).unwrap().len();
+        assert_eq!(metadata(&job)["dir_size_bytes"], size);
+    }
+
+    #[test]
+    fn corrupt_or_linked_image_index_does_not_publish_partial_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let document = root.join("output/doc.md");
+        let index = root.join("output/.markitai/assets/images.json");
+        put(&document, b"body\n");
+        for bad in [b"not JSON".as_slice(), br#"{"images":{}}"#] {
+            put(&index, bad);
+            assert!(
+                plan(root, RunMode::SingleFile)
+                    .publish(&[record(0, "doc.txt", Some(document.clone()))])
+                    .is_err()
+            );
+            assert_eq!(fs::read(&index).unwrap(), bad);
+            assert!(
+                fs::read_dir(root.join("home/serve/jobs"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+        }
+        #[cfg(unix)]
+        {
+            fs::remove_file(&index).unwrap();
+            std::os::unix::fs::symlink(&document, &index).unwrap();
+            assert!(
+                plan(root, RunMode::SingleFile)
+                    .publish(&[record(0, "doc.txt", Some(document.clone()))])
+                    .is_err()
+            );
+            assert_eq!(fs::read(&document).unwrap(), b"body\n");
+        }
+    }
+
+    #[test]
+    fn rag_image_index_paths_are_relocated_without_uri_decoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let document = root.join("output/doc.md");
+        let asset = root.join("output/assets/a%20b.png");
+        put(&document, b"![literal percent](assets/a%2520b.png)\n");
+        put(&asset, b"percent filename");
+        put(&root.join("output/assets/.images.lock"), b"");
+        put(
+            &root.join("output/assets/images.json"),
+            serde_json::json!({"created":"original","images":[{"path":asset,"text":"keep text"}]})
+                .to_string()
+                .as_bytes(),
+        );
+        let job = plan(root, RunMode::SingleFile)
+            .publish(&[record(0, "doc.txt", Some(document))])
+            .unwrap()
+            .unwrap();
+        let value: Value =
+            serde_json::from_slice(&fs::read(job.join("out/assets/images.json")).unwrap()).unwrap();
+        let path = Path::new(value["images"][0]["path"].as_str().unwrap());
+        assert_eq!(path.file_name().unwrap(), "a%20b.png");
+        assert_eq!(fs::read(path).unwrap(), b"percent filename");
+        assert_eq!(value["images"][0]["text"], "keep text");
+        assert!(!job.join("out/assets/.images.lock").exists());
     }
 }

@@ -7,6 +7,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 mod css;
+mod image_references;
+pub(crate) use image_references::{image_references, replace_image_alts, rewrite_image_targets};
 
 pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cfg: &Value) {
     match cfg.pointer("/output/profile").and_then(Value::as_str) {
@@ -217,17 +219,9 @@ impl<'a> Replacements<'a> {
     }
 }
 
-/// Recognize actual image references while excluding Markdown and HTML literals.
-pub(crate) fn has_image_references(markdown: &str) -> bool {
-    let definitions = definitions(markdown);
-    let mut context = LiteralContext::default();
-    let mut cursor = 0;
-    while let Some((line, literal)) = next_content(markdown, &mut cursor, &mut context) {
-        if !literal && definition(line).is_none() && inline_has_images(line, &definitions) {
-            return true;
-        }
-    }
-    false
+#[cfg(test)]
+fn has_image_references(markdown: &str) -> bool {
+    !image_references(markdown).is_empty()
 }
 
 // Keep multiline HTML tags together without allocating or treating Markdown
@@ -390,20 +384,6 @@ fn definition(line: &str) -> Option<Definition<'_>> {
     })
 }
 
-fn definitions(markdown: &str) -> HashMap<String, String> {
-    let mut result = HashMap::new();
-    let mut context = LiteralContext::default();
-    let mut cursor = 0;
-    while let Some((line, literal)) = next_content(markdown, &mut cursor, &mut context) {
-        if !literal && let Some(definition) = definition(line) {
-            result
-                .entry(definition.label)
-                .or_insert_with(|| unquote(&unescape(definition.target)));
-        }
-    }
-    result
-}
-
 fn reference_use(text: &str) -> Option<(String, &str, usize, bool)> {
     let (image, start) = if text.starts_with("![") {
         (true, 2)
@@ -499,6 +479,7 @@ enum HtmlAttributeKind {
     Srcset,
     Style,
     CssType,
+    Alt,
 }
 
 struct HtmlAttribute {
@@ -520,20 +501,6 @@ impl HtmlReference<'_> {
         (self.name.eq_ignore_ascii_case("img") && kind == HtmlAttributeKind::Src)
             || kind == HtmlAttributeKind::Srcset
             || kind == HtmlAttributeKind::Poster
-    }
-
-    fn has_image(&self, source: &str) -> bool {
-        self.attributes.iter().any(|attribute| {
-            if !attribute.active || !self.image_attribute(attribute.kind) {
-                return false;
-            }
-            let value = DecodedHtml::decode(&source[attribute.value.clone()], false);
-            if attribute.kind == HtmlAttributeKind::Srcset {
-                srcset_candidates(&value.text).any(|candidate| candidate.valid)
-            } else {
-                !value.text.trim_matches(html_space).is_empty()
-            }
-        })
     }
 }
 
@@ -562,6 +529,7 @@ fn html_reference(text: &str) -> Option<HtmlReference<'_>> {
             &[
                 ("src", HtmlAttributeKind::Src),
                 ("srcset", HtmlAttributeKind::Srcset),
+                ("alt", HtmlAttributeKind::Alt),
             ]
         } else if name.eq_ignore_ascii_case("video") {
             &[
@@ -1189,7 +1157,10 @@ fn rewrite_html_reference(
                     .map_or(AttributeEdit::Keep, AttributeEdit::Value),
                 false,
             )
-        } else if attribute.kind == HtmlAttributeKind::CssType {
+        } else if matches!(
+            attribute.kind,
+            HtmlAttributeKind::CssType | HtmlAttributeKind::Alt
+        ) {
             (AttributeEdit::Keep, false)
         } else if attribute.kind == HtmlAttributeKind::Srcset {
             srcset_edit(target, replacement, visible)
@@ -1264,52 +1235,6 @@ fn destination(value: &str, angle: bool) -> String {
         }
     }
     result
-}
-
-fn inline_has_images(line: &str, definitions: &HashMap<String, String>) -> bool {
-    inline_has_images_nested(line, definitions, 0)
-}
-
-fn inline_has_images_nested(
-    line: &str,
-    definitions: &HashMap<String, String>,
-    depth: usize,
-) -> bool {
-    if depth >= 64 {
-        return false;
-    }
-    let mut index = 0;
-    while index < line.len() {
-        let tail = &line[index..];
-        if let Some(rest) = tail.strip_prefix('\\') {
-            index += 1 + rest.chars().next().map_or(0, char::len_utf8);
-        } else if let Some(end) = code_span_end(tail) {
-            index += end;
-        } else if let Some(end) = html_literal_end(tail) {
-            index += end;
-        } else if let Some(reference) = html_reference(tail) {
-            if reference.has_image(tail) {
-                return true;
-            }
-            index += reference.tag_end;
-        } else if let Some(end) = html_tag_end(tail) {
-            index += end;
-        } else if tail.starts_with("![[") && tail.contains("]]") {
-            return true;
-        } else if let Some(reference) = reference(tail) {
-            if reference.image || inline_has_images_nested(reference.alt, definitions, depth + 1) {
-                return true;
-            }
-            index += reference.end;
-        } else if let Some((name, _, _, true)) = reference_use(tail)
-            && definitions.contains_key(&name)
-        {
-            return true;
-        } else {
-            index += tail.chars().next().unwrap().len_utf8();
-        }
-    }
-    false
 }
 
 fn okf(metadata: &mut Map<String, Value>) {

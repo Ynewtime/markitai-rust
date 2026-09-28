@@ -96,6 +96,9 @@ pub(super) async fn download(
     let filename = relative.clone();
     let file = tokio::task::spawn_blocking(move || {
         let _guard = job.access.lock().unwrap();
+        if !public_member(&relative) {
+            return Err(ApiError::new(404, "file not found"));
+        }
         let path = store::safe_file(&job.folder.join("out"), &relative)?;
         File::open(path).map_err(ApiError::internal)
     })
@@ -131,7 +134,7 @@ pub(super) async fn result(
         let markdown=fs::read_to_string(&path).map_err(ApiError::internal)?;
         let mut artifacts=Vec::new();let mut seen=HashSet::new();
         let mut add=|relative:String|->ApiResult<()> {
-            if seen.insert(relative.clone())&&let Ok(path)=store::safe_file(&out,&relative){artifacts.push(json!({"relpath":relative,"size":fs::metadata(path).map_err(ApiError::internal)?.len()}));}Ok(())
+            if public_member(&relative)&&seen.insert(relative.clone())&&let Ok(path)=store::safe_file(&out,&relative){artifacts.push(json!({"relpath":relative,"size":fs::metadata(path).map_err(ApiError::internal)?.len()}));}Ok(())
         };
         if base_path.is_some() {
             add(base_name)?;
@@ -209,6 +212,9 @@ fn zip_jobs(
         };
         drop(data);
         for (relative, path) in store::files(&job.folder.join("out")).map_err(ApiError::internal)? {
+            if !public_member(&relative) {
+                continue;
+            }
             count += 1;
             if count > 100_000 {
                 return Err(ApiError::new(413, "archive has too many files"));
@@ -270,4 +276,140 @@ pub(super) async fn history_archive(
         .await
         .map_err(ApiError::internal)??;
     body(file, Some(temp), "application/zip", "markitai-all.zip")
+}
+
+pub(super) fn item_base(data: &super::jobs::JobData, item: &super::types::Item) -> String {
+    if let Some(base) = data.bases.get(&item.item_id) {
+        return base.clone();
+    }
+    let inferred =
+        item.output_name
+            .as_deref()
+            .map(str::to_owned)
+            .or_else(|| match item.kind.as_str() {
+                "file" => Some(format!("{}.md", item.name)),
+                "url" => Some(format!(
+                    "{}.md",
+                    markitai_core::output::url_name(&item.name, &Default::default())
+                )),
+                _ => None,
+            });
+    if let Some(name) = inferred {
+        let base = name.strip_suffix(".md").unwrap_or(&name);
+        if item
+            .output
+            .as_deref()
+            .is_none_or(|out| out == format!("{base}.md") || out == format!("{base}.llm.md"))
+        {
+            return base.into();
+        }
+    }
+    let name = item
+        .output
+        .as_deref()
+        .or(item.output_name.as_deref())
+        .unwrap_or(&item.name);
+    name.strip_suffix(".llm.md")
+        .or_else(|| name.strip_suffix(".md"))
+        .unwrap_or(name)
+        .into()
+}
+
+/// Native indexes are authoritative. Legacy histories additionally use exact
+/// Markdown destinations and converter filename suffixes, never substring globs.
+pub(super) fn owned_files(
+    folder: &std::path::Path,
+    data: &super::jobs::JobData,
+    item: &super::types::Item,
+) -> ApiResult<HashSet<String>> {
+    let base = item_base(data, item);
+    let out = folder.join("out");
+    let mut names = HashSet::new();
+    let mut text = String::new();
+    for name in [format!("{base}.md"), format!("{base}.llm.md")] {
+        if let Ok(path) = store::safe_file(&out, &name) {
+            names.insert(name);
+            if fs::metadata(&path).map_err(ApiError::internal)?.len() <= MAX_RESULT
+                && let Ok(content) = fs::read_to_string(path)
+            {
+                text.push_str(&content);
+                text.push('\n');
+            }
+        }
+    }
+    if let Some(output) = &item.output
+        && store::safe_file(&out, output).is_ok()
+    {
+        names.insert(output.clone());
+    }
+    if let Some(assets) = data.assets.get(&item.item_id) {
+        for asset in assets {
+            if store::safe_file(&out, asset).is_ok() {
+                names.insert(asset.clone());
+            }
+        }
+    } else {
+        let candidates = store::files(&out)
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .filter(|(name, _)| {
+                name.starts_with(".markitai/assets/")
+                    || name.starts_with(".markitai/screenshots/")
+                    || name.starts_with("assets/")
+            })
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let marker = format!("MARKITAI-OWNED-{}-", uuid::Uuid::new_v4().simple());
+        let replacements = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), format!("{marker}{i}-END")))
+            .collect();
+        let rewritten = markitai_core::output::rewrite_asset_references(&text, &replacements);
+        for (i, name) in candidates.into_iter().enumerate() {
+            if rewritten.contains(&format!("{marker}{i}-END"))
+                || legacy_asset(&base, name.rsplit('/').next().unwrap_or(""))
+            {
+                names.insert(name);
+            }
+        }
+    }
+    names.retain(|name| public_member(name));
+    Ok(names)
+}
+fn legacy_asset(base: &str, name: &str) -> bool {
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if ![
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "svg", "ico", "avif", "heic",
+        "heif",
+    ]
+    .contains(&extension.to_ascii_lowercase().as_str())
+    {
+        return false;
+    }
+    let digits = |s: &str, max: usize| {
+        !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_digit())
+    };
+    if let Some(suffix) = stem.strip_prefix(base).and_then(|s| s.strip_prefix('.')) {
+        if suffix == "full" || suffix.strip_prefix("full--").is_some_and(|s| digits(s, 4)) {
+            return true;
+        }
+        return digits(suffix, 6)
+            || suffix
+                .strip_prefix("page")
+                .or_else(|| suffix.strip_prefix("slide"))
+                .is_some_and(|s| digits(s, 6));
+    }
+    if let Some(suffix) = stem.strip_prefix(base).and_then(|s| s.strip_prefix('-')) {
+        return suffix
+            .split_once('-')
+            .map_or_else(|| digits(suffix, 6), |(a, b)| digits(a, 6) && digits(b, 6));
+    }
+    false
+}
+
+pub(super) fn public_member(name: &str) -> bool {
+    name.rsplit('/').next() != Some(".images.lock")
 }

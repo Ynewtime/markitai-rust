@@ -195,6 +195,11 @@ pub(super) async fn create(
             item.output_name = Some(format!("{}.md", bases[&item.item_id]));
         }
     }
+    let options = serde_json::to_value(options).unwrap();
+    let item_options = items
+        .iter()
+        .map(|item| (item.item_id.clone(), options.clone()))
+        .collect();
     let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
     let folder = state.root.join(&id);
     let data = JobData {
@@ -203,11 +208,13 @@ pub(super) async fn create(
         finished_at: None,
         status: "running".into(),
         persistence_error: None,
-        options: serde_json::to_value(options).unwrap(),
+        options,
         items,
         size: 0,
         bases,
         assets: HashMap::new(),
+        item_options,
+        transactions: Vec::new(),
     };
     let publication_state = state.clone();
     let job = tokio::task::spawn_blocking(move || {
@@ -380,16 +387,85 @@ pub(super) async fn delete(
 ) -> ApiResult<StatusCode> {
     let job = jobs::get(&state, &id)?;
     let state = state.clone();
-    tokio::task::spawn_blocking(move || {
-        let _guard = job.access.lock().unwrap();
-        if job.data.lock().unwrap().status == "running" {
-            return Err(ApiError::new(409, "job is still running"));
-        }
-        markitai_core::output::check_path(&job.folder, false).map_err(ApiError::internal)?;
-        std::fs::remove_dir_all(&job.folder).map_err(ApiError::internal)?;
-        state.jobs.lock().unwrap().remove(&id);
-        Ok(StatusCode::NO_CONTENT)
-    })
-    .await
-    .map_err(ApiError::internal)?
+    tokio::task::spawn_blocking(move || remove_registered(job, &state.jobs, &id))
+        .await
+        .map_err(ApiError::internal)?
+}
+
+fn remove_registered(
+    job: Arc<Job>,
+    registry: &std::sync::Mutex<HashMap<String, Arc<Job>>>,
+    id: &str,
+) -> ApiResult<StatusCode> {
+    let _guard = job.access.lock().unwrap();
+    if !registry
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|current| Arc::ptr_eq(current, &job))
+    {
+        return Err(ApiError::new(404, "job not found"));
+    }
+    if job.data.lock().unwrap().status == "running" {
+        return Err(ApiError::new(409, "job is still running"));
+    }
+    markitai_core::output::check_path(&job.folder, false).map_err(ApiError::internal)?;
+    std::fs::remove_dir_all(&job.folder).map_err(ApiError::internal)?;
+    registry.lock().unwrap().remove(id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+
+    #[test]
+    fn stale_job_reference_returns_not_found_and_cannot_delete_a_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let folder = temporary.path().join("job");
+        std::fs::create_dir(&folder).unwrap();
+        let data = JobData {
+            id: "job".into(),
+            created_at: now(),
+            finished_at: Some(now()),
+            status: "done".into(),
+            persistence_error: None,
+            options: json!({}),
+            items: Vec::new(),
+            size: 0,
+            bases: HashMap::new(),
+            assets: HashMap::new(),
+            item_options: HashMap::new(),
+            transactions: Vec::new(),
+        };
+        let first = Arc::new(Job::new(folder.clone(), data.clone()));
+        let stale = first.clone();
+        let registry = std::sync::Mutex::new(HashMap::from([("job".into(), first.clone())]));
+        assert!(matches!(
+            remove_registered(first, &registry, "job"),
+            Ok(StatusCode::NO_CONTENT)
+        ));
+        assert_eq!(
+            remove_registered(stale.clone(), &registry, "job")
+                .unwrap_err()
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("keep"), b"replacement job").unwrap();
+        registry
+            .lock()
+            .unwrap()
+            .insert("job".into(), Arc::new(Job::new(folder.clone(), data)));
+        assert_eq!(
+            remove_registered(stale, &registry, "job")
+                .unwrap_err()
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            std::fs::read(folder.join("keep")).unwrap(),
+            b"replacement job"
+        );
+    }
 }
