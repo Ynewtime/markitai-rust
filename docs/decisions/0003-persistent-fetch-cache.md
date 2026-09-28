@@ -1,12 +1,14 @@
 # Persistent fetch cache
 
-Status: planned, not implemented. This decision does not enable a runtime feature.
+Status: first static HTML/text stage implemented and covered by the round-five
+Rust checks. Rebuilt artifacts and real-corpus validation are tracked in
+[CONTROL](../CONTROL.md); later cache categories remain open.
 The source audit used reference commit
 `ba374322f884b0e720b45466cc1196f4574a3da5` and clean native source
 `5280fd3c928066a31cffda260ef5b2270cef758a`, recorded in
 [`artifacts-round4.json`](../validation/artifacts-round4.json).
-Existing fetch-cache unsupported guards remain until the
-implementation and its integration tests are complete.
+Fetch-cache statistics and clearing are now integrated. Unsupported SPA-domain
+management remains guarded before any cache deletion.
 
 ## First implementation boundary
 
@@ -218,7 +220,9 @@ fetch-cache reads and writes in that mode.
 
 ## Acceptance tests and deferred work
 
-All checks below are planned, not executed evidence for this feature.
+The matrix below guided the implementation. Storage, loopback HTTP and CLI/API
+checks now cover the first stage; actual commands and counts are recorded in
+CONTROL. Later-stage behavior is not implied by those checks.
 
 - Independent processes: first fetch writes; the next unvalidated fetch makes
   no request and returns the same page metadata, with fresh output paths.

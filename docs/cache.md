@@ -27,8 +27,8 @@ inspection remains available when caching is disabled.
 `cache.enabled`. The final occurrence wins. `--no-cache-for` supplies the existing
 comma-separated pattern list. Patterns match the full source context or its
 basename; Windows separators are normalized and `**/` can match zero directories.
-The original context is used only for matching and is not persisted. These flags
-currently affect eligible LLM document calls; URL fetching has no native cache.
+The original context is used only for matching and is not persisted. These flags affect eligible LLM document calls and the independent
+[static HTML/text fetch cache](fetch.md), which uses URL-aware pattern matching.
 
 Persistent LLM entries have no TTL. `cache.fetch_ttl_seconds` is a separate URL
 fetch setting and does not expire document answers. The reference processor did
@@ -104,10 +104,11 @@ Previews are intentional user-requested content display, not error diagnostics.
 
 The storage clear operation deletes LLM table entries transactionally and returns
 the deleted count; an absent database returns zero without creating it. The CLI
-checks unsupported fetch-cache/SPA operations before clearing anything. An
-existing `fetch_cache.db` is reported as unsupported by statistics instead of
-being presented as an empty cache. The native implementation never silently
-clears only one part of a requested combined cache operation.
+rejects unsupported SPA operations first, then checks both LLM and fetch stores
+before clearing either one. Statistics include the independent fetch store.
+A later deletion failure can still leave one store cleared; the CLI reports the
+completed portion and exits unsuccessfully. Two WAL databases are not one atomic
+transaction, and partial clearing is never reported as complete success.
 
 A cache hit reaches the existing CLI `cache_hit` and `llm_cache_hit` fields through
 internal conversion state. It does not add fields to the JSON conversion protocol

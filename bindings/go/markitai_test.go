@@ -3,10 +3,13 @@ package markitai
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -66,5 +69,38 @@ func TestErrorsAndMalformedJSON(t *testing.T) {
 	}
 	if Version() == "" {
 		t.Fatal("empty native version")
+	}
+}
+
+func TestNativeFetchCache(t *testing.T) {
+	t.Setenv("MARKITAI_HOME", t.TempDir())
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><article><h1>Native page</h1><p>Go HTTP 世界.</p></article></html>"))
+	}))
+	defer server.Close()
+	options := &Options{Config: map[string]any{}, LLM: Bool(false)}
+	first, err := Convert(server.URL, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Convert(server.URL, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Markdown != second.Markdown || !strings.Contains(second.Markdown, "Go HTTP 世界.") {
+		t.Fatal("cached Markdown differs from fetched result")
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("expected one HTTP request, got %d", requests.Load())
+	}
+	options.Config["cache"] = map[string]any{"enabled": false}
+	if _, err := Convert(server.URL, options); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("disabled cache did not refetch: %d", requests.Load())
 	}
 }

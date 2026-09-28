@@ -9,6 +9,7 @@
 - [HTML](html.md) and [MSG](msg.md): extraction semantics and known gaps.
 - [LLM](llm.md): model routing, prompts, retries and provider requests.
 - [Persistent cache](cache.md): document reuse, bypass semantics, storage and CLI management.
+- [URL fetching](fetch.md): static page caching, validators and response boundaries.
 - [Markup](markup.md): RST, Org and TeX reader behavior and limits.
 - [Configuration](configuration.md): normalization, file selection, and isolated state.
 - [Output](output.md): ordinary/pure content and metadata assembly.

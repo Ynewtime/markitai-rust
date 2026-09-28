@@ -331,13 +331,8 @@ fn preview(raw: &str) -> String {
 pub fn stats(cfg: &Value, verbose: bool, limit: usize) -> Result<Value> {
     let directory = directory(cfg);
     let path = directory.join("cache.db");
-    let fetch = match directory.join("fetch_cache.db").try_exists() {
-        Ok(false) => Value::Null,
-        Ok(true) => {
-            json!({"error":"URL fetch cache statistics are not implemented in this development build"})
-        }
-        Err(_) => json!({"error":"URL fetch cache is unavailable"}),
-    };
+    let fetch = crate::fetch_cache::stats(cfg)
+        .unwrap_or_else(|_| json!({"error":"Persistent URL fetch cache is unavailable"}));
     let cache = inspect(cfg, &path, verbose, limit)
         .unwrap_or_else(|_| json!({"error":"Persistent LLM cache is unavailable"}));
     Ok(json!({"cache":cache,"enabled":enabled(cfg),"fetch_cache":fetch}))
@@ -403,6 +398,20 @@ fn inspect(cfg: &Value, path: &Path, verbose: bool, limit: usize) -> Result<Valu
     Ok(details)
 }
 
+/// Validate a writable store before starting a combined cache clear.
+pub fn preflight_clear(cfg: &Value) -> Result<()> {
+    let Some(mut connection) = existing(&directory(cfg).join("cache.db"), false)? else {
+        return Ok(());
+    };
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| unavailable())?;
+    transaction
+        .prepare("DELETE FROM cache")
+        .map_err(|_| unavailable())?;
+    transaction.rollback().map_err(|_| unavailable())
+}
+
 /// Clear LLM entries only; the caller owns any fetch-cache/SPA preflight.
 pub fn clear(cfg: &Value) -> Result<u64> {
     let Some(mut connection) = existing(&directory(cfg).join("cache.db"), false)? else {
@@ -433,6 +442,7 @@ mod tests {
         let target = root.path().join("not-created");
         let mut cfg = configuration(&target, 100);
         assert_eq!(stats(&cfg, true, usize::MAX).unwrap()["cache"], Value::Null);
+        preflight_clear(&cfg).unwrap();
         assert_eq!(clear(&cfg).unwrap(), 0);
         assert_eq!(
             Cache::configured(&cfg, "file.md")

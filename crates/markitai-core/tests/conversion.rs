@@ -439,3 +439,74 @@ fn url_names_and_explicit_pure_output_follow_existing_contracts() {
         "Pure body"
     );
 }
+
+#[test]
+fn cached_url_reuses_extracted_content_without_changing_binding_json() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/article", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = [0; 8192];
+        let _ = stream.read(&mut request).unwrap();
+        let body = "<html><title>Page title</title><article><p>Shared page content. 世界</p></article></html>";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let cfg = json!({"llm":{"enabled":false},"cache":{"global_dir":root.path().join("cache")},"fetch":{"strategy":"static"}});
+    let first = convert(
+        &url,
+        ConvertOptions {
+            config: Some(cfg.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!first.fetch_cache_hit());
+    server.join().unwrap();
+    // The listener is gone, so any accidental second network request fails.
+    let hit = convert(
+        &url,
+        ConvertOptions {
+            config: Some(cfg.clone()),
+            output_dir: Some(root.path().join("out")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(hit.fetch_cache_hit());
+    assert!(!hit.llm_cache_hit());
+    assert_eq!(first.markdown, hit.markdown);
+    assert_eq!(hit.frontmatter["title"], "Page title");
+    assert!(hit.output_path.unwrap().is_file());
+    let response: Value = serde_json::from_str(&convert_json(
+        &json!({"source":url,"options":{"config":cfg}}).to_string(),
+    ))
+    .unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["result"]["markdown"], first.markdown);
+    for internal in [
+        "cache_hit",
+        "llm_cache_hit",
+        "fetch_cache_hit",
+        "explicit_fetch_strategy",
+    ] {
+        assert!(response["result"].get(internal).is_none());
+    }
+    let explicit = markitai_core::convert_with_context(
+        &url,
+        ConvertOptions {
+            config: Some(cfg),
+            ..Default::default()
+        },
+        markitai_core::ConvertContext {
+            explicit_fetch_strategy: Some("static"),
+        },
+    );
+    assert!(
+        matches!(explicit, Err(Error::Fetch(_))),
+        "an explicit strategy must not share the configured/default scope"
+    );
+}

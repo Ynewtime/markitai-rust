@@ -26,7 +26,8 @@ markitai -c isolated.json --config-json '{"output":{"on_conflict":"skip"}}' note
 - `--dry-run` 仅枚举输入和目标，不调用转换器、不创建输出目录。
 - `--compress/--no-compress` 映射共享图片处理配置；未启用 LLM/OCR 的独立图片返回 `image_only` 跳过状态，不写空文档。
 - 非 pure 本地文档的 LLM 结果可跨进程复用；`--no-cache` 跳过读取但仍写入成功结果，`--cache` 清除此绕过设置，不强制启用已禁用的缓存。`--no-cache-for` 接受逗号分隔的 glob，JSON 条目的 `cache_hit/llm_cache_hit` 反映实际命中。
-- `cache stats [--json] [-v] [--limit N]` 查看 LLM 缓存；不存在的数据库不会因查看而创建。详细列表最多返回 1,000 条。`cache clear [-y]` 清理本地 LLM 缓存，未给 `-y` 时需要在终端确认。若存在尚未支持的 URL 抓取缓存，清理会在修改前明确拒绝；浏览器域名缓存仍未实现。
+- 静态 HTML/文本抓取支持独立页面缓存：无验证头时按 TTL 复用，有 ETag/Last-Modified 时发送条件请求。`fetch_cache_hit` 记录直接复用或 304 命中；`cache_hit/llm_cache_hit` 仍只表示 LLM 缓存。显式 `-s static` 与配置文件中的默认策略使用独立缓存作用域。
+- `cache stats [--json] [-v] [--limit N]` 查看 LLM 与抓取缓存；不存在的数据库不会因查看而创建。LLM 详细列表最多返回 1,000 条。`cache clear [-y]` 清理两个缓存，未给 `-y` 时需要在终端确认。清理前检查两个数据库，后续部分失败会明确报告并退出非零；浏览器域名缓存仍未实现。
 
 ## 明确的迁移缺口
 

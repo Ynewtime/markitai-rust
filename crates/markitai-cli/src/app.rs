@@ -1,5 +1,5 @@
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
-use markitai_core::{ConversionOutput, ConvertOptions, config};
+use markitai_core::{ConversionOutput, ConvertContext, ConvertOptions, config};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -473,9 +473,15 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         }
         return Ok(0);
     }
+    let context = ConvertContext {
+        explicit_fetch_strategy: cli
+            .strategy
+            .as_deref()
+            .filter(|strategy| *strategy != "auto"),
+    };
     if !batch {
         let task = &tasks[0];
-        let result = convert_task(task, &cfg);
+        let result = convert_task(task, &cfg, context);
         let item = outcome(task, &result);
         let failed = result.is_err();
         if cli.json {
@@ -524,7 +530,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
                     let Some(task) = tasks.get(index) else {
                         break;
                     };
-                    let result = convert_task(task, cfg);
+                    let result = convert_task(task, cfg, context);
                     let item = outcome(task, &result);
                     if sender.send(item).is_err() {
                         break;
@@ -667,20 +673,25 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
     Ok(())
 }
 
-fn convert_task(task: &Task, cfg: &Value) -> Result<ConversionOutput, String> {
+fn convert_task(
+    task: &Task,
+    cfg: &Value,
+    context: ConvertContext<'_>,
+) -> Result<ConversionOutput, String> {
     let mut cfg = cfg.clone();
     if let Some(name) = &task.reserved_stem {
         cfg["output"]["reserved_stem"] = json!(name);
     } else if let Some(name) = &task.filename {
         cfg["output"]["reserved_stem"] = json!(name.strip_suffix(".md").unwrap_or(name));
     }
-    markitai_core::convert(
+    markitai_core::convert_with_context(
         &task.source,
         ConvertOptions {
             output_dir: task.output.clone(),
             config: Some(cfg),
             ..Default::default()
         },
+        context,
     )
     .or_else(|error| match error {
         markitai_core::Error::ImageOnly(_) => {
@@ -716,6 +727,7 @@ fn outcome(task: &Task, result: &Result<ConversionOutput, String>) -> Value {
             item["llm_usage"] = json!(result.usage.by_model);
             item["llm_cache_hit"] = json!(result.llm_cache_hit());
             item["cache_hit"] = json!(result.llm_cache_hit());
+            item["fetch_cache_hit"] = json!(result.fetch_cache_hit());
             if is_url(&task.source) {
                 item["fetch_strategy"] = result
                     .frontmatter
@@ -1076,7 +1088,7 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 );
             } else {
                 println!(
-                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache\nNot available: OCR, screenshots, browser, fetch cache, serve, MCP",
+                    "Markitai {} — native Rust runtime\nConfiguration: valid\nAvailable: local conversion, static URL fetch, OpenAI-compatible LLM, persistent document LLM cache, static HTML/text fetch cache\nNot available: OCR, screenshots, browser, serve, MCP",
                     markitai_core::VERSION
                 );
             }
@@ -1126,6 +1138,12 @@ fn cache_command(command: &CacheCommand, cfg: &Value) -> CliResult<i32> {
                         "URL fetch cache: {}",
                         error.as_str().unwrap_or("unavailable")
                     );
+                } else {
+                    println!(
+                        "URL fetch cache: {} entries ({} bytes)",
+                        stats["fetch_cache"]["count"].as_u64().unwrap_or(0),
+                        stats["fetch_cache"]["size_bytes"].as_u64().unwrap_or(0)
+                    );
                 }
             }
             Ok(i32::from(failed))
@@ -1142,9 +1160,6 @@ fn cache_command(command: &CacheCommand, cfg: &Value) -> CliResult<i32> {
             if *include_spa_domains {
                 return Err(unsupported("Learned browser-domain cache management"));
             }
-            if dir.join("fetch_cache.db").try_exists().map_err(runtime)? {
-                return Err(unsupported("Existing URL fetch cache management"));
-            }
             if !yes {
                 print!("Clear LLM + URL fetch caches ({})? [y/N]: ", dir.display());
                 io::stdout().flush().map_err(runtime)?;
@@ -1155,8 +1170,18 @@ fn cache_command(command: &CacheCommand, cfg: &Value) -> CliResult<i32> {
                     return Ok(0);
                 }
             }
-            let count = markitai_core::llm_cache::clear(cfg).map_err(runtime)?;
-            println!("Cleared {count} cache entries");
+            markitai_core::llm_cache::preflight_clear(cfg).map_err(runtime)?;
+            markitai_core::fetch_cache::preflight_clear(cfg).map_err(runtime)?;
+            let llm_count = markitai_core::llm_cache::clear(cfg).map_err(runtime)?;
+            let fetch_count = markitai_core::fetch_cache::clear(cfg).map_err(|error| {
+                runtime(format!(
+                    "LLM cache cleared ({llm_count} entries); URL fetch cache clear failed: {error}"
+                ))
+            })?;
+            println!(
+                "Cleared {} cache entries",
+                llm_count.saturating_add(fetch_count)
+            );
             Ok(0)
         }
         CacheCommand::SpaDomains { .. } => {

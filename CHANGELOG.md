@@ -13,7 +13,9 @@
 - Weighted LLM routing, fallback groups, retries, request budgets and custom prompts.
 - Complete 209-fixture HTML audit harness with separate compatibility and quality diagnostics.
 - Bundled SQLite document LLM cache with cross-process reuse, bypass controls and CLI statistics/clearing.
+- Persistent static HTML/text fetch cache with conditional HTTP requests, TTL and separate cache-hit reporting.
 - Native HTML math-source and structured BBCode recovery, plus presentation slide boundaries and shape-aware extraction.
+- Structured HTML footnotes with repeated-reference handling, safe definitions and preserved multi-block note content.
 
 ### Fixed
 
@@ -21,4 +23,5 @@
 - PDF page failures retain readable pages and report incomplete extraction explicitly.
 - HTML metadata precedence, quotes, soft line breaks and safe URL spelling.
 - CSS custom properties, quoted strings and comments no longer hide visible HTML content.
+- Source line breaks preserve separating spaces after inline links, code and footnote references.
 - CLI paired flags use their last occurrence; image-only skips and compression controls preserve their existing behavior.

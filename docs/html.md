@@ -87,6 +87,56 @@ layout remain outside this round. Unknown presentation elements retain their
 child text/structure where possible; specialized layout can differ. Existing
 source code blocks are kept separate from math interpretation.
 
+## Footnote recovery
+
+The reader collects references and definitions from the immutable DOM before
+sanitization, then emits numeric Markdown references and a definition section.
+Repeated references share one definition. Numbering follows definition order in
+the document, including inline notes. Ordinary link labels remain links; numeric
+markers and explicit footnote semantics establish a reference.
+
+Supported structures include footnote/reference lists, `doc-footnote` and
+`doc-noteref` roles, `fn:`/`fn-`/`ftnt` identifiers, named anchors, Word export
+backlinks, Google Docs notes, WordPress/Easy Footnotes lists, standalone
+`footnote-definition` blocks, inline popovers, Org-style labels and sidenotes,
+`aside > ol[start]`, and `data-definition` references to hidden asides. A labeled
+footnote section outside the selected article can supply definitions, while
+unrelated external content stays outside the article.
+
+Unlabeled numeric anchor targets need at least two matched definitions in a
+shared section and coverage of at least three quarters of the external numeric
+targets. A wrapper containing the article references itself does not qualify.
+This keeps ordinary equation/theorem links from becoming footnotes. Loose
+numbered paragraphs require at least two corroborating body superscripts; an
+explicit footnote class can identify a single definition. Section delimiters
+allow continuation paragraphs/lists to move with the definition; otherwise only
+the numbered paragraph moves and following updates remain in the article.
+
+Only resolved definitions are removed from their original positions. Missing
+targets and unreferenced definitions remain visible. Return links and numeric
+labels are removed within resolved definitions, while ordinary body links remain.
+A duplicate inline sidenote is removed only when its text matches the adjacent
+resolved definition. Lists, block quotes, code and later paragraphs receive
+Markdown continuation indentation instead of being flattened or detached from
+the footnote. This can differ from the source renderer's unindented continuations.
+
+Footnote bodies use the same URL validation, script removal, depth bound and
+math/code handling as the article. An explicitly linked hidden definition may
+expose its own content root; unrelated hidden descendants remain hidden. Detection
+excludes code, MathML and scripts. Remote URLs with matching fragment names do not
+become local references unless they identify the current page or carry explicit
+HTMLBook `noteref` semantics.
+
+This is structural recovery, not the entire upstream footnote system. Multiple
+named definitions packed into one paragraph with only `<br>` separators,
+arbitrary publisher citation groups, separate sidenote columns and recursive
+references inside definitions are not fully standardized. Malformed or
+ambiguous structures retain their ordinary content where possible. Definition
+order and punctuation/line-layout choices can differ from the reference. The
+reference local API itself leaves some labeled-list and line-break patterns
+unstandardized; corpus strict parity and recovered-content quality remain
+separate measurements. Historical audit results are not rewritten.
+
 ## Structured BBCode announcements
 
 `data-partnereventstore` JSON can contain the primary article in

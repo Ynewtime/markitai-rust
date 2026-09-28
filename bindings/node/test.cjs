@@ -40,14 +40,21 @@ test('native output files and structured errors', async () => {
 });
 
 test('async native fetch leaves the JavaScript event loop available', async () => {
+  let requests = 0;
   const server = http.createServer((_request, response) => {
+    requests++;
     response.writeHead(200, { 'Content-Type': 'text/html' });
     response.end('<html><article><h1>Native HTTP</h1><p>The Node server ran.</p></article></html>');
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    const output = await markitai.convert(`http://127.0.0.1:${server.address().port}/test`, { config: {}, llm: false });
+    const url = `http://127.0.0.1:${server.address().port}/test`;
+    const output = await markitai.convert(url, { config: {}, llm: false });
     assert.match(output.markdown, /The Node server ran\./);
+    const cached = await markitai.convert(url, { config: {}, llm: false });
+    assert.equal(cached.markdown, output.markdown);
+    assert.equal(requests, 1);
+    assert.equal(Object.hasOwn(cached, 'fetch_cache_hit'), false);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

@@ -109,7 +109,10 @@ class NativeTests(unittest.TestCase):
 
     def test_native_releases_gil_during_http(self):
         class Handler(BaseHTTPRequestHandler):
+            requests = 0
+
             def do_GET(self):
+                Handler.requests += 1
                 body = b"<html><article><h1>Native HTTP</h1><p>The Python server ran.</p></article></html>"
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
@@ -127,6 +130,10 @@ class NativeTests(unittest.TestCase):
             url = f"http://127.0.0.1:{server.server_port}/test"
             result = markitai.convert(url, config={}, llm=False)
             self.assertIn("The Python server ran.", result.markdown)
+            cached = markitai.convert(url, config={}, llm=False)
+            self.assertEqual(cached.markdown, result.markdown)
+            self.assertEqual(Handler.requests, 1)
+            self.assertFalse(hasattr(cached, "fetch_cache_hit"))
         finally:
             server.shutdown()
             server.server_close()

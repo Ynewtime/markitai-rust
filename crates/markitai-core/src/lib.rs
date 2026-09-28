@@ -1,5 +1,6 @@
 pub mod config;
 mod fetch;
+pub mod fetch_cache;
 pub mod formats;
 mod images;
 mod llm;
@@ -18,6 +19,16 @@ use std::path::Path;
 use std::time::Instant;
 
 pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput> {
+    convert_with_context(source, options, ConvertContext::default())
+}
+
+/// Retains CLI option provenance without adding fields to binding requests.
+#[doc(hidden)]
+pub fn convert_with_context(
+    source: &str,
+    options: ConvertOptions,
+    context: ConvertContext<'_>,
+) -> Result<ConversionOutput> {
     let start = Instant::now();
     if source.trim().is_empty() {
         return Err(Error::InvalidInput("Input cannot be empty".into()));
@@ -133,6 +144,7 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         ));
     }
     let mut vision = None;
+    let mut fetch_cache_hit = false;
     let mut doc = if image_input {
         if config::enabled(&cfg, "/ocr/enabled")
             && config::environment()
@@ -147,7 +159,9 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         vision = Some(image);
         doc
     } else if is_url {
-        fetch::fetch(source, &cfg)?
+        let fetched = fetch::fetch_with_context(source, &cfg, context.explicit_fetch_strategy)?;
+        fetch_cache_hit = fetched.cache_hit;
+        fetched.document
     } else {
         formats::extract(&input_path)?
     };
@@ -193,6 +207,7 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         }
     }
     let mut result = output::prepare(source, &name, &mut doc, &cfg);
+    result.fetch_cache_hit = fetch_cache_hit;
     if config::enabled(&cfg, "/llm/enabled") {
         let source_context = if is_url {
             output::redact_url(source)

@@ -60,6 +60,13 @@ pub struct ConvertOptions {
     pub profile: Option<String>,
 }
 
+/// CLI-only provenance that is not part of the host JSON protocol.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConvertContext<'a> {
+    pub explicit_fetch_strategy: Option<&'a str>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -115,6 +122,8 @@ pub struct ConversionOutput {
     pub(crate) base_frontmatter: Option<Map<String, Value>>,
     #[serde(skip)]
     pub(crate) llm_cache_hit: bool,
+    #[serde(skip)]
+    pub(crate) fetch_cache_hit: bool,
 }
 
 impl ConversionOutput {
@@ -122,5 +131,10 @@ impl ConversionOutput {
     /// Host JSON remains compatible; the CLI has separate cache-status fields.
     pub fn llm_cache_hit(&self) -> bool {
         self.llm_cache_hit
+    }
+
+    /// Whether a fetched page was reused directly or after HTTP validation.
+    pub fn fetch_cache_hit(&self) -> bool {
+        self.fetch_cache_hit
     }
 }
