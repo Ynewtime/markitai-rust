@@ -192,3 +192,15 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   renamed images/imports and encoded filenames after deleting live fixtures.
   [Final identities](css-round12-final-check.json) and
   [executed drivers](drivers/round12/README.md) retain the scope and provenance.
+
+## Round-thirteen native services and SVG
+
+- [Integrated acceptance](native-services-round13.md): 663 Rust executions /
+  516 distinct tests, 26 harness checks, shared LLM concurrency, bounded SVG,
+  eight REST and seven MCP process tests. The [final gate](native-services-round13-gate.json)
+  preserves source identity and the [failed first gate](native-services-round13-gate-r1.json)
+  retains its diagnostics boundary.
+- Clean `2af556a` [release evidence](native-services-round13-release.json)
+  records the 22.42 MiB CLI and actual REST/MCP smoke tests. The increase from
+  round twelve is explicit; no new performance or installed-binding claim is
+  made. [Executed drivers](drivers/round13/README.md) retain exact provenance.
