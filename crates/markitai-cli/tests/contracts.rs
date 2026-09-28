@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -50,6 +50,29 @@ fn single_stdout_is_markdown_and_explicit_file_target_is_exact() {
     assert_eq!(body["items"][0]["status"], "completed");
 }
 #[test]
+fn pure_stdout_keeps_existing_yaml_and_okf_still_emits_its_schema() {
+    let dir = fixture();
+    let text = "---\ntitle: Original\ncustom: 42\n---\n\n# Heading\nBody  \n";
+    std::fs::write(dir.path().join("existing.md"), text).unwrap();
+    let output = invoke(dir.path(), &["existing.md", "--pure"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), text);
+    let output = invoke(dir.path(), &["existing.md", "--pure", "--profile", "okf"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = String::from_utf8(output.stdout).unwrap();
+    assert!(content.contains("type: Document\n"));
+    assert!(content.contains("custom: 42\n"));
+    assert!(content.ends_with("# Heading\nBody  \n"));
+}
+#[test]
 fn single_runtime_error_retains_json_and_usage_error_has_none() {
     let dir = fixture();
     let output = invoke(dir.path(), &["missing.txt", "-o", "out", "--json"]);
@@ -84,7 +107,7 @@ fn config_overrides_are_transient_and_secret_values_hidden() {
     let dir = fixture();
     std::fs::write(
         dir.path().join("config.json"),
-        r#"{"llm":{"model_list":[{"litellm_params":{"api_key":"do-not-print","model":"test"}}]}}"#,
+        r#"{"llm":{"model_list":[{"model_name":"default","litellm_params":{"api_key":"do-not-print","model":"test"}}]}}"#,
     )
     .unwrap();
     let output = invoke(
@@ -206,7 +229,7 @@ fn config_set_redacts_nested_credentials_when_echoing_whole_section() {
             "config",
             "set",
             "llm",
-            r#"{"enabled":false,"model_list":[{"litellm_params":{"api_key":"nested-secret","model":"test"}}]}"#,
+            r#"{"enabled":false,"model_list":[{"model_name":"default","litellm_params":{"api_key":"nested-secret","model":"test"}}]}"#,
         ],
     );
     assert!(
@@ -248,4 +271,166 @@ fn explicit_history_opt_out_overrides_unsupported_environment_request() {
     );
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("# Contract"));
+}
+
+#[test]
+fn config_set_uses_declared_types_and_rejects_unknown_leaf_without_writes() {
+    let dir = fixture();
+    let output = invoke(
+        dir.path(),
+        &["-c", "config.json", "config", "set", "output.dir", "true"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let original = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    let value: Value = serde_json::from_str(&original).unwrap();
+    assert_eq!(value["output"]["dir"], "true");
+    let output = invoke(
+        dir.path(),
+        &["-c", "config.json", "config", "set", "image.qualty", "70"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("config.json")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn config_set_rejects_transient_overrides_before_creating_file() {
+    let dir = fixture();
+    let output = invoke(
+        dir.path(),
+        &[
+            "-c",
+            "new.json",
+            "--config-json",
+            "{}",
+            "config",
+            "set",
+            "llm.enabled",
+            "true",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!dir.path().join("new.json").exists());
+}
+
+#[test]
+fn config_display_hides_url_credentials_and_header_values_but_keeps_environment_references() {
+    let dir = fixture();
+    let cfg = json!({"llm":{"model_list":[{"model_name":"default","litellm_params":{"model":"test","api_key":"env:CONFIG_TEST_KEY","api_base":"https://user:fake-pass@example.com:443/private?token=fake-token#hidden","max_tokens":777}}]},"fetch":{"playwright":{"extra_http_headers":{"X-Access":"env:INLINE_SECRET"}}}});
+    std::fs::write(dir.path().join("markitai.json"), cfg.to_string()).unwrap();
+    let output = invoke(dir.path(), &["config", "list", "--format", "json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let displayed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let model = &displayed["llm"]["model_list"][0]["litellm_params"];
+    assert_eq!(model["api_base"], "https://example.com:443");
+    assert_eq!(model["api_key"], "env:CONFIG_TEST_KEY");
+    assert_eq!(model["max_tokens"], 777);
+    assert_eq!(
+        displayed["fetch"]["playwright"]["extra_http_headers"]["X-Access"],
+        "[REDACTED]"
+    );
+    let output = invoke(
+        dir.path(),
+        &[
+            "config",
+            "get",
+            "fetch.playwright.extra_http_headers.X-Access",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[REDACTED]");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(dir.path().join("markitai.json")).unwrap())
+            .unwrap(),
+        cfg
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn config_set_preserves_symlink_and_unknown_file_keys() {
+    let dir = fixture();
+    let target = dir.path().join("real.json");
+    let link = dir.path().join("link.json");
+    std::fs::write(
+        &target,
+        r#"{"llm":{"enabled":false},"extension":{"keep":"yes"}}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("real.json", &link).unwrap();
+    let output = invoke(
+        dir.path(),
+        &["-c", "link.json", "config", "set", "llm.enabled", "true"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(link.is_symlink());
+    let saved: Value = serde_json::from_slice(&std::fs::read(target).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        json!({"llm":{"enabled":true},"extension":{"keep":"yes"}})
+    );
+}
+
+#[test]
+fn config_validate_missing_positional_file_is_usage_error() {
+    let dir = fixture();
+    let output = invoke(dir.path(), &["config", "validate", "absent.json"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!dir.path().join("absent.json").exists());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("valid"));
+}
+
+#[test]
+fn config_display_omits_model_nulls_but_direct_null_and_dictionary_null_remain() {
+    let dir = fixture();
+    let cfg = json!({"llm":{"model_list":[{"model_name":"default","litellm_params":{"model":"test"}}],"router_settings":{"fallbacks":[{"custom":null}]}}});
+    std::fs::write(dir.path().join("markitai.json"), cfg.to_string()).unwrap();
+    for args in [vec!["config", "list"], vec!["config", "get", "llm"]] {
+        let output = invoke(dir.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let llm = if args.len() == 2 {
+            &value["llm"]
+        } else {
+            &value
+        };
+        assert!(llm["model_list"][0].get("model_info").is_none());
+        assert!(
+            llm["model_list"][0]["litellm_params"]
+                .get("api_key")
+                .is_none()
+        );
+        assert_eq!(
+            llm["router_settings"]["fallbacks"][0].get("custom"),
+            Some(&Value::Null)
+        );
+    }
+    let output = invoke(
+        dir.path(),
+        &["config", "get", "llm.model_list[0].litellm_params.api_key"],
+    );
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "null");
 }

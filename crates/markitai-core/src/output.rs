@@ -1,4 +1,4 @@
-use crate::{Asset, ConversionOutput, Document, Error, Result, VERSION, config};
+use crate::{Asset, ConversionOutput, Document, Error, Result, config};
 use chrono::{Local, SecondsFormat};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -34,14 +34,16 @@ pub fn check_path(path: &Path, allow_symlinks: bool) -> Result<()> {
 }
 
 pub fn split_frontmatter(text: &str) -> (Map<String, Value>, &str) {
-    if let Some(rest) = text.strip_prefix("---\n")
-        && let Some(end) = rest.find("\n---")
-    {
-        let tail = &rest[end + 4..];
-        if (tail.is_empty() || tail.starts_with('\n'))
-            && let Ok(Value::Object(meta)) = serde_yaml::from_str::<Value>(&rest[..end])
-        {
-            return (meta, tail.trim_start_matches('\n'));
+    if let Some(rest) = text.strip_prefix("---\n") {
+        let mut offset = 0;
+        for line in rest.split_inclusive('\n') {
+            if line == "---\n" || line == "---" {
+                if let Ok(Value::Object(meta)) = serde_yaml::from_str::<Value>(&rest[..offset]) {
+                    return (meta, rest[offset + line.len()..].trim_start_matches('\n'));
+                }
+                break;
+            }
+            offset += line.len();
         }
     }
     (Map::new(), text)
@@ -84,95 +86,178 @@ pub fn render(frontmatter: &Map<String, Value>, markdown: &str) -> Result<String
     Ok(format!("---\n{yaml}---\n\n{markdown}"))
 }
 
-pub fn prepare(source: &str, name: &str, doc: &mut Document, cfg: &Value) -> ConversionOutput {
-    let (mut meta, body) = split_frontmatter(&doc.markdown);
-    let mut markdown = body.to_owned();
-    let mut in_fence = false;
-    let heading = body.lines().find_map(|line| {
-        if line.starts_with("```") || line.starts_with("~~~") {
-            in_fence = !in_fence;
-        }
-        if !in_fence && (line.starts_with("# ") || line.starts_with("##")) {
-            Some(line.trim_start_matches('#').trim().replace("**", ""))
-        } else {
-            None
-        }
-    });
-    let title = doc
-        .metadata
-        .get("title")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| meta.get("title").and_then(Value::as_str).map(str::to_owned))
-        .or(heading)
-        .unwrap_or_else(|| {
-            Path::new(name)
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
-    meta.insert(
-        "title".into(),
-        json!(title.split_whitespace().collect::<Vec<_>>().join(" ")),
-    );
-    let source_value = if crate::is_url(source) {
-        redact_url(source)
+/// Render the same document bytes for CLI stdout and persisted files.
+pub fn content(result: &ConversionOutput, cfg: &Value, enhanced: bool) -> Result<String> {
+    let (body, prefix) = if enhanced {
+        (
+            result.llm_markdown.as_deref().unwrap_or(&result.markdown),
+            result.pure_llm_prefix.as_deref(),
+        )
     } else {
-        name.to_string()
+        (result.markdown.as_str(), result.pure_prefix.as_deref())
     };
-    meta.insert("source".into(), json!(source_value));
-    meta.insert(
-        "markitai_processed".into(),
-        json!(Local::now().to_rfc3339_opts(SecondsFormat::Millis, false)),
-    );
-    for key in [
-        "author",
-        "published",
-        "description",
-        "site",
-        "image",
-        "fetch_strategy",
-        "url",
-    ] {
-        if let Some(value) = doc.metadata.get(key) {
-            meta.insert(key.into(), value.clone());
+    if config::enabled(cfg, "/llm/pure") && cfg["output"]["profile"] != "okf" {
+        Ok(format!("{}{body}", prefix.unwrap_or("")))
+    } else {
+        let metadata = if enhanced {
+            &result.frontmatter
+        } else {
+            result
+                .base_frontmatter
+                .as_ref()
+                .unwrap_or(&result.frontmatter)
+        };
+        render(metadata, body)
+    }
+}
+
+pub(crate) fn apply_profiles(result: &mut ConversionOutput, cfg: &Value) {
+    if let Some(markdown) = &mut result.llm_markdown {
+        if let Some(base) = &mut result.base_frontmatter {
+            crate::output_profiles::apply(&mut result.markdown, base, cfg);
+        }
+        crate::output_profiles::apply(markdown, &mut result.frontmatter, cfg);
+        if result.frontmatter.is_empty() && config::enabled(cfg, "/llm/keep_base") {
+            result.frontmatter = result.base_frontmatter.clone().unwrap_or_default();
+        }
+    } else {
+        crate::output_profiles::apply(&mut result.markdown, &mut result.frontmatter, cfg);
+        result.base_frontmatter = None;
+    }
+    if cfg["output"]["profile"] == "rag" {
+        let mut notices = crate::output_profiles::table_warnings(&result.markdown);
+        if let Some(markdown) = &result.llm_markdown {
+            notices.extend(crate::output_profiles::table_warnings(markdown));
+        }
+        for warning in notices {
+            if !result.warnings.contains(&warning) {
+                result.warnings.push(warning);
+            }
         }
     }
-    let profile = cfg.pointer("/output/profile").and_then(Value::as_str);
-    if matches!(profile, Some("rag" | "obsidian")) {
-        markdown = markdown.replace(".markitai/assets/", "assets/");
-    }
-    if profile == Some("rag") {
-        markdown = regex::Regex::new(r"<!--\s*Page number:\s*(\d+)\s*-->")
-            .unwrap()
-            .replace_all(&markdown, "<!-- page: $1 -->")
-            .into_owned();
-    }
-    if profile == Some("obsidian") && config::enabled(cfg, "/output/wikilinks") {
-        markdown = regex::Regex::new(r"!\[[^\]]*\]\((assets/[^)]+)\)")
-            .unwrap()
-            .replace_all(&markdown, "![[$1]]")
-            .into_owned();
-    }
-    if profile == Some("okf") {
-        meta.insert("type".into(), json!("Document"));
-        if let Some(value) = meta.remove("source") {
-            meta.insert("resource".into(), value);
-        }
-        let at = meta.remove("markitai_processed").unwrap_or(Value::Null);
+}
+
+pub fn prepare(source: &str, name: &str, doc: &mut Document, cfg: &Value) -> ConversionOutput {
+    let pure = config::enabled(cfg, "/llm/pure");
+    let (mut meta, markdown, pure_prefix) = if pure {
+        let (meta, body) = split_frontmatter(&doc.markdown);
+        let prefix_len = doc.markdown.len() - body.len();
+        (
+            meta,
+            body.to_owned(),
+            (prefix_len > 0).then(|| doc.markdown[..prefix_len].to_owned()),
+        )
+    } else {
+        (Map::new(), crate::markdown::normalize(&doc.markdown), None)
+    };
+    if !pure {
+        let low_confidence = Path::new(name)
+            .extension()
+            .and_then(|v| v.to_str())
+            .is_some_and(|v| ["csv", "tsv", "xml"].contains(&v.to_ascii_lowercase().as_str()));
+        // Basic workflow titles use the first heading. This deliberately keeps
+        // its historical permissive syntax, including headings in code blocks.
+        let heading = (!low_confidence)
+            .then(|| {
+                markdown.trim_start().lines().find_map(|line| {
+                    if line.starts_with("# ") || line.starts_with("##") {
+                        let title = line.trim_start_matches('#').trim().replace("**", "");
+                        (!title.trim().is_empty()).then(|| title.trim().to_owned())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten();
+        let title = doc
+            .metadata
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|title| !title.is_empty())
+            .map(normalize_title)
+            .or(heading)
+            .unwrap_or_else(|| {
+                if low_confidence {
+                    name.to_owned()
+                } else {
+                    Path::new(name)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            });
         meta.insert(
-            "generated".into(),
-            json!({"by":format!("markitai/{VERSION}"),"at":at}),
+            "title".into(),
+            json!(title.split_whitespace().collect::<Vec<_>>().join(" ")),
         );
+        let source_value = if crate::is_url(source) {
+            redact_url(source)
+        } else {
+            name.to_string()
+        };
+        meta.insert("source".into(), json!(source_value));
+        meta.insert(
+            "markitai_processed".into(),
+            json!(Local::now().to_rfc3339_opts(SecondsFormat::Millis, false)),
+        );
+        if crate::is_url(source) {
+            for (key, value) in &doc.metadata {
+                if ![
+                    "title",
+                    "source",
+                    "description",
+                    "tags",
+                    "markitai_processed",
+                    "language",
+                    "format",
+                ]
+                .contains(&key.as_str())
+                    && !value.is_null()
+                {
+                    meta.insert(key.clone(), value.clone());
+                }
+            }
+        }
     }
     ConversionOutput {
         source: source.into(),
         markdown,
+        pure_prefix,
         frontmatter: meta,
         warnings: std::mem::take(&mut doc.warnings),
         ..Default::default()
     }
+}
+
+fn normalize_title(title: &str) -> String {
+    use std::sync::LazyLock;
+    static LINKS: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"!?\[([^\]]*)\]\([^)]+\)").unwrap());
+    static TAGS: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?i)</?(?:strong|em|b|i|code)>").unwrap());
+    static HEADING: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^#{1,6}\s+").unwrap());
+    let text = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = HEADING.replace(&text, "");
+    let text = LINKS.replace_all(&text, "$1");
+    let text = TAGS.replace_all(&text, "");
+    let mut text = text.trim();
+    loop {
+        let stripped = ["**", "__", "~~", "`", "*", "_"]
+            .into_iter()
+            .find_map(|wrapper| {
+                text.strip_prefix(wrapper)?
+                    .strip_suffix(wrapper)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            });
+        match stripped {
+            Some(value) => text = value,
+            None => break,
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn redact_url(source: &str) -> String {
@@ -356,10 +441,8 @@ pub fn write(
         }
         let before = format!("{asset_prefix}/{}", asset.name);
         let after = format!("{asset_prefix}/{filename}");
-        let replace = |text: &str| {
-            text.replace(&format!("({before})"), &format!("({after})"))
-                .replace(&format!("[[{before}]]"), &format!("[[{after}]]"))
-        };
+        let replace =
+            |text: &str| crate::output_profiles::rewrite_asset_target(text, &before, &after);
         result.markdown = replace(&result.markdown);
         if let Some(md) = &mut result.llm_markdown {
             *md = replace(md);
@@ -370,25 +453,17 @@ pub fn write(
     }
     if result.llm_markdown.is_none() || config::enabled(cfg, "/llm/keep_base") {
         let path = dir.join(format!("{stem}.md"));
-        let content = if config::enabled(cfg, "/llm/pure") {
-            result.markdown.clone()
-        } else {
-            render(&result.frontmatter, &result.markdown)?
-        };
+        let content = content(result, cfg, false)?;
         atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
         result.output_path = Some(path);
     }
-    if let Some(markdown) = &result.llm_markdown {
+    if result.llm_markdown.is_some() {
         let path = if explicit_name.is_some() && !config::enabled(cfg, "/llm/keep_base") {
             dir.join(format!("{stem}.md"))
         } else {
             dir.join(format!("{stem}.llm.md"))
         };
-        let content = if config::enabled(cfg, "/llm/pure") {
-            markdown.clone()
-        } else {
-            render(&result.frontmatter, markdown)?
-        };
+        let content = content(result, cfg, true)?;
         atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
         result.llm_output_path = Some(path);
     }
@@ -398,6 +473,91 @@ pub fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_output_uses_workflow_title_and_preserves_original_frontmatter_as_body() {
+        let input = "---\ntitle: Existing\ncustom: kept\n---\n\n# Heading\nBody  ";
+        let mut document = Document {
+            markdown: input.into(),
+            ..Default::default()
+        };
+        document
+            .metadata
+            .insert("author".into(), json!("not a local frontmatter field"));
+        let mut cfg = config::defaults();
+        let normal = prepare("existing.md", "existing.md", &mut document, &cfg);
+        assert_eq!(normal.frontmatter["title"], "Heading");
+        assert!(!normal.frontmatter.contains_key("author"));
+        assert_eq!(
+            normal.markdown,
+            "---\ntitle: Existing\ncustom: kept\n---\n\n# Heading\n\nBody\n"
+        );
+        cfg["llm"]["pure"] = json!(true);
+        let mut pure = prepare("existing.md", "existing.md", &mut document, &cfg);
+        assert_eq!(
+            pure.frontmatter,
+            json!({"title":"Existing","custom":"kept"})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+        assert_eq!(pure.markdown, "# Heading\nBody  ");
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "existing.md", &mut pure, &[], &cfg).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pure.output_path.unwrap()).unwrap(),
+            input
+        );
+    }
+
+    #[test]
+    fn structured_data_uses_full_name_and_explicit_titles_remain_authoritative() {
+        let cfg = config::defaults();
+        for name in ["data.csv", "data.tsv", "data.XML"] {
+            let mut doc = Document {
+                markdown: "# Untrusted data\nbody".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                prepare(name, name, &mut doc, &cfg).frontmatter["title"],
+                name
+            );
+            doc.metadata.insert(
+                "title".into(),
+                json!("**[Explicit](https://example.test)**"),
+            );
+            assert_eq!(
+                prepare(name, name, &mut doc, &cfg).frontmatter["title"],
+                "Explicit"
+            );
+        }
+    }
+
+    #[test]
+    fn okf_uses_utc_and_adds_generated_identity_in_pure_mode() {
+        let mut cfg = config::defaults();
+        cfg["output"]["profile"] = json!("okf");
+        let mut doc = Document {
+            markdown: "# Heading".into(),
+            ..Default::default()
+        };
+        let mut normal = prepare("file.txt", "file.txt", &mut doc, &cfg);
+        apply_profiles(&mut normal, &cfg);
+        assert!(
+            normal.frontmatter["generated"]["at"]
+                .as_str()
+                .unwrap()
+                .ends_with('Z')
+        );
+        assert!(!normal.frontmatter.contains_key("source"));
+        cfg["llm"]["pure"] = json!(true);
+        let mut pure = prepare("file.txt", "file.txt", &mut doc, &cfg);
+        apply_profiles(&mut pure, &cfg);
+        assert!(pure.frontmatter["generated"].get("at").is_none());
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "file.txt", &mut pure, &[], &cfg).unwrap();
+        let written = std::fs::read_to_string(pure.output_path.unwrap()).unwrap();
+        assert_eq!(split_frontmatter(&written).0["type"], "Document");
+    }
     #[test]
     fn paired_conflicts_and_skip_preserve_existing_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -422,6 +582,10 @@ mod tests {
     fn malformed_frontmatter_remains_content() {
         let text = "---\ninvalid: [\n---\nbody";
         assert_eq!(split_frontmatter(text).1, text);
+        assert_eq!(
+            split_frontmatter("---\n---extra: kept\n---\nbody").0["---extra"],
+            "kept"
+        );
         assert_eq!(
             split_frontmatter("---\ntitle: 中文\n---\n\n# Body").0["title"],
             "中文"

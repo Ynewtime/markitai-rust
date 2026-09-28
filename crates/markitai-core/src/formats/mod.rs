@@ -1,6 +1,7 @@
 //! Local, deterministic format adapters. No adapter performs network requests.
 
 mod html;
+mod markup;
 mod native;
 mod text;
 
@@ -26,6 +27,10 @@ pub fn supports_extension(extension: &str) -> bool {
             | "json"
             | "xml"
             | "eml"
+            | "rst"
+            | "org"
+            | "tex"
+            | "latex"
     ) || anydoc::Format::from_extension(&extension).is_some()
 }
 
@@ -38,7 +43,7 @@ pub fn extract(path: &Path) -> Result<Document> {
         .to_ascii_lowercase();
     if !supports_extension(&extension) {
         return Err(Error::Unsupported(format!(
-            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, email, PDF, Word, PowerPoint, Excel, OpenDocument, RTF and EPUB. Image OCR, MSG, Numbers, Org, RST and TeX readers are not implemented yet.",
+            "Unsupported file format: '{}'. This Rust build supports text, Markdown, HTML, CSV/TSV, JSON/XML, notebooks, email, PDF, Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, Org, RST and TeX. Image OCR, MSG and Numbers readers are not implemented yet.",
             extension
         )));
     }
@@ -48,7 +53,12 @@ pub fn extract(path: &Path) -> Result<Document> {
             markdown: text::decode(&bytes)?,
             ..Document::default()
         },
-        "html" | "htm" | "xhtml" => extract_html(&text::decode(&bytes)?, None)?,
+        "html" | "htm" | "xhtml" => {
+            let mut document = extract_html(&text::decode(&bytes)?, None)?;
+            // Local HTML follows the workflow's content-heading title rule.
+            document.metadata.remove("title");
+            document
+        }
         "csv" | "tsv" => text::delimited(
             &text::decode(&bytes)?,
             if extension == "tsv" { b'\t' } else { b',' },
@@ -57,6 +67,7 @@ pub fn extract(path: &Path) -> Result<Document> {
         "json" => text::json(&text::decode(&bytes)?)?,
         "xml" => text::xml(&text::decode(&bytes)?)?,
         "eml" => text::email(&bytes)?,
+        "rst" | "org" | "tex" | "latex" => markup::extract(&text::decode(&bytes)?, &extension)?,
         _ => native::extract(&bytes, &extension)?,
     };
     result
@@ -65,16 +76,6 @@ pub fn extract(path: &Path) -> Result<Document> {
     result
         .metadata
         .insert("format".into(), extension.to_uppercase().into());
-    if !result.metadata.contains_key("title")
-        && let Some(title) = result
-            .markdown
-            .lines()
-            .find_map(|line| line.strip_prefix("# "))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    {
-        result.metadata.insert("title".into(), title.into());
-    }
     Ok(result)
 }
 
@@ -85,13 +86,12 @@ mod tests {
     #[test]
     fn format_support_does_not_promise_unimplemented_readers() {
         for extension in [
-            ".DOCX", "pdf", "pptx", "xls", "ods", "eml", "markdown", "tsv",
+            ".DOCX", "pdf", "pptx", "xls", "ods", "eml", "markdown", "tsv", "org", "rst", "tex",
+            "latex",
         ] {
             assert!(supports_extension(extension), "{extension}");
         }
-        for extension in [
-            "", "exe", "png", "heic", "numbers", "msg", "org", "rst", "tex",
-        ] {
+        for extension in ["", "exe", "png", "heic", "numbers", "msg"] {
             assert!(!supports_extension(extension), "{extension}");
         }
     }
@@ -103,7 +103,7 @@ mod tests {
         std::fs::write(&path, "---\ntitle: 原题\n---\n\n# 原题\n\n正文\n").unwrap();
         let result = extract(&path).unwrap();
         assert_eq!(result.markdown, std::fs::read_to_string(&path).unwrap());
-        assert_eq!(result.metadata["title"], "原题");
+        assert!(!result.metadata.contains_key("title"));
     }
 
     #[test]

@@ -18,18 +18,41 @@ network policy and optional model enhancement belong to the orchestration layer.
 | EML | mail-parser | Decoded subject, body and MIME attachments; attachment bytes returned separately |
 | DOC, DOCX, DOCM | anydoc document model | Headings, styled text, lists, tables, links, formulas, notes and embedded assets |
 | PPT, PPS, POT, PPTX, PPTM, PPSX, PPSM | anydoc document model | Native presentation content through the same Markdown renderer |
-| XLS, XLSX, XLSM, XLSB | anydoc document model | Native sheet content; exact cell-format compatibility has not been established |
-| ODT, ODS, ODP, RTF, EPUB | anydoc document model | Native structured documents through the same Markdown renderer |
-| PDF | anydoc / pdf-inspector | Native text/layout Markdown; scanned or image-only PDFs fail with a conversion error explaining the OCR requirement |
+| XLS, XLSX, XLSM, XLSB | anydoc document model | Native sheet content; XLS/XLSX/XLSM single-sheet names are recovered from package metadata; exact cell-format compatibility has not been established |
+| ODT, ODS, ODP, RTF | anydoc document model | Native structured documents through the same Markdown renderer |
+| EPUB | anydoc + OPF metadata | Spine content and the original title/authors/language/publisher/date/description/identifier preamble |
+| PDF | pdf-inspector + lopdf | Per-page text/layout extraction, page markers, partial-page recovery and bounded extraction of supported embedded images |
 
-The native Office renderer reads the document once and preserves its embedded
-bytes. References use `.markitai/assets/{name}` until the output layer assigns
+The native Office renderer reads the document once and preserves referenced
+embedded bytes. Unreferenced archive images are omitted. References use `.markitai/assets/{name}` until the output layer assigns
 final paths. A merged table's origin contains its content; covered cells are
 empty, and a warning records this Markdown representation.
 
-PDF extraction currently returns a warning because PDF image assets, screenshots,
-local OCR and the Python implementation's page-marker contract are not yet
-implemented. The browser runtime is outside this module. No Python interpreter,
+PDF pages with unreliable or missing native text retain their numbered marker
+and emit a warning naming the page and the parser's OCR reason. Other pages are
+retained. A document with neither readable text nor recoverable images fails
+explicitly. An unnamed layout/GID rejection, or a scan classification caused by
+declared but unused image resources, can fall back to bounded font-decoded plain
+text only when execution inspection finds no used image, inline/pattern-image
+warning, visibility signal or stream error, no Type3 font is present, and decoded
+text passes conservative Unicode/content checks. Such
+pages explicitly warn that reading order, paragraph boundaries and styling may
+differ. A scan with executed raster content, garbled text, vector-text and
+invisible-text reasons are never overridden by this fallback. Used image XObjects, including those inside nested Form XObjects,
+are collected in page order and deduplicated by PDF object identity. Original
+JPEG streams are preserved; supported 8-bit DeviceRGB/DeviceGray samples become
+PNG. Images are appended to their page rather than positioned within its text.
+Unsupported filters, color spaces, remapping, transparency masks and inline
+images produce explicit warnings. Metadata/stream/image/asset limits bound the
+additional package and image passes; they are not a claim that every upstream
+parser allocation is bounded.
+
+PDF inspection reports invisible rendering modes, transparent text, white text
+and very small text when they accompany text operators, including inside forms.
+This is a diagnostic contract: complete hidden-text removal, page screenshots,
+vector drawing rasterization, image-region text grouping and local OCR remain
+unimplemented. The upstream reader's visibility and layout heuristics still
+determine the extracted text. The browser runtime is outside this module. No Python interpreter,
 Node runtime, Office installation, LibreOffice or hosted extraction service is
 used by the readers above.
 
@@ -55,6 +78,19 @@ block; it does not yet reproduce the original dialect-aware Markdown adapter.
 Office conversion can differ in whitespace, table header selection, numbering,
 anchors, font-driven headings and metadata. Such differences must remain visible
 in differential reports rather than being normalized away.
+
+The renderer retains referenced anchors and omits unused ones. EPUB links within
+the assembled book keep working through these anchors; they intentionally differ
+from the reference's links to source XHTML files that are not exported. DOCX
+tables keep their first row as data with a blank Markdown header. ODS uses its
+first row as the header and removes wholly empty trailing columns beyond both
+content and merged spans. A five-column merged title remains five columns even
+when its body data occupies only three; this differs from the reference's
+three-column rendering of the ODS fixture. RTF heading bold markers are omitted while other emphasis is
+retained. Hidden XLS/XLSX worksheets are currently omitted by the upstream parser
+and reported explicitly. XLSB sheet metadata, older XLS code pages other than
+Windows-1252, slide-boundary markers, presentation image recompression, PDF table
+layout and PDF image placement require further compatibility work.
 
 ## Error and output principles
 
@@ -102,11 +138,14 @@ only after a case's content and asset checks pass.
 
 ## Dependency choices
 
-The native parser dependency is [anydoc](https://github.com/firecrawl/anydoc),
+The native Office parser dependency is [anydoc](https://github.com/firecrawl/anydoc),
 whose Rust API exposes both Markdown and a structured document with embedded
 assets. It already backed legacy DOC/PPT in the reference implementation. Its
-native PDF reader cannot do OCR. This project adds its own renderer to avoid
-discarding embedded images and to control Markitai's output contract.
+native PDF reader cannot do OCR. This project adds its own Office renderer to
+avoid discarding embedded images and to control Markitai's output contract. The
+PDF adapter calls pdf-inspector's per-page API directly so that one OCR-required
+page does not discard readable pages. A separate lopdf pass retrieves embedded
+image streams and reports visibility signals without an external rendering engine.
 
 HTML uses [scraper](https://docs.rs/scraper/) for an HTML5 DOM and selectors and
 [htmd](https://docs.rs/htmd/) for Markdown serialization after explicit cleaning.

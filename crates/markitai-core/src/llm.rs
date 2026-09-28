@@ -1,17 +1,5 @@
 use crate::{ConversionUsage, Error, Result, config, fetch};
 use serde_json::{Value, json};
-use std::collections::HashMap;
-
-fn resolve(value: Option<&str>, env: &HashMap<String, String>) -> Result<Option<String>> {
-    match value {
-        Some(value) if value.starts_with("env:") => {
-            env.get(&value[4..]).cloned().map(Some).ok_or_else(|| {
-                Error::Config(format!("Environment variable {} is not set", &value[4..]))
-            })
-        }
-        value => Ok(value.map(str::to_owned)),
-    }
-}
 
 pub fn enhance(markdown: &str, cfg: &Value) -> Result<(String, ConversionUsage)> {
     let env = config::environment();
@@ -61,18 +49,21 @@ pub fn enhance(markdown: &str, cfg: &Value) -> Result<(String, ConversionUsage)>
             )));
         }
     };
-    let key = resolve(
+    let key = config::resolve_optional(
         params
             .and_then(|p| p.get("api_key"))
             .and_then(Value::as_str),
+        Some(key_name),
         &env,
-    )?
-    .or_else(|| env.get(key_name).cloned());
-    let base = resolve(
+        true,
+    )?;
+    let base = config::resolve_optional(
         params
             .and_then(|p| p.get("api_base"))
             .and_then(Value::as_str),
+        None,
         &env,
+        true,
     )?
     .or_else(|| {
         env.get(&format!("{}_API_BASE", provider.to_uppercase()))

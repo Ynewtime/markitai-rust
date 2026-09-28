@@ -182,30 +182,94 @@ pub(super) fn xml(source: &str) -> Result<Document> {
     let mut reader = quick_xml::Reader::from_str(source);
     let mut depth = 0usize;
     let mut roots = 0usize;
+    let mut blocks = Vec::new();
+    let mut pending = String::new();
+    let malformed =
+        |error: &dyn std::fmt::Display| Error::Conversion(format!("Malformed XML: {error}"));
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(_)) => {
+        let event = reader.read_event().map_err(|e| malformed(&e))?;
+        match &event {
+            Event::Start(_) | Event::Empty(_) | Event::End(_) | Event::Eof => {
+                if !pending.trim().is_empty() {
+                    if depth == 0 {
+                        return Err(Error::Conversion(
+                            "XML text outside document element".into(),
+                        ));
+                    }
+                    blocks.push(pending.trim().to_owned());
+                }
+                pending.clear();
+            }
+            _ => (),
+        }
+        let empty = matches!(&event, Event::Empty(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
                 if depth == 0 {
                     roots += 1;
                 }
-                depth += 1;
-            }
-            Ok(Event::Empty(_)) => {
-                if depth == 0 {
-                    roots += 1;
+                let level = depth + 1;
+                if level > 256 {
+                    return Err(Error::Conversion("XML nesting exceeds 256 elements".into()));
+                }
+                let local_name = element.local_name();
+                let name = reader
+                    .decoder()
+                    .decode(local_name.as_ref())
+                    .map_err(|e| malformed(&e))?;
+                if level <= 6 {
+                    blocks.push(format!("{} {name}", "#".repeat(level)));
+                } else {
+                    blocks.push(format!("{}- **{name}**", "  ".repeat(level - 7)));
+                }
+                for attr in element.attributes() {
+                    let attr = attr.map_err(|e| malformed(&e))?;
+                    if attr.key.as_ref() == b"xmlns" || attr.key.as_ref().starts_with(b"xmlns:") {
+                        continue;
+                    }
+                    let key = attr.key.local_name();
+                    let key = reader
+                        .decoder()
+                        .decode(key.as_ref())
+                        .map_err(|e| malformed(&e))?;
+                    let value = attr
+                        .decoded_and_normalized_value(
+                            quick_xml::XmlVersion::Implicit1_0,
+                            reader.decoder(),
+                        )
+                        .map_err(|e| malformed(&e))?;
+                    blocks.push(format!("{key}: {value}"));
+                }
+                if !empty {
+                    depth += 1;
                 }
             }
-            Ok(Event::End(_)) => {
+            Event::End(_) => {
                 depth = depth.saturating_sub(1);
             }
-            Ok(Event::Eof) => break,
-            Ok(Event::DocType(_)) => {
+            Event::Text(text) => pending.push_str(
+                &text
+                    .xml_content(quick_xml::XmlVersion::Implicit1_0)
+                    .map_err(|e| malformed(&e))?,
+            ),
+            Event::CData(text) => pending.push_str(
+                &text
+                    .xml_content(quick_xml::XmlVersion::Implicit1_0)
+                    .map_err(|e| malformed(&e))?,
+            ),
+            Event::GeneralRef(reference) => {
+                let name = reference.decode().map_err(|e| malformed(&e))?;
+                let encoded = format!("&{name};");
+                pending
+                    .push_str(&quick_xml::escape::unescape(&encoded).map_err(|e| malformed(&e))?);
+            }
+            Event::Eof => break,
+            Event::DocType(_) => {
                 return Err(Error::Conversion(
                     "XML document types and external entities are not supported".into(),
                 ));
             }
-            Ok(_) => (),
-            Err(e) => return Err(Error::Conversion(format!("Malformed XML: {e}"))),
+            _ => (),
         }
     }
     if depth != 0 || roots != 1 {
@@ -213,8 +277,12 @@ pub(super) fn xml(source: &str) -> Result<Document> {
             "XML must contain one complete document element".into(),
         ));
     }
+    let source = source.trim();
+    if source.len() < 20 * 1024 {
+        blocks.push(fence(source, "xml"));
+    }
     Ok(Document {
-        markdown: fence(source.trim(), "xml"),
+        markdown: blocks.join("\n\n"),
         ..Document::default()
     })
 }
@@ -251,7 +319,20 @@ pub(super) fn email(bytes: &[u8]) -> Result<Document> {
     for name in ["From", "To", "Cc", "Date", "Subject"] {
         for value in message.header_as(name, mail_parser::HeaderForm::Text) {
             if let Some(value) = value.as_text() {
-                let value = value
+                let date = (name == "Date")
+                    .then(|| message.date())
+                    .flatten()
+                    .map(|date| {
+                        // RFC 5322 date headers are rendered with a two-digit day.
+                        date.to_rfc822().replacen(
+                            &format!(", {} ", date.day),
+                            &format!(", {:02} ", date.day),
+                            1,
+                        )
+                    });
+                let value = date
+                    .as_deref()
+                    .unwrap_or(value)
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -342,11 +423,21 @@ mod tests {
             xml("<root><child>text</child></root>")
                 .unwrap()
                 .markdown
-                .starts_with("```xml")
+                .starts_with("# root\n\n## child\n\ntext")
         );
         assert!(xml("<root>").is_err());
         assert!(xml("<a/><b/>").is_err());
         assert!(xml("<!DOCTYPE a SYSTEM 'https://example.test/x'><a/>").is_err());
+        assert!(xml("outside<a/>").is_err());
+        assert!(xml("<a>&unknown;</a>").is_err());
+        let mixed =
+            xml("<x:root xmlns:x=\"urn:test\" a=\"1&amp;2\">left &lt;<x:child/>right</x:root>")
+                .unwrap();
+        assert!(
+            mixed
+                .markdown
+                .starts_with("# root\n\na: 1&2\n\nleft <\n\n## child\n\nright\n\n```xml")
+        );
     }
     #[test]
     fn email_decodes_mime_and_subject() {

@@ -59,9 +59,10 @@ dataclasses, and filesystem result fields are `pathlib.Path`. Calling
 `enable_worker_processes` remains an importable compatibility hook; Rust does
 not require Python worker processes.
 
-`MarkitaiConfig` supports mutable section attributes, keyword construction,
-`model_dump(mode="json")`, `model_dump_json`, `model_copy`, `model_validate`,
-and `model_validate_json`. Defaults and basic validation come from Rust:
+`MarkitaiConfig` and the 26 nested configuration model classes are available
+from `markitai.config`. They use Rust's shared schema, defaults, coercions and
+construction validation. Model lists contain typed objects; preset and domain
+maps remain ordinary dictionaries with typed values:
 
 ```python
 cfg = markitai.MarkitaiConfig(output={"on_conflict": "overwrite"})
@@ -69,9 +70,22 @@ cfg.llm.enabled = False
 out = markitai.convert("report.md", config=cfg)
 ```
 
-This class is not a Pydantic `BaseModel`. Pydantic validators, schemas, the full
-`model_dump` option set, and all old nested config classes are not yet
-implemented. JSON dictionaries and external objects exposing
+Declared field assignment remains unvalidated, as in the original models;
+assigning an unknown model attribute raises `ValueError`. Configuration is
+validated again on conversion. `model_copy` retains shallow/deep behavior,
+and `model_validate` accepts an existing instance without replacing it.
+`model_dump` supports JSON/Python modes and common include/exclude,
+exclude-unset/defaults/none filters; `model_dump_json` and JSON validation
+round-trip these values. `model_json_schema` exports structural types, required
+fields, bounds and defaults without the reference project's prose. Environment
+resolver methods preserve explicit-reference and fallback behavior.
+
+These classes are not Pydantic `BaseModel` subclasses. Validation raises
+`ValueError`, without Pydantic's aggregated `ValidationError` details. Custom
+validators, custom schema generators, `extra="allow"`, serializer warning
+behavior and Pydantic internals are not reproduced. Advanced combinations of
+serialization selectors remain a compatibility testing target. JSON
+dictionaries and external objects exposing
 `model_dump(mode="json")` also work. The wrapper never mutates supplied config.
 Native `fetch_error` maps to `FetchError`; input/configuration errors map to
 `ValueError`; conversion/unsupported errors map to `ConversionError` with a
@@ -201,7 +215,7 @@ Implementation references: [PyO3 function and module interface](https://pyo3.rs/
 [PyO3 GIL release](https://pyo3.rs/v0.27.2/parallelism.html), and
 [NAPI-RS native async tasks](https://napi.rs/docs/concepts/async-task).
 
-## Verified checkpoint: 2026-09-28
+## Initial verified checkpoint: 2026-09-28
 
 Platform: macOS arm64. Toolchain: Rust 1.98.1, Python 3.13.15, maturin 1.15.0,
 Node.js 24.21.0, Go 1.27.1. Native libraries use the Cargo `release` profile;
@@ -223,3 +237,25 @@ SBOM. The test npm archive is
 and 13,064,120 unpacked bytes. These are local development artifacts, not
 published releases or cross-platform size guarantees. Artifacts and test
 environments stay ignored; source and reproducible build commands are tracked.
+
+
+## Recovery checkpoint: 2026-09-28
+
+The configuration adapter now materializes all 27 native configuration models,
+including nested deployments, maps and lists. The newly built wheel was installed
+into the same private test environment and passed all 16 tests (eight native API
+and eight configuration contracts). Tests imported the installed wheel from the
+repository root, not the wrapper source directory.
+
+The rebuilt Node addon passed all three tests. Its new npm archive was installed
+under `.local/node-installed-round2`; synchronous and asynchronous Unicode
+conversion passed through the installed package. Go passed `go test -race
+-count=1 ./...` against the rebuilt native C library.
+
+The source, native schema helper and shipped `_native.pyi` agree on the
+configuration protocol. Core and wrapper tests still do not establish full
+Pydantic extension-protocol compatibility or cross-platform support.
+
+Recovery artifacts live under `.local/bindings-wheels/round2` and
+`.local/bindings-packages/round2`, preserving the initial artifacts. Their sizes
+and identities are recorded in `validation/artifacts-round2.json`.

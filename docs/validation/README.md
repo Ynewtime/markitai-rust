@@ -26,6 +26,15 @@ native library and compares Markdown, non-clock metadata, and extracted asset
 hashes. It includes unimplemented source formats in the denominator. Token
 recall is diagnostic, never a substitute for the exact-content checks.
 
+## Recorded format gates
+
+- [Initial baseline](formats-baseline.md): 0/24 exact passes.
+- [Intermediate recovery](formats-recovery.md): 13/24 exact passes.
+- [Second recovery](formats-recovery-r4.md): 15/24 exact passes, with all remaining differences listed.
+
+Each record identifies a frozen artifact; later fixes do not retroactively change
+its measurements. Full JSON reports retain the complete fixture denominator.
+
 ## Initial CLI benchmark
 
 ```sh

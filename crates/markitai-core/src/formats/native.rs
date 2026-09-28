@@ -1,5 +1,11 @@
 use crate::{Asset, Document, Error, Result};
 use anydoc::model::{Block, CellSlot, ImageSource, Inline, LinkTarget};
+use std::collections::BTreeSet;
+
+#[path = "office_meta.rs"]
+mod office_meta;
+#[path = "pdf.rs"]
+mod pdf;
 
 fn conversion_error(error: anydoc::ConvertError) -> Error {
     Error::Conversion(format!("Native document conversion failed: {error}"))
@@ -52,6 +58,72 @@ fn image_extension(mime: &str, origin: &str) -> String {
 struct Renderer<'a> {
     asset_names: &'a [String],
     merged_cells: bool,
+    anchors: BTreeSet<String>,
+    extension: &'a str,
+}
+
+fn references(blocks: &[Block], anchors: &mut BTreeSet<String>, assets: &mut BTreeSet<usize>) {
+    fn inlines(values: &[Inline], anchors: &mut BTreeSet<String>, assets: &mut BTreeSet<usize>) {
+        for value in values {
+            if let Inline::Link { content, target } = value {
+                if let LinkTarget::Anchor(anchor) = target {
+                    anchors.insert(anchor.clone());
+                }
+                inlines(content, anchors, assets);
+            }
+            if let Inline::Image {
+                source: ImageSource::Asset(id),
+                ..
+            } = value
+            {
+                assets.insert(id.0);
+            }
+        }
+    }
+    for block in blocks {
+        match block {
+            Block::Heading { content, .. } | Block::Paragraph(content) => {
+                inlines(content, anchors, assets)
+            }
+            Block::List(list) => {
+                for item in &list.items {
+                    references(&item.blocks, anchors, assets);
+                }
+            }
+            Block::BlockQuote(blocks) => references(blocks, anchors, assets),
+            Block::Table(table) => {
+                for row in &table.grid {
+                    for slot in row {
+                        if let CellSlot::Origin(cell) = slot {
+                            references(&cell.blocks, anchors, assets);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn heading_without_bold(content: &[Inline]) -> Vec<Inline> {
+    content
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text { text, style } => {
+                let mut style = *style;
+                style.bold = false;
+                Inline::Text {
+                    text: text.clone(),
+                    style,
+                }
+            }
+            Inline::Link { content, target } => Inline::Link {
+                content: heading_without_bold(content),
+                target: target.clone(),
+            },
+            other => other.clone(),
+        })
+        .collect()
 }
 
 impl Renderer<'_> {
@@ -123,6 +195,9 @@ impl Renderer<'_> {
                     }
                 }
                 Inline::Anchor(anchor) => {
+                    if !self.anchors.contains(anchor) {
+                        continue;
+                    }
                     let anchor = anchor
                         .replace('&', "&amp;")
                         .replace('"', "&quot;")
@@ -149,12 +224,22 @@ impl Renderer<'_> {
                     anchor,
                     content,
                 } => {
+                    let plain_bold;
+                    let content = if self.extension == "rtf" {
+                        plain_bold = heading_without_bold(content);
+                        &plain_bold
+                    } else {
+                        content
+                    };
                     let heading = format!(
                         "{} {}",
                         "#".repeat(usize::from((*level).clamp(1, 6))),
                         self.inlines(content)
                     );
-                    if let Some(anchor) = anchor {
+                    if let Some(anchor) = anchor
+                        .as_ref()
+                        .filter(|anchor| self.anchors.contains(*anchor))
+                    {
                         format!(
                             "{}\n{heading}",
                             self.inlines(&[Inline::Anchor(anchor.clone())])
@@ -163,7 +248,7 @@ impl Renderer<'_> {
                         heading
                     }
                 }
-                Block::Paragraph(values) => self.inlines(values),
+                Block::Paragraph(values) => self.inlines(values).trim_end().to_owned(),
                 Block::CodeBlock { lang, text } => {
                     super::text::fence(text, lang.as_deref().unwrap_or(""))
                 }
@@ -179,27 +264,34 @@ impl Renderer<'_> {
                     .items
                     .iter()
                     .enumerate()
-                    .map(|(index, item)| {
+                    .filter_map(|(index, item)| {
                         let marker = item.marker_label.clone().unwrap_or_else(|| {
                             if list.ordered() {
                                 list.marker.label(list.start + index as u64)
                             } else {
-                                "*".into()
+                                if matches!(self.extension, "doc" | "odt") {
+                                    "-".into()
+                                } else {
+                                    "*".into()
+                                }
                             }
                         });
                         let content = self.blocks(&item.blocks);
+                        if content.trim().is_empty() {
+                            return None;
+                        }
                         let indent = " ".repeat(marker.len() + 1);
                         let mut lines = content.lines();
                         let mut item_text = format!("{marker} {}", lines.next().unwrap_or(""));
                         for line in lines {
                             item_text.push_str(&format!("\n{indent}{line}"));
                         }
-                        item_text
+                        Some(item_text.trim_end().to_owned())
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
                 Block::Table(table) => {
-                    let rows = table
+                    let mut rows = table
                         .grid
                         .iter()
                         .map(|row| {
@@ -218,9 +310,38 @@ impl Renderer<'_> {
                                 .collect::<Vec<_>>()
                         })
                         .collect::<Vec<_>>();
-                    super::text::table(&rows, table.header_rows > 0)
-                        .trim_end()
-                        .to_owned()
+                    if self.extension == "ods" {
+                        let content_width = rows
+                            .iter()
+                            .filter_map(|row| row.iter().rposition(|cell| !cell.is_empty()))
+                            .max()
+                            .map(|last| last + 1)
+                            .unwrap_or(0);
+                        let span_width = table
+                            .grid
+                            .iter()
+                            .flat_map(|row| row.iter().enumerate())
+                            .filter_map(|(column, slot)| match slot {
+                                CellSlot::Origin(cell)
+                                    if cell.col_span > 1 || cell.row_span > 1 =>
+                                {
+                                    Some(column.saturating_add(cell.col_span as usize))
+                                }
+                                _ => None,
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        let width = content_width.max(span_width);
+                        for row in &mut rows {
+                            row.truncate(width);
+                        }
+                    }
+                    let header = if matches!(self.extension, "docx" | "docm") {
+                        false
+                    } else {
+                        self.extension == "ods" || table.header_rows > 0
+                    };
+                    super::text::table(&rows, header).trim_end().to_owned()
                 }
             };
             if !rendered.is_empty() {
@@ -235,18 +356,19 @@ pub(super) fn extract(bytes: &[u8], extension: &str) -> Result<Document> {
     let format = anydoc::Format::from_extension(extension)
         .ok_or_else(|| Error::Unsupported(format!("Unsupported format: {extension}")))?;
     if format == anydoc::Format::Pdf {
-        let markdown = anydoc::to_markdown_bytes(bytes, format).map_err(conversion_error)?;
-        let mut document = Document {
-            markdown,
-            ..Document::default()
-        };
-        document
-            .metadata
-            .insert("converter".into(), "pdf-inspector".into());
-        document.warnings.push("PDF text and layout use the native pdf-inspector backend; PDF image assets, page screenshots and OCR are not implemented in this build.".into());
-        return Ok(document);
+        return pdf::extract(bytes);
     }
-    let parsed = anydoc::to_document(bytes, format).map_err(conversion_error)?;
+    let mut parsed = anydoc::to_document(bytes, format).map_err(conversion_error)?;
+    let metadata = office_meta::read(bytes, extension);
+    if metadata.sheets.len() == 1 && !matches!(parsed.blocks.first(), Some(Block::Heading { .. })) {
+        parsed.blocks.insert(
+            0,
+            Block::heading(2, vec![Inline::plain(metadata.sheets[0].clone())]),
+        );
+    }
+    if extension == "epub" && metadata.title().is_some_and(|title| matches!(parsed.blocks.first(), Some(Block::Heading { content, .. }) if anydoc::model::inlines_to_plain_text(content) == title)) {
+        parsed.blocks.remove(0);
+    }
     let names = parsed
         .assets
         .iter()
@@ -258,11 +380,23 @@ pub(super) fn extract(bytes: &[u8], extension: &str) -> Result<Document> {
             )
         })
         .collect::<Vec<_>>();
+    let mut anchors = BTreeSet::new();
+    let mut used_assets = BTreeSet::new();
+    references(&parsed.blocks, &mut anchors, &mut used_assets);
+    for note in &parsed.notes {
+        references(&note.blocks, &mut anchors, &mut used_assets);
+    }
     let mut renderer = Renderer {
         asset_names: &names,
         merged_cells: false,
+        anchors,
+        extension,
     };
     let mut markdown = renderer.blocks(&parsed.blocks);
+    let preamble = metadata.preamble();
+    if !preamble.is_empty() {
+        markdown = format!("{preamble}\n\n{markdown}");
+    }
     for note in &parsed.notes {
         let text = renderer.blocks(&note.blocks);
         let mut lines = text.lines();
@@ -275,17 +409,10 @@ pub(super) fn extract(bytes: &[u8], extension: &str) -> Result<Document> {
             markdown.push_str(&format!("\n    {line}"));
         }
     }
-    let mut warnings = Vec::new();
+    let mut warnings = metadata.warnings.clone();
     if renderer.merged_cells {
         warnings.push("Merged table cells are represented by their origin cell with empty covered cells in Markdown.".into());
     }
-    let title = parsed.blocks.iter().find_map(|block| {
-        if let Block::Heading { content, .. } = block {
-            Some(anydoc::model::inlines_to_plain_text(content))
-        } else {
-            None
-        }
-    });
     let mut document = Document {
         markdown,
         warnings,
@@ -294,10 +421,13 @@ pub(super) fn extract(bytes: &[u8], extension: &str) -> Result<Document> {
     document
         .metadata
         .insert("converter".into(), "anydoc".into());
-    if let Some(title) = title.filter(|s| !s.is_empty()) {
+    if let Some(title) = metadata.title().filter(|s| !s.is_empty()) {
         document.metadata.insert("title".into(), title.into());
     }
     for (asset, name) in parsed.assets.into_iter().zip(names) {
+        if !used_assets.contains(&asset.id.0) {
+            continue;
+        }
         document.assets.push(Asset {
             name,
             bytes: asset.bytes,
@@ -316,6 +446,8 @@ mod tests {
         let mut renderer = Renderer {
             asset_names: &names,
             merged_cells: false,
+            anchors: BTreeSet::new(),
+            extension: "docx",
         };
         let result = renderer.blocks(&[
             Block::heading(1, vec![Inline::plain("Title")]),
@@ -354,5 +486,123 @@ mod tests {
         .unwrap();
         assert!(doc.markdown.contains("**world**"));
         assert!(extract(b"this is not a PDF", "pdf").is_err());
+    }
+
+    #[test]
+    fn referenced_anchors_survive_and_unused_anchors_disappear() {
+        let blocks = vec![
+            Block::Heading {
+                level: 1,
+                anchor: Some("target".into()),
+                content: vec![Inline::plain("Target")],
+            },
+            Block::Paragraph(vec![
+                Inline::Anchor("unused".into()),
+                Inline::Link {
+                    content: vec![Inline::plain("jump")],
+                    target: LinkTarget::Anchor("target".into()),
+                },
+            ]),
+        ];
+        let mut anchors = BTreeSet::new();
+        references(&blocks, &mut anchors, &mut BTreeSet::new());
+        let mut renderer = Renderer {
+            asset_names: &[],
+            merged_cells: false,
+            anchors,
+            extension: "doc",
+        };
+        let markdown = renderer.blocks(&blocks);
+        assert!(markdown.contains("<a id=\"target\"></a>\n# Target"));
+        assert!(markdown.contains("[jump](#target)"));
+        assert!(!markdown.contains("unused"));
+    }
+
+    #[test]
+    fn document_and_sheet_table_headers_match_their_format_contracts() {
+        let table = Block::Table(Table::from_rows(
+            vec![
+                vec![
+                    Cell::from_inlines(vec![Inline::plain("Name")]),
+                    Cell::default(),
+                ],
+                vec![
+                    Cell::from_inlines(vec![Inline::plain("Value")]),
+                    Cell::default(),
+                ],
+            ],
+            1,
+            TableKind::Data,
+        ));
+        let mut renderer = Renderer {
+            asset_names: &[],
+            merged_cells: false,
+            anchors: BTreeSet::new(),
+            extension: "docx",
+        };
+        assert!(
+            renderer
+                .blocks(std::slice::from_ref(&table))
+                .starts_with("|  |  |\n| --- | --- |\n| Name |  |")
+        );
+        renderer.extension = "ods";
+        assert_eq!(renderer.blocks(&[table]), "| Name |\n| --- |\n| Value |");
+    }
+
+    #[test]
+    fn sheet_trimming_preserves_merged_extent_without_affecting_later_tables() {
+        let merged = Block::Table(Table {
+            grid: vec![vec![
+                CellSlot::Origin(Cell::spanning(
+                    vec![Block::Paragraph(vec![Inline::plain("Title")])],
+                    2,
+                    1,
+                )),
+                CellSlot::Covered {
+                    origin_row: 0,
+                    origin_col: 0,
+                },
+                CellSlot::Origin(Cell::new(vec![])),
+            ]],
+            header_rows: 1,
+            kind: TableKind::Data,
+        });
+        let plain = Block::Table(Table::from_rows(
+            vec![vec![
+                Cell::from_inlines(vec![Inline::plain("One")]),
+                Cell::new(vec![]),
+            ]],
+            1,
+            TableKind::Data,
+        ));
+        let mut renderer = Renderer {
+            asset_names: &[],
+            merged_cells: false,
+            anchors: BTreeSet::new(),
+            extension: "ods",
+        };
+        assert_eq!(
+            renderer.blocks(&[merged, plain]),
+            "| Title |  |\n| --- | --- |\n\n| One |\n| --- |"
+        );
+        assert!(renderer.merged_cells);
+    }
+
+    #[test]
+    fn image_references_inside_table_links_are_retained() {
+        let blocks = [Block::Table(Table::from_rows(
+            vec![vec![Cell::from_inlines(vec![Inline::Link {
+                content: vec![Inline::Image {
+                    alt: "Figure".into(),
+                    source: ImageSource::Asset(AssetId(2)),
+                }],
+                target: LinkTarget::External("https://example.test".into()),
+            }])]],
+            0,
+            TableKind::Data,
+        ))];
+        let mut assets = BTreeSet::new();
+        references(&blocks, &mut BTreeSet::new(), &mut assets);
+        assert_eq!(assets.into_iter().collect::<Vec<_>>(), [2]);
     }
 }

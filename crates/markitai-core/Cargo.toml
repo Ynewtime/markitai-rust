@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+lopdf = { version = "0.45", default-features = false }
+png = "0.18"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -18,6 +20,9 @@ dotenvy = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 regex = "1"
 anydoc = "0.2.4"
+pdf-inspector = { version = "1.25.1", default-features = false }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+cfb = "0.14"
 encoding_rs = "0.8"
 csv = "1"
 scraper = "0.27"

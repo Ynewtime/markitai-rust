@@ -1,0 +1,388 @@
+use std::collections::BTreeMap;
+use std::io::{Cursor, Read};
+
+const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Default)]
+pub(super) struct Metadata {
+    pub sheets: Vec<String>,
+    pub book: BTreeMap<String, Vec<String>>,
+    pub warnings: Vec<String>,
+}
+
+impl Metadata {
+    pub fn title(&self) -> Option<&str> {
+        self.book.get("title")?.first().map(String::as_str)
+    }
+
+    pub fn preamble(&self) -> String {
+        [
+            "title",
+            "authors",
+            "language",
+            "publisher",
+            "date",
+            "description",
+            "identifier",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            let values = self.book.get(key)?;
+            let value = if key == "authors" {
+                values.join(", ")
+            } else {
+                values.first()?.clone()
+            };
+            if value.is_empty() {
+                return None;
+            }
+            let label = format!("{}{}", key[..1].to_ascii_uppercase(), &key[1..]);
+            Some(format!("**{label}:** {value}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+}
+
+fn zip_text(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<String, String> {
+    let file = zip.by_name(name).map_err(|e| e.to_string())?;
+    if file.size() > MAX_METADATA_BYTES {
+        return Err(format!("metadata part {name} exceeds the size limit"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(format!("metadata part {name} exceeds the size limit"));
+    }
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+#[derive(Default)]
+struct Element {
+    name: String,
+    attributes: BTreeMap<String, String>,
+    text: String,
+}
+
+fn elements(xml: &str) -> Result<Vec<Element>, String> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut stack: Vec<Element> = Vec::new();
+    let mut output = Vec::new();
+    loop {
+        let event = reader.read_event().map_err(|e| e.to_string())?;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(event) | Event::Empty(event) => {
+                let mut element = Element {
+                    name: String::from_utf8_lossy(event.local_name().as_ref()).into_owned(),
+                    ..Element::default()
+                };
+                for attr in event.attributes() {
+                    let attr = attr.map_err(|e| e.to_string())?;
+                    element.attributes.insert(
+                        String::from_utf8_lossy(attr.key.local_name().as_ref()).into_owned(),
+                        attr.decoded_and_normalized_value(
+                            quick_xml::XmlVersion::Implicit1_0,
+                            reader.decoder(),
+                        )
+                        .map_err(|e| e.to_string())?
+                        .into_owned(),
+                    );
+                }
+                if empty {
+                    output.push(element);
+                } else {
+                    if stack.len() >= 256 {
+                        return Err("metadata nesting exceeds the limit".into());
+                    }
+                    stack.push(element);
+                }
+            }
+            Event::Text(text) => {
+                let decoded = text.decode().map_err(|e| e.to_string())?;
+                let decoded = quick_xml::escape::unescape(&decoded).map_err(|e| e.to_string())?;
+                for item in &mut stack {
+                    item.text.push_str(&decoded);
+                }
+            }
+            Event::CData(text) => {
+                let decoded = text.decode().map_err(|e| e.to_string())?;
+                for item in &mut stack {
+                    item.text.push_str(&decoded);
+                }
+            }
+            Event::GeneralRef(reference) => {
+                let name = reference.decode().map_err(|e| e.to_string())?;
+                let entity = format!("&{name};");
+                let decoded = quick_xml::escape::unescape(&entity).map_err(|e| e.to_string())?;
+                for item in &mut stack {
+                    item.text.push_str(&decoded);
+                }
+            }
+            Event::End(_) => {
+                if let Some(mut item) = stack.pop() {
+                    item.text = item.text.trim().to_owned();
+                    output.push(item);
+                }
+            }
+            Event::DocType(_) => {
+                return Err("document types are not accepted in package metadata".into());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if !stack.is_empty() {
+        return Err("incomplete package metadata".into());
+    }
+    Ok(output)
+}
+
+fn read_zip(bytes: &[u8], extension: &str) -> Result<Metadata, String> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut result = Metadata::default();
+    if extension == "epub" {
+        let container = elements(&zip_text(&mut archive, "META-INF/container.xml")?)?;
+        let path = container
+            .iter()
+            .find(|el| el.name == "rootfile")
+            .and_then(|el| el.attributes.get("full-path"))
+            .ok_or("EPUB package path missing")?;
+        let package = elements(&zip_text(&mut archive, path)?)?;
+        for element in package {
+            let key = match element.name.as_str() {
+                "creator" => "authors",
+                "title" | "language" | "publisher" | "date" | "description" | "identifier" => {
+                    &element.name
+                }
+                _ => continue,
+            };
+            if !element.text.is_empty() {
+                result
+                    .book
+                    .entry(key.into())
+                    .or_default()
+                    .push(element.text);
+            }
+        }
+    } else {
+        let path = zip_text(&mut archive, "_rels/.rels")
+            .ok()
+            .and_then(|xml| elements(&xml).ok())
+            .and_then(|parts| {
+                parts
+                    .into_iter()
+                    .find(|el| {
+                        el.name == "Relationship"
+                            && el
+                                .attributes
+                                .get("Type")
+                                .is_some_and(|t| t.ends_with("/officeDocument"))
+                    })
+                    .and_then(|el| el.attributes.get("Target").cloned())
+            })
+            .unwrap_or_else(|| "xl/workbook.xml".into());
+        for sheet in elements(&zip_text(&mut archive, path.trim_start_matches('/'))?)?
+            .into_iter()
+            .filter(|el| el.name == "sheet")
+        {
+            if sheet
+                .attributes
+                .get("state")
+                .is_some_and(|s| s != "visible")
+            {
+                result.warnings.push(format!(
+                    "Hidden worksheet {:?} is omitted by the native spreadsheet reader.",
+                    sheet
+                        .attributes
+                        .get("name")
+                        .map(String::as_str)
+                        .unwrap_or("")
+                ));
+                continue;
+            }
+            if let Some(name) = sheet.attributes.get("name") {
+                result.sheets.push(name.clone());
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn biff_sheet_names(bytes: &[u8]) -> Result<Metadata, String> {
+    let mut result = Metadata::default();
+    let mut position = 0;
+    let mut unicode = true;
+    while position + 4 <= bytes.len() {
+        let id = u16::from_le_bytes([bytes[position], bytes[position + 1]]);
+        let len = usize::from(u16::from_le_bytes([
+            bytes[position + 2],
+            bytes[position + 3],
+        ]));
+        position += 4;
+        let data = bytes
+            .get(position..position + len)
+            .ok_or("truncated workbook metadata")?;
+        position += len;
+        if id == 0x0809 && data.len() >= 2 {
+            unicode = u16::from_le_bytes([data[0], data[1]]) >= 0x0600;
+        }
+        if id == 0x000a {
+            break;
+        }
+        if id != 0x0085 || data.len() < 7 {
+            continue;
+        }
+        if data[5] != 0 {
+            continue;
+        }
+        let len = usize::from(data[6]);
+        let name = if unicode {
+            let flag = *data.get(7).ok_or("truncated worksheet name")?;
+            if flag & 1 != 0 {
+                let encoded = data
+                    .get(8..8 + len * 2)
+                    .ok_or("truncated UTF-16 worksheet name")?;
+                String::from_utf16(
+                    &encoded
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|v| u16::from_le_bytes([v[0], v[1]]))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|e| e.to_string())?
+            } else {
+                data.get(8..8 + len)
+                    .ok_or("truncated worksheet name")?
+                    .iter()
+                    .map(|&byte| char::from(byte))
+                    .collect()
+            }
+        } else {
+            encoding_rs::WINDOWS_1252
+                .decode(data.get(7..7 + len).ok_or("truncated worksheet name")?)
+                .0
+                .into_owned()
+        };
+        if data[4] != 0 {
+            result.warnings.push(format!(
+                "Hidden worksheet {name:?} is omitted by the native spreadsheet reader."
+            ));
+        } else {
+            result.sheets.push(name);
+        }
+    }
+    Ok(result)
+}
+
+pub(super) fn read(bytes: &[u8], extension: &str) -> Metadata {
+    let parsed = match extension {
+        "xlsx" | "xlsm" | "epub" => read_zip(bytes, extension),
+        "xls" => (|| {
+            let mut compound =
+                cfb::CompoundFile::open(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+            let name = if compound.is_stream("/Workbook") {
+                "/Workbook"
+            } else {
+                "/Book"
+            };
+            let stream = compound.open_stream(name).map_err(|e| e.to_string())?;
+            let mut workbook = Vec::new();
+            stream
+                .take(MAX_METADATA_BYTES + 1)
+                .read_to_end(&mut workbook)
+                .map_err(|e| e.to_string())?;
+            if workbook.len() as u64 > MAX_METADATA_BYTES {
+                return Err("workbook metadata exceeds the size limit".into());
+            }
+            biff_sheet_names(&workbook)
+        })(),
+        _ => return Metadata::default(),
+    };
+    parsed.unwrap_or_else(|message| Metadata {
+        warnings: vec![format!(
+            "Package metadata could not be recovered: {message}"
+        )],
+        ..Metadata::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn archive(parts: &[(&str, &str)]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, content) in parts {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn xlsx_names_follow_package_relationships_and_report_hidden_sheets() {
+        let bytes = archive(&[
+            (
+                "_rels/.rels",
+                "<Relationships><Relationship Type='urn:test/officeDocument' Target='/custom/book.xml'/></Relationships>",
+            ),
+            (
+                "custom/book.xml",
+                "<workbook><sheets><sheet name='A &amp; B'/><sheet name='Hidden' state='veryHidden'/></sheets></workbook>",
+            ),
+        ]);
+        let metadata = read(&bytes, "xlsx");
+        assert_eq!(metadata.sheets, ["A & B"]);
+        assert_eq!(metadata.warnings.len(), 1);
+        assert!(metadata.warnings[0].contains("Hidden"));
+    }
+
+    #[test]
+    fn epub_preamble_retains_source_field_order_and_authors() {
+        let bytes = archive(&[
+            (
+                "META-INF/container.xml",
+                "<container><rootfiles><rootfile full-path='book/package.opf'/></rootfiles></container>",
+            ),
+            (
+                "book/package.opf",
+                "<package><metadata xmlns:dc='urn:dc'><dc:creator>A</dc:creator><dc:title>Book</dc:title><dc:creator>B</dc:creator><dc:language>zh</dc:language><dc:identifier>ID</dc:identifier></metadata></package>",
+            ),
+        ]);
+        let metadata = read(&bytes, "epub");
+        assert_eq!(metadata.title(), Some("Book"));
+        assert_eq!(
+            metadata.preamble(),
+            "**Title:** Book\n**Authors:** A, B\n**Language:** zh\n**Identifier:** ID"
+        );
+    }
+    #[test]
+    fn package_entities_and_book_fields_are_preserved() {
+        let values = elements("<metadata xmlns:dc='urn:dc'><dc:title>A &amp; B</dc:title><dc:creator>作者</dc:creator><dc:identifier id='a'>urn:one</dc:identifier></metadata>").unwrap();
+        assert_eq!(values[0].text, "A & B");
+        assert_eq!(values[1].text, "作者");
+        assert_eq!(values[2].attributes["id"], "a");
+        assert!(elements("<!DOCTYPE x><x/>").is_err());
+    }
+    #[test]
+    fn biff_unicode_sheet_name_and_hidden_status() {
+        let mut bytes = vec![0x09, 0x08, 2, 0, 0, 6];
+        let mut record = vec![0, 0, 0, 0, 0, 0, 2, 1];
+        for ch in "数据".encode_utf16() {
+            record.extend(ch.to_le_bytes());
+        }
+        bytes.extend([0x85, 0, record.len() as u8, 0]);
+        bytes.extend(&record);
+        assert_eq!(biff_sheet_names(&bytes).unwrap().sheets, ["数据"]);
+        bytes[14] = 1;
+        assert!(biff_sheet_names(&bytes).unwrap().sheets.is_empty());
+        assert_eq!(biff_sheet_names(&bytes).unwrap().warnings.len(), 1);
+    }
+}

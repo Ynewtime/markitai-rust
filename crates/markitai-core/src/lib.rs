@@ -2,7 +2,9 @@ pub mod config;
 mod fetch;
 pub mod formats;
 mod llm;
+mod markdown;
 pub mod output;
+mod output_profiles;
 mod types;
 
 pub use types::*;
@@ -21,13 +23,10 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         if !value.is_object() {
             return Err(Error::Config("config must be an object".into()));
         }
-        let mut cfg = config::defaults();
-        config::merge(&mut cfg, value);
-        cfg
+        config::normalize(&value)?
     } else {
         config::load(None, None)?
     };
-    config::validate(&cfg)?;
     for (path, value) in [
         ("/llm/enabled", options.llm),
         ("/ocr/enabled", options.ocr),
@@ -42,9 +41,11 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
         }
     }
     if let Some(profile) = options.profile {
+        if !matches!(profile.as_str(), "rag" | "obsidian" | "okf") {
+            return Err(Error::Config(format!("Invalid output profile: {profile}")));
+        }
         cfg["output"]["profile"] = json!(profile);
     }
-    config::validate(&cfg)?;
     if cfg
         .pointer("/security/pdf_sanitize")
         .and_then(Value::as_str)
@@ -54,17 +55,19 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
             "PDF hidden-text removal is not implemented in this development build".into(),
         ));
     }
-    if cfg
-        .pointer("/llm/max_cost_per_document_usd")
-        .and_then(Value::as_f64)
-        .is_some_and(|v| v > 0.0)
+    if config::enabled(&cfg, "/llm/enabled")
+        && cfg
+            .pointer("/llm/max_cost_per_document_usd")
+            .and_then(Value::as_f64)
+            .is_some_and(|v| v > 0.0)
     {
         return Err(Error::Unsupported("LLM cost limits require pricing support, which is not implemented in this development build".into()));
     }
-    if cfg
-        .pointer("/llm/model_list")
-        .and_then(Value::as_array)
-        .is_some_and(|v| v.len() > 1)
+    if config::enabled(&cfg, "/llm/enabled")
+        && cfg
+            .pointer("/llm/model_list")
+            .and_then(Value::as_array)
+            .is_some_and(|v| v.len() > 1)
     {
         return Err(Error::Unsupported(
             "Multiple-model routing is not implemented in this development build".into(),
@@ -140,15 +143,33 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
     };
     let mut result = output::prepare(source, &name, &mut doc, &cfg);
     if config::enabled(&cfg, "/llm/enabled") {
-        match llm::enhance(&result.markdown, &cfg) {
+        result.base_frontmatter = Some(result.frontmatter.clone());
+        let pure = config::enabled(&cfg, "/llm/pure");
+        let input = if pure {
+            &doc.markdown
+        } else {
+            &result.markdown
+        };
+        match llm::enhance(input, &cfg) {
             Ok((markdown, usage)) => {
                 let (meta, body) = output::split_frontmatter(&markdown);
-                result.frontmatter.extend(
-                    meta.into_iter().filter(|(key, _)| {
-                        !["source", "markitai_processed"].contains(&key.as_str())
-                    }),
-                );
-                result.llm_markdown = Some(body.to_owned());
+                if pure {
+                    let prefix_len = markdown.len() - body.len();
+                    result.pure_llm_prefix =
+                        (prefix_len > 0).then(|| markdown[..prefix_len].to_owned());
+                    result.frontmatter = meta;
+                } else {
+                    result
+                        .frontmatter
+                        .extend(meta.into_iter().filter(|(key, _)| {
+                            !["source", "markitai_processed"].contains(&key.as_str())
+                        }));
+                }
+                result.llm_markdown = Some(if pure {
+                    body.to_owned()
+                } else {
+                    crate::markdown::normalize(body)
+                });
                 result.usage = usage;
                 result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
             }
@@ -157,6 +178,7 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
                     return Err(error);
                 }
                 if cfg["llm"]["on_failure"] == "fail" {
+                    output::apply_profiles(&mut result, &cfg);
                     if let Some(dir) = &output_dir {
                         output::write(dir, &name, &mut result, &doc.assets, &cfg)?;
                     }
@@ -168,6 +190,7 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
             }
         }
     }
+    output::apply_profiles(&mut result, &cfg);
     if let Some(dir) = output_dir {
         output::write(&dir, &name, &mut result, &doc.assets, &cfg)?;
     }

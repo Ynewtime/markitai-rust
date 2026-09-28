@@ -119,7 +119,7 @@ fn llm_native_http_contract_usage_and_failure_policy() {
         );
         let request = server.join().unwrap();
         assert_eq!(request["model"], "test-model");
-        assert_eq!(request["messages"][1]["content"], "Body with facts.");
+        assert_eq!(request["messages"][1]["content"], "Body with facts.\n");
         if status == 200 {
             let result = result.unwrap();
             assert_eq!(result.usage.input_tokens, 12);
@@ -140,6 +140,88 @@ fn llm_native_http_contract_usage_and_failure_policy() {
             );
         }
     }
+}
+
+#[test]
+fn pure_llm_preserves_raw_input_and_uses_metadata_from_retained_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.md");
+    let original = "---\ntitle: Input\ncustom: original\n---\n\n# Body\ntext  ";
+    std::fs::write(&input, original).unwrap();
+    for (index, payload, keep_base, expected) in [
+        (
+            0,
+            r#"{"choices":[{"message":{"content":"---\ntitle: Model\nsource: Model source\n---\n\nModel body  "}}]}"#,
+            false,
+            json!({"title":"Model","source":"Model source"}),
+        ),
+        (
+            1,
+            r#"{"choices":[{"message":{"content":"Model body  "}}]}"#,
+            false,
+            json!({}),
+        ),
+        (
+            2,
+            r#"{"choices":[{"message":{"content":"Model body  "}}]}"#,
+            true,
+            json!({"title":"Input","custom":"original"}),
+        ),
+    ] {
+        let (base, server) = llm_server(200, payload);
+        let result = convert(input.to_str().unwrap(), ConvertOptions {
+            output_dir: Some(dir.path().join(format!("out-{index}"))),
+            config: Some(json!({"llm":{"enabled":true,"pure":true,"keep_base":keep_base,"model_list":[{"model_name":"mock","litellm_params":{"model":"openai/mock","api_base":base}}]}})),
+            ..Default::default()
+        }).unwrap();
+        let request = server.join().unwrap();
+        assert_eq!(request["messages"][1]["content"], original);
+        assert_eq!(serde_json::to_value(&result.frontmatter).unwrap(), expected);
+        let response: Value = serde_json::from_str(payload).unwrap();
+        let written = std::fs::read_to_string(result.llm_output_path.unwrap()).unwrap();
+        assert_eq!(
+            written,
+            response["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap()
+        );
+        if keep_base {
+            assert_eq!(
+                std::fs::read_to_string(result.output_path.unwrap()).unwrap(),
+                original
+            );
+        }
+    }
+}
+
+#[test]
+fn profiles_run_after_llm_and_each_retained_file_keeps_its_own_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.md");
+    std::fs::write(&input, "# Base\n\n<!-- Page number: 1 -->\n\nBody").unwrap();
+    let (base, server) = llm_server(
+        200,
+        r#"{"choices":[{"message":{"content":"---\ntitle: Enhanced\n---\n\n<!-- Page number: 2 -->\n\nNew body"}}]}"#,
+    );
+    let result = convert(input.to_str().unwrap(), ConvertOptions {
+        output_dir: Some(dir.path().join("out")),
+        config: Some(json!({"output":{"profile":"rag"},"llm":{"enabled":true,"keep_base":true,"model_list":[{"model_name":"mock","litellm_params":{"model":"openai/mock","api_base":base}}]}})),
+        ..Default::default()
+    }).unwrap();
+    assert!(
+        server.join().unwrap()["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<!-- Page number: 1 -->")
+    );
+    assert_eq!(result.frontmatter["title"], "Enhanced");
+    assert!(result.markdown.contains("<!-- page: 1 -->"));
+    assert!(result.llm_markdown.unwrap().contains("<!-- page: 2 -->"));
+    let base = std::fs::read_to_string(result.output_path.unwrap()).unwrap();
+    assert_eq!(
+        markitai_core::output::split_frontmatter(&base).0["title"],
+        "Base"
+    );
 }
 
 #[cfg(unix)]

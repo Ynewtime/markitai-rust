@@ -104,4 +104,11 @@ pub struct ConversionOutput {
     pub skip_reason: Option<String>,
     pub duration: f64,
     pub warnings: Vec<String>,
+    /// Original YAML bytes retained for writing pure input without reformatting.
+    #[serde(skip)]
+    pub(crate) pure_prefix: Option<String>,
+    #[serde(skip)]
+    pub(crate) pure_llm_prefix: Option<String>,
+    #[serde(skip)]
+    pub(crate) base_frontmatter: Option<Map<String, Value>>,
 }

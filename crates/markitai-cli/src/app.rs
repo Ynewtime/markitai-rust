@@ -687,12 +687,8 @@ fn emit_json(items: &[Value], error: Option<&str>) {
 }
 fn print_stdout(result: &ConversionOutput, cfg: &Value) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    let body = result.llm_markdown.as_deref().unwrap_or(&result.markdown);
-    let rendered = if config::enabled(cfg, "/llm/pure") {
-        body.to_owned()
-    } else {
-        markitai_core::output::render(&result.frontmatter, body).map_err(io::Error::other)?
-    };
+    let rendered = markitai_core::output::content(result, cfg, result.llm_markdown.is_some())
+        .map_err(io::Error::other)?;
     stdout.write_all(rendered.as_bytes())?;
     if !rendered.ends_with('\n') {
         stdout.write_all(b"\n")?;
@@ -875,20 +871,7 @@ fn parse_urls(path: &Path, output: &Path) -> CliResult<Vec<Task>> {
 }
 
 fn selected_config(cli: &Cli) -> Option<PathBuf> {
-    cli.config
-        .clone()
-        .or_else(|| std::env::var_os("MARKITAI_CONFIG").map(PathBuf::from))
-        .or_else(|| {
-            Path::new("markitai.json")
-                .is_file()
-                .then(|| PathBuf::from("markitai.json"))
-        })
-        .or_else(|| {
-            config::home()
-                .join("config.json")
-                .is_file()
-                .then(|| config::home().join("config.json"))
-        })
+    config::selected_path(cli.config.as_deref())
 }
 fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResult<i32> {
     match command {
@@ -901,6 +884,14 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 }
             }
             ConfigCommand::Validate { config_file } => {
+                if let Some(path) = config_file
+                    && !path.exists()
+                {
+                    return Err((
+                        2,
+                        format!("Configuration file does not exist: {}", path.display()),
+                    ));
+                }
                 config::load(config_file.as_deref().or(cli.config.as_deref()), overrides)
                     .map_err(runtime)?;
                 println!("Configuration is valid");
@@ -909,7 +900,8 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 format,
                 show_secrets,
             } => {
-                let mut cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
+                let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
+                let mut cfg = config::display_value(&cfg, None).map_err(runtime)?;
                 if !show_secrets {
                     redact(&mut cfg);
                 }
@@ -920,14 +912,22 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 }
             }
             ConfigCommand::Get { key, show_secrets } => {
-                let mut cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
-                if !show_secrets {
-                    redact(&mut cfg);
-                }
+                let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
                 let pointer = key_pointer(key)?;
                 let value = cfg
                     .pointer(&pointer)
                     .ok_or_else(|| (1, format!("Unknown configuration key: {key}")))?;
+                if value.is_null() {
+                    println!("null");
+                    return Ok(0);
+                }
+                let value = config::display_value(&cfg, Some(key)).map_err(runtime)?;
+                let visible = if *show_secrets {
+                    value
+                } else {
+                    config::redact_for_key(key, &value)
+                };
+                let value = &visible;
                 match value {
                     Value::String(s) => println!("{s}"),
                     _ => println!("{}", serde_json::to_string_pretty(value).map_err(runtime)?),
@@ -938,6 +938,9 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 value,
                 show_secrets,
             } => {
+                if overrides.is_some() {
+                    return Err((2, "--config-json overrides cannot be saved; drop --config-json to write a config file".into()));
+                }
                 let path =
                     selected_config(cli).unwrap_or_else(|| config::home().join("config.json"));
                 let mut raw = if path.is_file() {
@@ -949,29 +952,21 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
                 if !raw.is_object() {
                     return Err((1, "Configuration must be a JSON object".into()));
                 }
-                let value = serde_json::from_str::<Value>(value).unwrap_or_else(|_| json!(value));
-                let pointer = key_pointer(key)?;
-                let defaults = config::defaults();
-                let first = pointer.split('/').nth(1).unwrap_or("");
-                if defaults.get(first).is_none() {
-                    return Err((1, format!("Unknown configuration section: {first}")));
-                }
-                set_pointer(&mut raw, &pointer, value.clone())?;
-                let mut effective = defaults;
-                config::merge(&mut effective, raw.clone());
-                config::validate(&effective).map_err(runtime)?;
+                let value = config::parse_cli_value(&raw, key, value).map_err(runtime)?;
+                let value = config::set_value(&mut raw, key, value).map_err(runtime)?;
                 write_config(&path, &raw)?;
                 let mut visible = value;
                 if !show_secrets {
-                    if secret_key(key) {
-                        visible = json!("***");
-                    } else {
-                        redact(&mut visible);
-                    }
+                    visible = config::redact_for_key(key, &visible);
                 }
                 println!("{key} = {visible}");
             }
-            ConfigCommand::Edit => return Err(unsupported("Interactive configuration editor")),
+            ConfigCommand::Edit => {
+                if overrides.is_some() {
+                    return Err((2, "--config-json overrides cannot be saved; drop --config-json to edit a config file".into()));
+                }
+                return Err(unsupported("Interactive configuration editor"));
+            }
         },
         Command::Init { yes, output, local } => {
             if !yes {
@@ -1033,95 +1028,10 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
     Ok(0)
 }
 fn key_pointer(key: &str) -> CliResult<String> {
-    if key.is_empty() {
-        return Err((2, "Configuration key must not be empty".into()));
-    }
-    let expanded = key.replace('[', ".").replace(']', "");
-    let parts: Vec<_> = expanded.split('.').collect();
-    if parts.iter().any(|part| part.is_empty()) {
-        return Err((2, "Invalid configuration key path".into()));
-    }
-    Ok(parts
-        .iter()
-        .map(|part| format!("/{}", part.replace('~', "~0").replace('/', "~1")))
-        .collect())
-}
-fn set_pointer(target: &mut Value, pointer: &str, value: Value) -> CliResult<()> {
-    let parts: Vec<String> = pointer
-        .split('/')
-        .skip(1)
-        .map(|s| s.replace("~1", "/").replace("~0", "~"))
-        .collect();
-    let mut current = target;
-    for (i, part) in parts.iter().enumerate() {
-        let last = i == parts.len() - 1;
-        if current.is_array() {
-            let index: usize = part
-                .parse()
-                .map_err(|_| (1, "Array index must be an integer".into()))?;
-            let array = current.as_array_mut().unwrap();
-            if index >= array.len() {
-                return Err((
-                    1,
-                    "Array index is out of bounds; set the entire array first".into(),
-                ));
-            }
-            if last {
-                array[index] = value;
-                return Ok(());
-            }
-            current = &mut array[index];
-        } else {
-            let object = current.as_object_mut().ok_or_else(|| {
-                (
-                    1,
-                    format!("Cannot descend through non-object configuration at {part}"),
-                )
-            })?;
-            if last {
-                object.insert(part.clone(), value);
-                return Ok(());
-            }
-            current = object.entry(part.clone()).or_insert_with(|| json!({}));
-        }
-    }
-    Err((2, "Invalid configuration key path".into()))
-}
-fn secret_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    [
-        "api_key",
-        "api_token",
-        "password",
-        "secret",
-        "access_token",
-        "refresh_token",
-        "authorization",
-        "cookies",
-        "http_credentials",
-        "extra_http_headers",
-    ]
-    .iter()
-    .any(|needle| key.contains(needle))
+    config::key_pointer(key).map_err(runtime)
 }
 fn redact(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for (key, value) in map {
-                if secret_key(key) && !value.is_null() && value != &json!("") {
-                    *value = json!("***");
-                } else {
-                    redact(value);
-                }
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                redact(value);
-            }
-        }
-        _ => {}
-    }
+    *value = config::redact(value);
 }
 fn print_table(prefix: &str, value: &Value) {
     if let Value::Object(map) = value {
@@ -1138,7 +1048,15 @@ fn print_table(prefix: &str, value: &Value) {
     }
 }
 fn write_config(path: &Path, value: &Value) -> CliResult<()> {
-    markitai_core::output::check_path(path, false).map_err(runtime)?;
+    // Configuration paths are user-selected; preserve an existing symlink and
+    // atomically update its target, as the Python configuration manager did.
+    let resolved;
+    let path = if path.is_symlink() {
+        resolved = std::fs::canonicalize(path).map_err(runtime)?;
+        &resolved
+    } else {
+        path
+    };
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1173,9 +1091,12 @@ mod tests {
         redact(&mut cfg);
         assert_eq!(
             cfg["llm"]["model_list"][0]["litellm_params"]["api_key"],
-            "***"
+            "[REDACTED]"
         );
-        assert_eq!(cfg["fetch"]["playwright"]["extra_http_headers"], "***");
+        assert_eq!(
+            cfg["fetch"]["playwright"]["extra_http_headers"]["Authorization"],
+            "[REDACTED]"
+        );
         assert_eq!(
             key_pointer("llm.model_list[0].model_name").unwrap(),
             "/llm/model_list/0/model_name"
