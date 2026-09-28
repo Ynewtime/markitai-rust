@@ -1,0 +1,51 @@
+# HTML code blocks
+
+The native HTML serializer has a separate DOM reader for confirmed code blocks.
+It emits only a sanitized `pre`/`code` pair with an optional safe language class.
+Syntax token wrappers and links inside the block contribute their literal text;
+link destinations, copy buttons, executable elements, editor chrome, and hidden
+content do not become code. It never evaluates scripts or renders a browser.
+
+Supported structural families include Chroma/Pygments/Rouge number columns and
+inline line numbers, CodeMirror content, React syntax highlighter numbers,
+Rehype/Shiki line spans, Mintlify containers, Expressive Code rows, Hexo `br`
+rows, and a `code` wrapper around a `pre`. Language information comes from code
+attributes, nearby dedicated highlighter containers, or a recognized language
+label in an editor header. The reader does not infer a programming language
+from code tokens.
+
+Line containers insert a separator only when their structure requires one and
+neither their payload nor the intervening source already supplied it. Explicit
+newlines, indentation, tabs and blank rows are retained. CodeMirror's empty-line
+cursor placeholder is treated as an empty row. Numeric literals are not line
+numbers by themselves: a gutter requires an identified class, or a paired flex
+row with a distinct nonselectable/aligned number cell.
+
+Normal Markdown cleanup protects complete fenced blocks before applying link,
+image, placeholder, footer, heading, and whitespace repairs to prose. Literal
+code retains blank lines, indentation, trailing spaces, and example syntax.
+Backtick and tilde fences can have different lengths and occur inside list,
+footnote, or quote containers; closing delimiters require a matching marker,
+sufficient length, and no trailing text. An unclosed fence protects the
+remaining input. The document still receives a final newline when absent.
+
+The same confirmed-block classifier protects code from the earlier math and
+footnote inference passes. Ordinary inline code and prose wrappers are left to
+the normal serializer. A highlight container containing explanatory prose is not
+collapsed into a code block. The reader uses the parent's total DOM-depth budget
+and writes output only after extraction succeeds.
+
+This is structural normalization rather than a browser layout engine. CSS-only
+line wrapping, virtualized editor lines absent from the DOM, unrecognized
+application-specific code widgets, and language labels without a reliable
+container remain outside its guarantees. Separate Lean command/output fragments
+are not merged merely because they are adjacent. Existing source and curated
+corpus output are inspected as independent evidence: an earlier strict match can
+still share a lost-code defect, and preservation of valid blank lines takes
+precedence over matching a defective reference rendering.
+
+Authored module tests exercise code text, row boundaries, gutters, language
+attributes, hidden/script exclusions, malformed nesting, negative prose cases,
+and the shared nesting budget. Full article output and the code bodies/languages
+of the 16 curated technical fixtures require coordinator integration checks;
+module tests alone do not establish corpus compatibility.

@@ -6,6 +6,12 @@ It does not run JavaScript, fetch images, follow links, start a browser, or call
 the Python implementation. The same reader serves local HTML and fetched HTML;
 fetching itself belongs to the separate HTTP layer.
 
+Full-page article selection and structural widget removal are described in
+[article boundaries](html-article.md). That policy is disabled for document
+fragments so EPUB/Office/email content retains its own tables of contents.
+[Technical code blocks](html-code.md) describes highlighter normalization,
+literal content, language labels and resource limits.
+
 ## Metadata
 
 Title selection follows the reference metadata layer: JSON-LD `headline`, then

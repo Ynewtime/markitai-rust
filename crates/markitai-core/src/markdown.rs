@@ -91,48 +91,226 @@ fn clean_footers(source: String) -> String {
     output.join("\n")
 }
 
-pub(crate) fn normalize(source: &str) -> String {
-    let mut text = source.to_owned();
-    while BROKEN_LINK.is_match(&text) {
-        text = BROKEN_LINK
-            .replace_all(&text, |captures: &regex::Captures<'_>| {
-                format!("[{}]({})", captures[1].trim(), &captures[3])
-            })
-            .into_owned();
-    }
-    text = clean_footers(text);
-    if text.contains("__MARKITAI_") {
-        text = PLACEHOLDER_LINE.replace_all(&text, "").into_owned();
-        text = PLACEHOLDER_IMAGE.replace_all(&text, "").into_owned();
-        text = PLACEHOLDER.replace_all(&text, "").into_owned();
-    }
-    if text.contains("![") {
-        text = DOUBLE_ALT.replace_all(&text, "$1").into_owned();
-        text = EMPTY_IMAGE.replace_all(&text, "").into_owned();
-        text = EXTRA_PAREN.replace_all(&text, "$1").into_owned();
-    }
-    let lines: Vec<_> = text.split('\n').map(str::trim_end).collect();
-    let mut output: Vec<&str> = Vec::with_capacity(lines.len());
-    let mut fence: Option<(u8, usize)> = None;
-    for (index, line) in lines.iter().enumerate() {
-        let bytes = line.as_bytes();
-        if let Some(&ch @ (b'`' | b'~')) = bytes.first() {
-            let count = bytes.iter().take_while(|&&item| item == ch).count();
-            if count >= 3 {
-                match fence {
-                    None => fence = Some((ch, count)),
-                    Some((opening, size)) if opening == ch && count >= size => fence = None,
-                    _ => (),
+// A fence's source range is retained separately from all prose transformations.
+// Delimiters use more copies of a noncharacter than occur in the entire source;
+// none of the repairs can synthesize or collide with such a delimiter.
+struct Literals<'a> {
+    blocks: Vec<(String, &'a str)>,
+}
+
+#[derive(Clone, Copy)]
+struct Fence {
+    marker: u8,
+    width: usize,
+    quotes: usize,
+    closing_column: usize,
+}
+
+fn fence_prefix(mut line: &str, opening: bool) -> (&str, usize) {
+    let mut quotes = 0;
+    loop {
+        line = line.trim_start_matches([' ', '\t']);
+        if let Some(rest) = line.strip_prefix('>') {
+            quotes += 1;
+            line = rest;
+            continue;
+        }
+        if opening {
+            let bytes = line.as_bytes();
+            let list_width = if matches!(bytes.first(), Some(b'-' | b'+' | b'*')) {
+                1
+            } else {
+                let digits = bytes
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count();
+                if (1..=9).contains(&digits) && matches!(bytes.get(digits), Some(b'.' | b')')) {
+                    digits + 1
+                } else {
+                    0
                 }
+            };
+            if list_width > 0 && matches!(bytes.get(list_width), Some(b' ' | b'\t')) {
+                line = &line[list_width..];
+                continue;
+            }
+            if line.starts_with("[^")
+                && let Some(end) = line.find("]:")
+                && matches!(bytes.get(end + 2), Some(b' ' | b'\t'))
+            {
+                line = &line[end + 2..];
+                continue;
             }
         }
-        let hashes = bytes.iter().take_while(|&&ch| ch == b'#').count();
+        return (line, quotes);
+    }
+}
+
+fn prefix_column(prefix: &str) -> usize {
+    prefix.chars().fold(0, |column, ch| {
+        if ch == '\t' {
+            (column / 4 + 1) * 4
+        } else {
+            column + 1
+        }
+    })
+}
+
+fn opening_fence(line: &str) -> Option<Fence> {
+    let (content, quotes) = fence_prefix(line, true);
+    let bytes = content.as_bytes();
+    let &marker @ (b'`' | b'~') = bytes.first()? else {
+        return None;
+    };
+    let width = bytes.iter().take_while(|&&byte| byte == marker).count();
+    (width >= 3 && (marker != b'`' || !content[width..].contains('`'))).then_some(Fence {
+        marker,
+        width,
+        quotes,
+        closing_column: prefix_column(&line[..line.len() - content.len()]) + 3,
+    })
+}
+
+fn closes_fence(line: &str, fence: Fence) -> bool {
+    let (content, quotes) = fence_prefix(line, false);
+    let width = content
+        .as_bytes()
+        .iter()
+        .take_while(|&&byte| byte == fence.marker)
+        .count();
+    quotes == fence.quotes
+        && prefix_column(&line[..line.len() - content.len()]) <= fence.closing_column
+        && width >= fence.width
+        && content[width..]
+            .chars()
+            .all(|ch| matches!(ch, ' ' | '\t' | '\r'))
+}
+
+impl<'a> Literals<'a> {
+    fn protect(source: &'a str) -> (Self, String) {
+        let mut counts = [0usize; 32];
+        for ch in source.chars() {
+            if (0xfdd0..=0xfdef).contains(&(ch as u32)) {
+                counts[ch as usize - 0xfdd0] += 1;
+            }
+        }
+        let (index, count) = counts.iter().enumerate().min_by_key(|(_, n)| **n).unwrap();
+        let delimiter = char::from_u32(0xfdd0 + index as u32)
+            .unwrap()
+            .to_string()
+            .repeat(count + 1);
+        let mut ranges = Vec::new();
+        let mut opened: Option<(usize, Fence)> = None;
+        let mut offset = 0;
+        for line in source.split_inclusive('\n') {
+            let content = line.strip_suffix('\n').unwrap_or(line);
+            if let Some((start, fence)) = opened {
+                if closes_fence(content, fence) {
+                    ranges.push(start..offset + content.len());
+                    opened = None;
+                }
+            } else if let Some(fence) = opening_fence(content) {
+                opened = Some((offset, fence));
+            }
+            offset += line.len();
+        }
+        if let Some((start, _)) = opened {
+            // Leave one final LF to the normal document-ending convention. Any
+            // preceding empty lines and all trailing spaces remain in the block.
+            let end = source.len() - usize::from(source.ends_with('\n'));
+            ranges.push(start..end);
+        }
+        let mut blocks = Vec::with_capacity(ranges.len());
+        let mut masked = String::with_capacity(source.len());
+        let mut offset = 0;
+        for (index, range) in ranges.into_iter().enumerate() {
+            // Longer than a footer candidate and free of Markdown syntax.
+            let marker =
+                format!("{delimiter}markitai-protected-fenced-literal-block-{index}{delimiter}");
+            masked.push_str(&source[offset..range.start]);
+            masked.push_str(&marker);
+            blocks.push((marker, &source[range.clone()]));
+            offset = range.end;
+        }
+        masked.push_str(&source[offset..]);
+        (Self { blocks }, masked)
+    }
+
+    fn prose(&self, text: &str, transform: impl Fn(&str) -> String) -> String {
+        let mut remaining = text;
+        let mut output = String::with_capacity(text.len());
+        for (marker, _) in &self.blocks {
+            let (before, after) = remaining
+                .split_once(marker)
+                .expect("retained literal block");
+            let prose = transform(before);
+            output.push_str(&prose);
+            // Image/placeholder repairs may consume trailing whitespace, but a
+            // protected block must still start on its own source line.
+            if before.ends_with('\n') && !prose.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(marker);
+            remaining = after;
+        }
+        output.push_str(&transform(remaining));
+        output
+    }
+
+    fn restore(&self, text: &str) -> String {
+        let mut remaining = text;
+        let mut output = String::with_capacity(text.len());
+        for (marker, literal) in &self.blocks {
+            let (before, after) = remaining
+                .split_once(marker)
+                .expect("retained literal block");
+            output.push_str(before);
+            output.push_str(literal);
+            remaining = after;
+        }
+        output.push_str(remaining);
+        output
+    }
+}
+
+pub(crate) fn normalize(source: &str) -> String {
+    let (literals, masked) = Literals::protect(source);
+    let mut text = literals.prose(&masked, |part| {
+        let mut text = part.to_owned();
+        while BROKEN_LINK.is_match(&text) {
+            text = BROKEN_LINK
+                .replace_all(&text, |captures: &regex::Captures<'_>| {
+                    format!("[{}]({})", captures[1].trim(), &captures[3])
+                })
+                .into_owned();
+        }
+        text
+    });
+    text = clean_footers(text);
+    text = literals.prose(&text, |part| {
+        let mut text = part.to_owned();
+        if text.contains("__MARKITAI_") {
+            text = PLACEHOLDER_LINE.replace_all(&text, "").into_owned();
+            text = PLACEHOLDER_IMAGE.replace_all(&text, "").into_owned();
+            text = PLACEHOLDER.replace_all(&text, "").into_owned();
+        }
+        if text.contains("![") {
+            text = DOUBLE_ALT.replace_all(&text, "$1").into_owned();
+            text = EMPTY_IMAGE.replace_all(&text, "").into_owned();
+            text = EXTRA_PAREN.replace_all(&text, "$1").into_owned();
+        }
+        text
+    });
+    let lines: Vec<_> = text.split('\n').map(str::trim_end).collect();
+    let mut output: Vec<&str> = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        let hashes = line.as_bytes().iter().take_while(|&&ch| ch == b'#').count();
         let heading = (1..=6).contains(&hashes)
             && line[hashes..]
                 .chars()
                 .next()
                 .is_none_or(char::is_whitespace);
-        if fence.is_none() && (heading || SLIDE.is_match(line)) {
+        if heading || SLIDE.is_match(line) {
             if output.last().is_some_and(|line| !line.is_empty()) {
                 output.push("");
             }
@@ -145,7 +323,7 @@ pub(crate) fn normalize(source: &str) -> String {
         }
     }
     let joined = output.join("\n");
-    format!("{}\n", BLANKS.replace_all(joined.trim(), "\n\n"))
+    literals.restore(&format!("{}\n", BLANKS.replace_all(joined.trim(), "\n\n")))
 }
 
 #[cfg(test)]
@@ -173,5 +351,109 @@ mod tests {
         let output = normalize(&input);
         assert!(!output.contains("Footer"));
         assert!(output.contains("Long content for page 2 that must remain."));
+    }
+
+    #[test]
+    fn fenced_examples_bypass_every_prose_repair_and_keep_exact_whitespace() {
+        let block = "````markdown  \r\n__MARKITAI_IMAGE_1__\r\n![a]![b](pic))  \n![]()\n[Title\n\nDescription](/url)\n<!-- Slide 1 -->\n# literal  \n\n\n\nend\t \n```` \t";
+        assert_eq!(
+            normalize(&format!("Before  \n{block}\nAfter  \n\n\n")),
+            format!("Before\n{block}\nAfter\n")
+        );
+    }
+
+    #[test]
+    fn code_page_markers_and_footer_examples_are_not_document_pages() {
+        let pages = (1..=3)
+            .map(|n| format!("<!-- Page number: {n} -->\n# Page {n}\nLong content for page {n} that must remain.\nFooter\n{n}\n"))
+            .collect::<String>();
+        let block = format!("```markdown\n{pages}```");
+        assert_eq!(normalize(&block), format!("{block}\n"));
+        let output = normalize(&format!("{pages}\n{block}\n"));
+        assert!(output.ends_with(&format!("{block}\n")));
+        assert_eq!(output.matches("Footer").count(), 3);
+        assert!(output.contains("Long content for page 2 that must remain."));
+    }
+
+    #[test]
+    fn closing_fences_require_matching_marker_width_and_empty_tail() {
+        let block = "~~~~lang\n~~~\n```\n~~~~ trailing text\n# still literal  \n\n\n~~~~~\t";
+        assert_eq!(
+            normalize(&format!("{block}\n# Prose  \nText")),
+            format!("{block}\n\n# Prose\n\nText\n")
+        );
+        let block = "````rust\n```\n````not a close\n# literal  \n`````";
+        assert_eq!(normalize(block), format!("{block}\n"));
+    }
+
+    #[test]
+    fn list_footnote_and_quote_containers_preserve_fenced_literals() {
+        for block in [
+            "- ```rust\n  fn main() {  \n\n\n  }\n  ```",
+            "1. > ~~~text\n   > [Title\n   > Description](/url)  \n   > ~~~",
+            "[^note]:\n    ```markdown\n    __MARKITAI_IMAGE_1__  \n\n\n    ```",
+            "[^note]: - ```text\n      # literal  \n      ```",
+        ] {
+            assert_eq!(normalize(block), format!("{block}\n"));
+        }
+        let block = "```text\n> ```\n# still literal  \n```";
+        assert_eq!(normalize(block), format!("{block}\n"));
+    }
+
+    #[test]
+    fn unclosed_fence_keeps_remainder_and_document_newline_convention() {
+        for block in [
+            "```rust\nlet token = \"__MARKITAI_IMAGE_1__\";  ",
+            "~~~\nlast  \n\n\n",
+            "    ```\n\tvalue\t \n\n",
+        ] {
+            let expected = if block.ends_with('\n') {
+                block.to_owned()
+            } else {
+                format!("{block}\n")
+            };
+            assert_eq!(normalize(block), expected);
+        }
+    }
+
+    #[test]
+    fn malformed_prose_links_cannot_consume_an_intervening_code_block() {
+        let source = "[start\n```text\nprotected()  \n\n\n```\nend](/example)\n";
+        assert_eq!(normalize(source), source);
+        assert_eq!(
+            normalize("```not ` an opener\n[Title\nDescription](/url)"),
+            "```not ` an opener\n[Title](/url)\n"
+        );
+    }
+
+    #[test]
+    fn literal_markers_cannot_collide_with_source_text() {
+        let noncharacters = (0xfdd0..=0xfdef)
+            .map(|value| char::from_u32(value).unwrap())
+            .collect::<String>();
+        let prose =
+            format!("{noncharacters}\u{fdd0}markitai-protected-fenced-literal-block-0\u{fdd0}");
+        let source = format!("{prose}\n```text\n{prose}  \n\n\n```\n");
+        assert_eq!(normalize(&source), source);
+    }
+
+    #[test]
+    fn removed_images_cannot_join_prose_to_an_opening_fence() {
+        for image in ["![](__MARKITAI_IMAGE_1__)", "![]()"] {
+            assert_eq!(
+                normalize(&format!("Before {image}\n```text\nliteral  \n```\nAfter")),
+                "Before\n```text\nliteral  \n```\nAfter\n"
+            );
+        }
+    }
+
+    #[test]
+    fn deeply_indented_delimiters_inside_fences_remain_literal() {
+        for delimiter in ["    ```", "\t```", "- ```"] {
+            let block = format!("```text\n{delimiter}\n__MARKITAI_IMAGE_1__  \n# literal  \n```");
+            assert_eq!(normalize(&block), format!("{block}\n"));
+        }
+        let block = "[^note]:\n    ~~~text\n        ~~~\n    __MARKITAI_IMAGE_1__  \n    ~~~";
+        assert_eq!(normalize(block), format!("{block}\n"));
     }
 }

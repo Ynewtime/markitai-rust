@@ -90,6 +90,12 @@ images produce explicit warnings. Metadata/stream/image/asset limits bound the
 additional package and image passes; they are not a claim that every upstream
 parser allocation is bounded.
 
+Eligible upright text pages also have a conservative positioned-text refinement
+for document-wide heading levels, paragraph gaps, continuous styling and complete
+ruled tables. Empty cells/columns are preserved; ambiguous geometry retains the
+existing page reader. See [PDF layout](pdf.md) for acceptance checks, resource
+limits and the cost of the additional parsing pass.
+
 PDF inspection reports invisible rendering modes, transparent text, white text
 and very small text when they accompany text operators, including inside forms.
 This is a diagnostic contract: complete hidden-text removal, page screenshots,
@@ -101,20 +107,23 @@ used by the readers above.
 
 ## Explicit remaining compatibility work
 
-Numbers, SVG rasterization, HEIF/AVIF decoding and local OCR remain unfinished.
+Numbers, HEIF/AVIF decoding and local OCR remain unfinished. Standalone SVG
+rasterization is implemented with bounded native rendering; embedded SVG vision
+and additional image pathways remain separate work.
 Multi-page TIFF vision routing is explicitly rejected pending complete page
 handling. `supports_extension` reports local text readers; standalone image
 classification and vision extraction are separate orchestration paths. See
 [images](images.md), [MSG](msg.md), [markup](markup.md) and [HTML](html.md) for
 their scoped contracts and limits.
 
-The HTML reader implements general article extraction. It does not yet implement
-the original engine's X/GitHub/Hacker News/Reddit/YouTube/Substack/Bilibili/Steam
-resolvers, structured conversation threads, four-stage adaptive recovery,
-schema.org body fallback, advanced footnotes, mathematical reconstruction, CSS media
-visibility, or content-pattern scoring. These need independent tests before
-advertising parity. Basic success on an HTML fixture is not evidence that its
-full extraction contract matches.
+The HTML reader implements article selection, structural chrome removal,
+technical code blocks, scoped footnote/math recovery and structured announcement
+content. It does not reproduce the original engine's complete set of site
+resolvers, conversation-thread models, adaptive recovery, schema.org body
+fallback or browser CSS visibility. The precise implemented boundaries are in
+[HTML](html.md), [code blocks](html-code.md) and
+[article selection](html-article.md). Basic success on an HTML fixture is not
+evidence that its full extraction contract matches.
 
 The email readers preserve body and attachments, but complete header, attachment
 and layout parity is pending. XML now has structured prose and the sample fixture

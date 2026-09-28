@@ -1,3 +1,6 @@
+mod article;
+mod code;
+
 use crate::{Document, Error, Result};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{Map, Value};
@@ -894,21 +897,19 @@ fn reference_candidate(element: ElementRef<'_>) -> bool {
         || (!plain(element).is_empty() && plain(element).chars().all(|ch| "*†‡".contains(ch)))
 }
 
-fn in_literal(element: ElementRef<'_>) -> bool {
-    std::iter::once(element)
-        .chain(element.ancestors().filter_map(ElementRef::wrap))
-        .any(|parent| {
-            matches!(parent.value().name(), "pre" | "code" | "script" | "style")
-                || math_container(parent)
-                || duplicate_math_preview(parent)
-        })
+fn literal_container(element: ElementRef<'_>) -> bool {
+    matches!(element.value().name(), "pre" | "code" | "script" | "style")
+        || code::is_block(element)
+        || math_container(element)
+        || duplicate_math_preview(element)
 }
 
-fn visible_reference(element: ElementRef<'_>) -> bool {
+fn visible_reference(element: ElementRef<'_>, prune_chrome: bool) -> bool {
     std::iter::once(element)
         .chain(element.ancestors().filter_map(ElementRef::wrap))
         .all(|parent| {
             !is_hidden(parent)
+                && !(prune_chrome && article::excluded(parent))
                 && !matches!(
                     parent.value().name(),
                     "script"
@@ -1099,6 +1100,7 @@ struct Footnote<'a> {
 
 #[derive(Default)]
 struct Footnotes<'a> {
+    prune_chrome: bool,
     definitions: Vec<Footnote<'a>>,
     references: HashMap<usize, usize>,
     removed: HashSet<usize>,
@@ -1143,12 +1145,35 @@ impl<'a> Footnotes<'a> {
         })
     }
 
-    fn collect(root: ElementRef<'a>, document: ElementRef<'a>, base: Option<&Url>) -> Self {
-        let mut notes = Self::default();
+    fn collect(
+        root: ElementRef<'a>,
+        document: ElementRef<'a>,
+        base: Option<&Url>,
+        prune_chrome: bool,
+    ) -> Self {
+        let mut notes = Self {
+            prune_chrome,
+            ..Self::default()
+        };
         let elements = document
             .descendants()
             .filter_map(ElementRef::wrap)
             .collect::<Vec<_>>();
+        // DOM traversal is in parent-before-child order. Structural code
+        // classification may inspect a subtree; never repeat it for every
+        // descendant's ancestry during the separate footnote collection passes.
+        let mut literal_elements = HashSet::new();
+        for &element in &elements {
+            if element
+                .parent()
+                .and_then(ElementRef::wrap)
+                .is_some_and(|parent| literal_elements.contains(&element_key(parent)))
+                || literal_container(element)
+            {
+                literal_elements.insert(element_key(element));
+            }
+        }
+        let in_literal = |element| literal_elements.contains(&element_key(element));
         let mut ids = HashMap::new();
         for element in &elements {
             for attribute in ["id", "name"] {
@@ -1164,7 +1189,7 @@ impl<'a> Footnotes<'a> {
             .filter(|element| {
                 !in_literal(*element)
                     && reference_candidate(*element)
-                    && visible_reference(*element)
+                    && visible_reference(*element, prune_chrome)
             })
             .collect::<Vec<_>>();
         let external = elements
@@ -1173,16 +1198,28 @@ impl<'a> Footnotes<'a> {
             .filter(|element| {
                 !contains_element(root, *element)
                     && !contains_element(*element, root)
-                    && matches!(element.value().name(), "div" | "section" | "aside")
-                    && ["id", "class"].iter().any(|attr| {
-                        element
-                            .value()
-                            .attr(attr)
-                            .is_some_and(|value| value.to_ascii_lowercase().contains("footnote"))
-                    })
-                    && element
-                        .select(&selector("h1,h2,h3,h4,h5,h6"))
-                        .any(note_heading)
+                    && matches!(
+                        element.value().name(),
+                        "div" | "section" | "aside" | "ol" | "ul" | "p" | "li"
+                    )
+                    && !in_literal(*element)
+                    && !element
+                        .ancestors()
+                        .filter_map(ElementRef::wrap)
+                        .any(|parent| {
+                            matches!(
+                                parent.value().name(),
+                                "head" | "template" | "noscript" | "iframe" | "object" | "embed"
+                            )
+                        })
+                    && (note_context(*element)
+                        || (["id", "class"].iter().any(|attr| {
+                            element.value().attr(attr).is_some_and(|value| {
+                                value.to_ascii_lowercase().contains("footnote")
+                            })
+                        }) && element
+                            .select(&selector("h1,h2,h3,h4,h5,h6"))
+                            .any(note_heading)))
             })
             .collect::<Vec<_>>();
         let in_scope = |element| {
@@ -1197,7 +1234,7 @@ impl<'a> Footnotes<'a> {
         for container in root.select(&selector(
             "span.footnote-container, span.sidenote-container, span.inline-footnote",
         )) {
-            if in_literal(container) || !visible_reference(container) {
+            if in_literal(container) || !visible_reference(container, prune_chrome) {
                 continue;
             }
             if let Some(content) = container
@@ -1742,7 +1779,9 @@ fn serialize_clean(
     notes: &Footnotes<'_>,
     definition: bool,
 ) -> Result<()> {
-    if is_hidden(element) && !(definition && depth == 0) {
+    if (is_hidden(element) || (notes.prune_chrome && article::excluded(element)))
+        && !(definition && depth == 0)
+    {
         return Ok(());
     }
     let key = element_key(element);
@@ -1758,7 +1797,8 @@ fn serialize_clean(
                     .filter_map(ElementRef::wrap)
                     .take_while(|parent| *parent != element)
                     .any(|parent| {
-                        notes.removed.contains(&element_key(parent)) || !visible_reference(parent)
+                        notes.removed.contains(&element_key(parent))
+                            || !visible_reference(parent, notes.prune_chrome)
                     }))
                 .then_some(&**text)
             })
@@ -1781,6 +1821,9 @@ fn serialize_clean(
         return Err(Error::Conversion(
             "HTML nesting exceeds 256 elements".into(),
         ));
+    }
+    if code::render(element, output, depth)? {
+        return Ok(());
     }
     let value = element.value();
     let name = value.name();
@@ -1924,15 +1967,16 @@ fn serialize_clean(
 }
 
 fn render_clean(root: ElementRef<'_>, base: Option<&Url>) -> Result<String> {
-    render_with_footnotes(root, root, base)
+    render_with_footnotes(root, root, base, false)
 }
 
 fn render_with_footnotes<'a>(
     root: ElementRef<'a>,
     document: ElementRef<'a>,
     base: Option<&Url>,
+    prune_chrome: bool,
 ) -> Result<String> {
-    let notes = Footnotes::collect(root, document, base);
+    let notes = Footnotes::collect(root, document, base, prune_chrome);
     let mut cleaned = String::new();
     serialize_clean(root, base, &mut cleaned, 0, &notes, false)?;
     let mut markdown = render_sanitized(&cleaned)?;
@@ -2428,31 +2472,7 @@ pub(super) fn fragment(source: &str) -> Result<String> {
 pub fn extract_html(source: &str, base_url: Option<&str>) -> Result<Document> {
     let document = Html::parse_document(source);
     let base = base_url.and_then(|value| Url::parse(value).ok());
-    let candidates = selector("article, main, [role=main]");
-    let links = selector("a");
-    let paragraphs = selector("p");
-    let root = document
-        .select(&candidates)
-        .filter(|candidate| {
-            !is_hidden(*candidate)
-                && !candidate
-                    .ancestors()
-                    .filter_map(ElementRef::wrap)
-                    .any(is_hidden)
-        })
-        .max_by_key(|element| {
-            let length: usize = element.text().map(str::len).sum();
-            let link_length: usize = element
-                .select(&links)
-                .flat_map(|link| link.text())
-                .map(str::len)
-                .sum();
-            length
-                .saturating_sub(link_length)
-                .saturating_add(element.select(&paragraphs).count() * 40)
-        })
-        .or_else(|| document.select(&selector("body")).next())
-        .unwrap_or_else(|| document.root_element());
+    let root = article::select(&document);
     let mut metadata = Map::new();
     let jsonld = jsonld_documents(&document);
     let site = meta(&document, &["og:site_name", "application-name"]);
@@ -2532,7 +2552,7 @@ pub fn extract_html(source: &str, base_url: Option<&str>) -> Result<Document> {
         metadata.extend(announcement.metadata);
         announcement.markdown
     } else {
-        render_with_footnotes(root, document.root_element(), base.as_ref())?
+        render_with_footnotes(root, document.root_element(), base.as_ref(), true)?
     };
     if markdown.is_empty() {
         return Err(Error::Conversion(
@@ -2550,6 +2570,77 @@ pub fn extract_html(source: &str, base_url: Option<&str>) -> Result<Document> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn article_pruning_keeps_external_notes_and_drops_widget_only_references() {
+        let source = r##"<body><article><p>Evidence from the article remains available together with its source and full explanatory paragraph. This main narrative must survive the removal of unrelated recommendation controls.<a role="doc-noteref" href="#fn-main">1</a></p>
+            <div class="related-posts"><h2>Related posts</h2><a href="/other">Other story</a><a role="doc-noteref" href="#fn-widget">2</a></div></article>
+            <aside role="doc-footnote" id="fn-main">The retained external source.</aside><aside role="doc-footnote" id="fn-widget">Widget-only definition.</aside></body>"##;
+        let result = extract_html(source, None).unwrap();
+        assert!(result.markdown.contains("main narrative must survive"));
+        assert!(result.markdown.contains("[^1]"));
+        assert!(
+            result
+                .markdown
+                .ends_with("[^1]: The retained external source."),
+            "{}",
+            result.markdown
+        );
+        assert!(!result.markdown.contains("Other story"));
+        assert!(!result.markdown.contains("Widget-only"));
+        assert!(!result.markdown.contains("[^2]"));
+    }
+
+    #[test]
+    fn document_fragments_retain_book_toc_and_related_reading() {
+        let result = fragment(r##"<section class="toc"><h2>Contents</h2><ul><li><a href="#chapter">Chapter one</a></li></ul></section><section class="related-posts"><p>Related reading belongs to the book.</p></section><h2 id="chapter">Chapter one</h2><p>Full chapter text.</p>"##).unwrap();
+        assert!(result.contains("[Chapter one](#chapter)"));
+        assert!(result.contains("Related reading belongs to the book."));
+        assert!(result.contains("Full chapter text."));
+    }
+
+    #[test]
+    fn external_note_roles_do_not_recover_inert_or_literal_definitions() {
+        for wrapper in ["pre", "template", "noscript"] {
+            let source = format!(
+                r##"<article><p>A substantial visible article retains its explanatory text and linked evidence. The referenced source is absent from rendered content and must not be recovered from an inert example.<a role="doc-noteref" href="#fn-example">1</a></p></article><{wrapper}><aside role="doc-footnote" id="fn-example">Inert definition.</aside></{wrapper}>"##
+            );
+            let result = extract_html(&source, None).unwrap();
+            assert!(
+                result.markdown.contains("[1](#fn-example)"),
+                "{wrapper}: {}",
+                result.markdown
+            );
+            assert!(
+                !result.markdown.contains("[^1]"),
+                "{wrapper}: {}",
+                result.markdown
+            );
+            assert!(
+                !result.markdown.contains("Inert definition"),
+                "{wrapper}: {}",
+                result.markdown
+            );
+        }
+    }
+
+    #[test]
+    fn code_editor_numeric_links_are_literal_before_footnote_collection() {
+        let result = extract_html(r##"<article><p>Example:</p><div class="cm-content"><div class="cm-line">goto <a role="doc-noteref" href="#fn-code">1</a></div><div class="cm-line">return 2</div></div><p>Explanation<a role="doc-noteref" href="#fn-real">2</a>.</p><ol class="footnotes"><li id="fn-code">Not a code footnote.</li><li id="fn-real">The prose source.</li></ol></article>"##, None).unwrap();
+        assert!(
+            result.markdown.contains("```\ngoto 1\nreturn 2\n```"),
+            "{}",
+            result.markdown
+        );
+        assert!(
+            result.markdown.contains("Explanation[^1]."),
+            "{}",
+            result.markdown
+        );
+        assert!(result.markdown.ends_with("[^1]: The prose source."));
+        assert!(!result.markdown.contains("[^2]"));
+    }
+
     #[test]
     fn article_drops_navigation_and_resolves_links() {
         let doc = extract_html(r#"<title>Fallback</title><meta property="og:title" content="Article"><nav>menu</nav><article><h1>Article</h1><p>Some <strong>important</strong> text <a href="../next">next</a>.</p><img data-src="/image.png" alt="Photo"><p hidden>hidden</p><script>alert(1)</script></article><footer>footer</footer>"#, Some("https://example.test/posts/one")).unwrap();

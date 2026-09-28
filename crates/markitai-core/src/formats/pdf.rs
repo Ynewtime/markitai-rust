@@ -1,6 +1,11 @@
 use crate::{Asset, Document, Error, Result};
 use lopdf::{Dictionary, Object, ObjectId, Stream, content::Content};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+#[path = "pdf/geometry.rs"]
+mod geometry;
+#[path = "pdf/layout.rs"]
+mod layout;
 
 const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ASSET_BYTES: usize = 128 * 1024 * 1024;
@@ -513,6 +518,34 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
         .into_iter()
         .map(|page| (page.page + 1, page))
         .collect::<BTreeMap<_, _>>();
+    let mut inspections = BTreeMap::new();
+    let mut layout_pages = HashSet::new();
+    for (&number, &id) in &page_ids {
+        let inspection = inspect_page(&pdf, id);
+        if let Some(page) = pages.get_mut(&number) {
+            recover_plain_text(&pdf, number, page, &inspection, &mut document.warnings);
+            if !page.needs_ocr
+                && !page.markdown.trim().is_empty()
+                && inspection.signals.is_empty()
+                && inspection.warnings.is_empty()
+                && geometry::frame(&pdf, id).is_some()
+            {
+                layout_pages.insert(number);
+            }
+        }
+        inspections.insert(number, inspection);
+    }
+    let mut layout = if layout_pages.is_empty() {
+        None
+    } else {
+        match layout::Layout::read(bytes, &layout_pages) {
+            Ok(layout) => Some(layout),
+            Err(reason) => {
+                document.warnings.push(format!("PDF layout refinement was skipped ({reason}); the original page reader's output is retained."));
+                None
+            }
+        }
+    };
     let mut image_names = BTreeMap::<ObjectId, Option<String>>::new();
     let mut total_asset_bytes = 0;
     let mut sections = Vec::new();
@@ -526,8 +559,16 @@ pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
                 needs_ocr: true,
                 ocr_reason: Some("page absent from extraction result".into()),
             });
-        let inspection = inspect_page(&pdf, id);
-        recover_plain_text(&pdf, number, &mut page, &inspection, &mut document.warnings);
+        let inspection = inspections
+            .remove(&number)
+            .expect("every page was inspected");
+        if layout_pages.contains(&number)
+            && let Some(refined) = layout
+                .as_mut()
+                .and_then(|layout| layout.page(number, &pdf, id, &page.markdown))
+        {
+            page.markdown = refined;
+        }
         readable_pages += usize::from(!page.needs_ocr && !page.markdown.trim().is_empty());
         let mut section = page_markdown(&page, &mut document.warnings);
         for warning in inspection.warnings {

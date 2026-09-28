@@ -1,0 +1,583 @@
+use scraper::{ElementRef, Html, Node};
+
+fn token(element: ElementRef<'_>, attribute: &str, expected: &str) -> bool {
+    element.value().attr(attribute).is_some_and(|value| {
+        value
+            .split_ascii_whitespace()
+            .any(|part| part.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn named(element: ElementRef<'_>, names: &[&str]) -> bool {
+    names.iter().any(|name| {
+        token(element, "class", name)
+            || element
+                .value()
+                .attr("id")
+                .is_some_and(|id| id.eq_ignore_ascii_case(name))
+    })
+}
+
+fn note(element: ElementRef<'_>) -> bool {
+    super::note_context(element)
+        || [
+            "doc-footnote",
+            "doc-endnote",
+            "doc-endnotes",
+            "doc-bibliography",
+        ]
+        .iter()
+        .any(|role| token(element, "role", role))
+        || named(
+            element,
+            &[
+                "footnotes",
+                "endnotes",
+                "sidenote",
+                "sidenotes",
+                "footnote-content",
+                "footnoteContent",
+            ],
+        )
+}
+
+fn ancillary(element: ElementRef<'_>) -> bool {
+    if element.value().name() == "aside" || note(element) {
+        return true;
+    }
+    if !matches!(element.value().name(), "div" | "section" | "ul" | "ol") {
+        return false;
+    }
+    first_heading(element).is_some_and(|heading| {
+        let mut length = 0usize;
+        let label = heading.text().try_fold(String::new(), |mut label, part| {
+            length = length.saturating_add(part.len());
+            if length > 64 {
+                return None;
+            }
+            label.push_str(part);
+            Some(label)
+        });
+        label.is_some_and(|label| {
+            let label = label.trim();
+            label.eq_ignore_ascii_case("footnotes") || label.eq_ignore_ascii_case("endnotes")
+        })
+    })
+}
+
+fn heading(element: ElementRef<'_>) -> bool {
+    matches!(
+        element.value().name(),
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+    )
+}
+
+fn first_heading(mut element: ElementRef<'_>) -> Option<ElementRef<'_>> {
+    // A heading may be wrapped for layout, but arbitrary descendant headings do
+    // not label their outer article or page.
+    for _ in 0..3 {
+        if heading(element) {
+            return Some(element);
+        }
+        if !matches!(element.value().name(), "div" | "section" | "aside") {
+            return None;
+        }
+        let mut first = None;
+        for child in element.children() {
+            match child.value() {
+                Node::Text(text) if !text.trim().is_empty() => return None,
+                Node::Element(_) => {
+                    let child = ElementRef::wrap(child)?;
+                    if super::is_hidden(child) {
+                        continue;
+                    }
+                    first = Some(child);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        element = first?;
+    }
+    heading(element).then_some(element)
+}
+
+fn related_heading(element: ElementRef<'_>) -> bool {
+    let Some(heading) = first_heading(element) else {
+        return false;
+    };
+    let mut label = String::new();
+    for part in heading.text() {
+        if label.len().saturating_add(part.len()) > 100 {
+            return false;
+        }
+        label.push_str(part);
+    }
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    [
+        "related stories",
+        "related posts",
+        "related articles",
+        "recommended stories",
+        "recommended posts",
+        "read next",
+    ]
+    .iter()
+    .any(|expected| label.eq_ignore_ascii_case(expected))
+}
+
+fn card(element: ElementRef<'_>) -> bool {
+    let name = element.value().name();
+    let marked = named(
+        element,
+        &[
+            "card",
+            "o-card",
+            "story-card",
+            "post-card",
+            "recommendation-card",
+        ],
+    );
+    if !marked && !matches!(name, "article" | "a") {
+        return false;
+    }
+    let mut stack = vec![(element, 0)];
+    let mut linked = false;
+    let mut title_or_image = false;
+    while let Some((node, depth)) = stack.pop() {
+        if depth > 5 {
+            return false;
+        }
+        if super::is_hidden(node) {
+            continue;
+        }
+        let tag = node.value().name();
+        if !marked && matches!(tag, "p" | "pre" | "table" | "blockquote") {
+            return false;
+        }
+        linked |= tag == "a"
+            && node.value().attr("href").is_some_and(|href| {
+                let href = href.trim();
+                !href.is_empty() && !href.starts_with('#') && !href.starts_with("javascript:")
+            });
+        title_or_image |= heading(node) || tag == "img";
+        stack.extend(node.child_elements().map(|child| (child, depth + 1)));
+    }
+    linked && title_or_image
+}
+
+fn related_cards(element: ElementRef<'_>) -> bool {
+    if !related_heading(element) {
+        return false;
+    }
+    let mut count = 0;
+    let mut stack = vec![(element, 0)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > 6 {
+            return false;
+        }
+        if super::is_hidden(node) || heading(node) {
+            continue;
+        }
+        if node != element && card(node) {
+            count += 1;
+            continue;
+        }
+        if matches!(node.value().name(), "p" | "pre" | "table" | "blockquote") || note(node) {
+            return false;
+        }
+        // Unlabelled prose beside cards belongs to the article, not a widget.
+        if node
+            .children()
+            .any(|child| matches!(child.value(), Node::Text(text) if !text.trim().is_empty()))
+        {
+            return false;
+        }
+        stack.extend(node.child_elements().map(|child| (child, depth + 1)));
+    }
+    count >= 2
+}
+
+/// Full-page chrome only. Fragment conversion must leave this policy disabled:
+/// the same table of contents can be essential text in a book or email.
+pub(super) fn excluded(element: ElementRef<'_>) -> bool {
+    if note(element)
+        || !matches!(
+            element.value().name(),
+            "div" | "section" | "aside" | "nav" | "ul" | "ol"
+        )
+    {
+        return false;
+    }
+    if ["doc-toc", "navigation"]
+        .iter()
+        .any(|role| token(element, "role", role))
+    {
+        return true;
+    }
+    if named(
+        element,
+        &[
+            "related-posts",
+            "related-articles",
+            "related-stories",
+            "recommended-posts",
+            "recommended-articles",
+            "post-related",
+            "read-next",
+            "jp-relatedposts",
+            "newsletter-signup",
+            "newsletter-form",
+            "subscribe-widget",
+            "subscription-widget",
+            "subscription-widget-wrap",
+            "subscription-box",
+            "post-subscribe",
+            "subscribe-form",
+            "cta-section",
+            "share-buttons",
+            "social-share",
+            "sharing-buttons",
+            "post-share",
+            "share-tools",
+            "article-share",
+            "cookie-banner",
+            "cookie-consent-banner",
+        ],
+    ) {
+        return true;
+    }
+    if named(
+        element,
+        &["toc", "toc-container", "table-of-contents", "article-toc"],
+    ) && element
+        .child_elements()
+        .any(|child| matches!(child.value().name(), "ul" | "ol"))
+    {
+        return true;
+    }
+    if element.value().attr("data-testid").is_some_and(|value| {
+        matches!(
+            value,
+            "issue-metadata-sticky"
+                | "issue-viewer-metadata-container"
+                | "issue-viewer-metadata-pane"
+                | "comment-header-right-side-items"
+        )
+    }) {
+        return true;
+    }
+    matches!(element.value().name(), "div" | "section" | "aside") && related_cards(element)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Other,
+    Main,
+    Content,
+    Readme,
+    Discussion,
+}
+
+fn kind(element: ElementRef<'_>) -> Kind {
+    let tag = element.value().name();
+    if element.value().attr("data-testid") == Some("issue-viewer-container") {
+        return Kind::Discussion;
+    }
+    if tag == "article"
+        && token(element, "class", "markdown-body")
+        && token(element, "class", "entry-content")
+        && token(element, "itemprop", "text")
+    {
+        return Kind::Readme;
+    }
+    if tag == "main" || token(element, "role", "main") {
+        return Kind::Main;
+    }
+    if tag == "article"
+        || token(element, "itemprop", "articleBody")
+        || matches!(tag, "div" | "section")
+            && named(
+                element,
+                &[
+                    "article-body",
+                    "article-content",
+                    "entry-content",
+                    "post-content",
+                    "post-body",
+                    "blog-post-content",
+                    "story-body",
+                    "story-content",
+                ],
+            )
+    {
+        return Kind::Content;
+    }
+    Kind::Other
+}
+
+fn discarded(element: ElementRef<'_>) -> bool {
+    super::is_hidden(element)
+        || excluded(element)
+        || matches!(
+            element.value().name(),
+            "script"
+                | "style"
+                | "nav"
+                | "footer"
+                | "form"
+                | "button"
+                | "input"
+                | "select"
+                | "textarea"
+                | "iframe"
+                | "object"
+                | "embed"
+                | "head"
+                | "template"
+                | "noscript"
+        )
+}
+
+struct Scored<'a> {
+    element: ElementRef<'a>,
+    parent: Option<usize>,
+    content_parent: Option<usize>,
+    end: usize,
+    score: usize,
+    kind: Kind,
+}
+
+/// Choose one coherent content region. Scoring is accumulated once per DOM node;
+/// nested main/article candidates never rescan their complete text subtrees.
+pub(super) fn select(document: &Html) -> ElementRef<'_> {
+    let mut nodes: Vec<Scored<'_>> = Vec::new();
+    let mut stack = vec![(document.root_element(), None, None, false)];
+    let mut body = None;
+    while let Some((element, parent, content_parent, ancillary_parent)) = stack.pop() {
+        if discarded(element) {
+            continue;
+        }
+        let index = nodes.len();
+        let kind = kind(element);
+        let ancillary = ancillary_parent || ancillary(element);
+        let score = if ancillary {
+            0
+        } else {
+            element
+                .children()
+                .filter_map(|child| match child.value() {
+                    Node::Text(text) => Some(text.trim().len()),
+                    _ => None,
+                })
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(if element.value().name() == "p" { 40 } else { 0 })
+        };
+        nodes.push(Scored {
+            element,
+            parent,
+            content_parent,
+            end: index + 1,
+            score,
+            kind,
+        });
+        if element.value().name() == "body" {
+            body = Some(index);
+        }
+        let content_parent = if matches!(kind, Kind::Content | Kind::Readme | Kind::Discussion) {
+            Some(index)
+        } else {
+            content_parent
+        };
+        stack.extend(
+            element
+                .children()
+                .rev()
+                .filter_map(ElementRef::wrap)
+                .map(|child| (child, Some(index), content_parent, ancillary)),
+        );
+    }
+    for index in (0..nodes.len()).rev() {
+        if let Some(parent) = nodes[index].parent {
+            nodes[parent].score = nodes[parent].score.saturating_add(nodes[index].score);
+            nodes[parent].end = nodes[parent].end.max(nodes[index].end);
+        }
+    }
+    let Some(fallback) = body.or_else(|| (!nodes.is_empty()).then_some(0)) else {
+        return document.root_element();
+    };
+    let root = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == Kind::Main && node.score > 0)
+        .max_by_key(|(_, node)| node.score)
+        .map_or(fallback, |(index, _)| index);
+    let in_root = |index: usize| index >= root && index < nodes[root].end;
+    // Explicit repository documentation and the complete issue viewer keep
+    // their content together; an isolated comment's markdown-body is not one.
+    if let Some((_, node)) = nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            in_root(*index)
+                && node.score > 0
+                && matches!(node.kind, Kind::Readme | Kind::Discussion)
+        })
+        .max_by_key(|(_, node)| node.score)
+    {
+        return node.element;
+    }
+    let mut candidates = nodes.iter().enumerate().filter(|(index, node)| {
+        in_root(*index)
+            && node.kind == Kind::Content
+            && node.score > 0
+            && node.content_parent.is_none_or(|parent| !in_root(parent))
+    });
+    let Some((_, candidate)) = candidates.next() else {
+        return nodes[root].element;
+    };
+    // Portfolios, indexes and discussion pages need all sibling articles.
+    if candidates.next().is_some() {
+        return nodes[root].element;
+    }
+    // Keep substantial introductions/conclusions outside the named region.
+    if candidate.score.saturating_mul(5) >= nodes[root].score.saturating_mul(3) {
+        candidate.element
+    } else {
+        nodes[root].element
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scraper::Selector;
+
+    fn element<'a>(document: &'a Html, query: &str) -> ElementRef<'a> {
+        document
+            .select(&Selector::parse(query).unwrap())
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn related_cards_need_both_label_and_repeated_card_structure() {
+        let document = Html::parse_document(
+            r#"<main><section id="widget"><div><h3>Related Posts</h3></div><div><a href="/one"><article><h3>One</h3><span>3 min</span></article></a></div><div><a href="/two"><article><h3>Two</h3></article></a></div></section><section id="prose"><h2>Related Posts</h2><p>Our article compares publishing systems.</p><a href="/one"><h3>Study one</h3></a><a href="/two"><h3>Study two</h3></a></section><section id="ordinary"><h2>Recommended architecture</h2><a href="/one"><h3>One</h3></a><a href="/two"><h3>Two</h3></a></section></main>"#,
+        );
+        assert!(excluded(element(&document, "#widget")));
+        assert!(!excluded(element(&document, "#prose")));
+        assert!(!excluded(element(&document, "#ordinary")));
+        assert!(!excluded(element(&document, "main")));
+    }
+
+    #[test]
+    fn inline_story_widget_does_not_hide_surrounding_article() {
+        let document = Html::parse_document(
+            r#"<main><article id="story"><p>Opening narrative.</p><div class="injected-story-block"><h2>Related Stories</h2><div class="story-list"><article class="o-card"><a href="/one"><img src="one.png"></a><h3><a href="/one">One</a></h3></article><article class="o-card"><h3><a href="/two">Two</a></h3></article></div></div><p>Concluding evidence.</p></article></main>"#,
+        );
+        assert_eq!(select(&document).value().attr("id"), Some("story"));
+        assert!(excluded(element(&document, ".injected-story-block")));
+        assert!(!excluded(element(&document, "#story")));
+    }
+
+    #[test]
+    fn portfolio_and_multiple_top_level_articles_are_not_reduced_to_one_card() {
+        for wrapper in ["main", "body"] {
+            let document = Html::parse_document(&format!(
+                "<{wrapper}><h1>Career</h1><article><h2>Engineering</h2><p>First career.</p></article><article><h2>Research</h2><p>Second career with longer text.</p></article></{wrapper}>"
+            ));
+            assert_eq!(select(&document).value().name(), wrapper);
+        }
+    }
+
+    #[test]
+    fn named_content_excludes_independent_cta_without_losing_heading() {
+        let document = Html::parse_document(
+            "<main><section class='blog-post-content'><h1>Release</h1><p>Full release details.</p></section><section class='cta-section'><h2>Work with us</h2><p>Subscribe for updates.</p></section></main>",
+        );
+        assert!(token(select(&document), "class", "blog-post-content"));
+        assert!(excluded(element(&document, ".cta-section")));
+        let article = Html::parse_document(
+            "<main><article><header><h1>Title outside content wrapper</h1></header><div class='entry-content'><p>Body.</p></div></article></main>",
+        );
+        assert_eq!(select(&article).value().name(), "article");
+    }
+
+    #[test]
+    fn substantive_outside_prose_and_link_only_content_survive() {
+        let document = Html::parse_document(
+            "<main><p>A substantial independent introduction explains every example on this page.</p><article><p>One short example.</p></article><p>The conclusions compare the examples and record independent findings.</p></main>",
+        );
+        assert_eq!(select(&document).value().name(), "main");
+        let links = Html::parse_document(
+            "<article><h1>Reading list</h1><ul><li><a href='/one'>Study one</a></li><li><a href='/two'>Study two</a></li></ul></article>",
+        );
+        assert_eq!(select(&links).value().name(), "article");
+        assert!(!excluded(element(&links, "ul")));
+    }
+
+    #[test]
+    fn external_notes_and_asides_do_not_outweigh_a_short_explicit_article() {
+        for notes in [
+            "<div class='page__footnotes'><h3>Footnotes</h3><p>First lengthy definition.</p><ul><li>Evidence and further details.</li></ul><p>Second lengthy definition.</p></div>",
+            "<section role='doc-endnotes'><p>First lengthy definition.</p><p>Second lengthy definition.</p></section>",
+        ] {
+            let document = Html::parse_document(&format!(
+                "<article id='short'><p>A<sup>1</sup> and B<sup>2</sup>.</p></article><aside><p>Unrelated advertising exceeds the short article.</p><p>More advertising.</p></aside>{notes}"
+            ));
+            assert_eq!(select(&document).value().attr("id"), Some("short"));
+        }
+    }
+
+    #[test]
+    fn ancillary_scoring_does_not_delete_article_asides_or_aside_only_pages() {
+        let document = Html::parse_document(
+            "<main><article><p>Claim.</p><aside><p>An essential caveat within the article.</p></aside></article></main>",
+        );
+        assert_eq!(select(&document).value().name(), "article");
+        assert!(!excluded(element(&document, "aside")));
+        let aside = Html::parse_document("<aside><p>The only content on this page.</p></aside>");
+        assert_eq!(select(&aside).value().name(), "body");
+        assert!(!excluded(element(&aside, "aside")));
+    }
+
+    #[test]
+    fn github_readme_has_positive_evidence_and_comment_bodies_are_not_candidates() {
+        let document = Html::parse_document(
+            "<main><div><p>Repository file listing and controls dominate the surrounding layout.</p></div><article class='markdown-body entry-content' itemprop='text'><h1>README</h1><p>Install the package.</p></article></main>",
+        );
+        assert_eq!(select(&document).value().attr("itemprop"), Some("text"));
+        let discussion = Html::parse_document(
+            "<main><p>Repository controls.</p><div data-testid='issue-viewer-container'><h1>Issue title</h1><div class='markdown-body'><p>Problem.</p></div><div class='react-comments-container'><div class='markdown-body'><p>Maintainer's solution.</p></div></div><div data-testid='issue-viewer-metadata-container'>Sidebar controls</div></div></main>",
+        );
+        assert_eq!(
+            select(&discussion).value().attr("data-testid"),
+            Some("issue-viewer-container")
+        );
+        assert!(!excluded(element(&discussion, ".react-comments-container")));
+        assert!(excluded(element(
+            &discussion,
+            "[data-testid='issue-viewer-metadata-container']"
+        )));
+    }
+
+    #[test]
+    fn hidden_content_cannot_win_selection_and_notes_override_widget_labels() {
+        let document = Html::parse_document(
+            "<div hidden><article><p>A long hidden candidate must not displace the visible document.</p></article></div><main><p>Visible.</p></main><section role='doc-endnotes' class='related-posts'><p>Referenced note.</p></section>",
+        );
+        assert_eq!(select(&document).value().name(), "main");
+        assert!(!excluded(element(&document, "[role='doc-endnotes']")));
+    }
+
+    #[test]
+    fn navigation_discussion_and_toc_heading_are_not_chrome_by_words_alone() {
+        let document = Html::parse_document(
+            "<article><h1>Navigation and subscriptions</h1><section id='toc'><h2>Table of contents design</h2><p>Navigation is an accessibility feature.</p></section><div class='comments'><p>Discuss subscribe widgets here.</p></div><aside class='toc-container'><h2>Contents</h2><ol><li><a href='#toc'>Design</a></li></ol></aside></article>",
+        );
+        assert!(!excluded(element(&document, "#toc")));
+        assert!(!excluded(element(&document, ".comments")));
+        assert!(excluded(element(&document, ".toc-container")));
+    }
+}

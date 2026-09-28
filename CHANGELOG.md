@@ -25,9 +25,12 @@
 - Shared per-run LLM request limits across file and URL workers, with retry waits and cache hits outside the limit.
 - Native REST job submission, snapshots and event streams, result/asset/ZIP downloads, and persistent history access.
 - Native stdio MCP with four compatible conversion tools, structured results and bounded in-memory batch jobs.
+- Structural HTML article selection and technical code normalization with preserved languages, literal lines and editor boundaries.
+- Native PDF layout refinement with document-wide heading levels, paragraph boundaries, continuous styling and complete ruled tables.
 
 ### Fixed
 
+- Markdown cleanup preserves fenced code bytes, including blank lines, trailing spaces and literal image/link examples.
 - Ordinary and pure output assembly, structured-data title fallbacks, XML prose, and email dates.
 - PDF page failures retain readable pages and report incomplete extraction explicitly.
 - HTML metadata precedence, quotes, soft line breaks and safe URL spelling.
