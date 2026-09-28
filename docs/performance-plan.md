@@ -2,6 +2,10 @@
 
 Design review, 2026-09-28. This plan adds no new performance measurements.
 Historical artifact figures below belong to `979d205`, not to a later build.
+The subsequent [round-six experiment](validation/profile-round6.md) supplies the
+release/dist evidence: dist reduces CLI bytes by 39.19% but takes 6.58×/8.22× as
+long for the measured PDF/PPTX C-ABI calls. Release remains the default; testing
+full LTO with speed optimization is the next distinct profile experiment.
 
 ## What the article actually reports
 

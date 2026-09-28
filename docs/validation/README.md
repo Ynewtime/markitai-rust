@@ -100,3 +100,18 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   extraction quality; later review found and corrected two structural defects.
 - The [performance plan](../performance-plan.md) covers profile selection,
   complete binding costs, retained binary code/data and sustained memory checks.
+
+## Round-six build-profile evidence
+
+- [Profile tradeoff and reproduction](profile-round6.md): the existing dist CLI
+  is 39.19% smaller, but measured PDF/PPTX C-ABI conversions take 6.58×/8.22× as
+  long. Release remains the default. Builds use the same clean `e0cf110` source.
+- [Format equivalence](profile-formats-round6.md) and
+  [HTML/full-envelope equivalence](profile-html-round6.md) preserve the existing
+  reference gaps while verifying 233 complete native response pairs.
+- [Raw measurements](profile-measurements-round6.json) retain all CLI samples,
+  worker medians, RSS peaks, input identities and isolation observations.
+  Whole host-wrapper costs and long-lived memory behavior remain open.
+- Eighteen Python harness tests pass, including 14 new regression tests against
+  damaged or incomplete comparison evidence. These are harness checks, separate
+  from the frozen artifact's Rust tests and native conversion gates.

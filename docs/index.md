@@ -17,7 +17,8 @@
 - [Validation](validation/README.md): differential checks and measured evidence.
 - [Performance plan](performance-plan.md): profile tradeoffs, binding costs and long-lived memory checks.
 - Decisions: [native core](decisions/0001-native-core.md),
-  [document LLM cache](decisions/0002-persistent-llm-cache.md), and
-  [static-page fetch cache](decisions/0003-persistent-fetch-cache.md).
+  [document LLM cache](decisions/0002-persistent-llm-cache.md),
+  [static-page fetch cache](decisions/0003-persistent-fetch-cache.md), and
+  [planned run persistence](decisions/0004-run-persistence.md).
 
 Documentation describes verified behavior separately from planned behavior.
