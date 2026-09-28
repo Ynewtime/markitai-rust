@@ -41,6 +41,15 @@ recall is diagnostic, never a substitute for the exact-content checks.
 Each record identifies a frozen artifact; later fixes do not retroactively change
 its measurements. Full JSON reports retain the complete fixture denominator.
 
+## Round-fourteen evidence
+
+- [HTML/PDF fidelity, release and measurements](native-quality-round14.md):
+  567 distinct Rust tests, 209 HTML and 24 format cases; 14/16 exact curated code
+  bodies, selected PDF table/page recovery, and explicitly slower ordinary-article
+  medians. Source `e4c63f7`; CLI 22.58 MiB.
+- [Hidden streamed-content gap](html-streaming-gap-round14.md) distinguishes a
+  resolved timeout from the remaining missing article body.
+
 ## Initial CLI benchmark
 
 ```sh
