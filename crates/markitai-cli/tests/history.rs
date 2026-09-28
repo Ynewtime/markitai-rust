@@ -1271,8 +1271,6 @@ fn skipped_media_outputs_relocate_each_roots_assets_into_an_independent_archive(
         "<!-- <source srcset=\".markitai/assets/poster.png 1x, .markitai/assets/shared.png 2x\"> -->\n",
         "<pre><audio src='.markitai/assets/audio.ogg'></audio></pre>\n",
         "<script type=\"text/plain\">const example = '<track src=\".markitai/assets/captions.vtt\">';</script>\n",
-        "<style>.example { background-image: url(.markitai/assets/poster.png); }</style>\n",
-        "<p data-src=\".markitai/assets/poster.png\" title=\".markitai/assets/clip.mp4\" style=\"background-image: url(.markitai/assets/poster.png)\">Literal .markitai/assets/poster.png</p>\n",
     );
     fn document(suffix: &str) -> String {
         format!(
@@ -1289,6 +1287,8 @@ fn skipped_media_outputs_relocate_each_roots_assets_into_an_independent_archive(
                 "  <track src=\".markitai/assets/captions{suffix}.vtt?lang=en&amp;mode=cc#cue\" kind=captions>\n",
                 "</video>\n",
                 "<audio src='.markitai/assets/audio{suffix}.ogg'><source src=\".markitai/assets/audio{suffix}.ogg\"></audio>\n",
+                "<style>.example {{ background-image: url(.markitai/assets/poster{suffix}.png); }}</style>\n",
+                "<p data-src=\".markitai/assets/poster.png\" title=\".markitai/assets/clip.mp4\" style=\"background-image: url(.markitai/assets/poster{suffix}.png)\">Literal .markitai/assets/poster.png</p>\n",
                 "{literals}",
             ),
             suffix = suffix,
@@ -1410,6 +1410,188 @@ fn skipped_media_outputs_relocate_each_roots_assets_into_an_independent_archive(
     }
     assert_eq!(files(&archived), expected_files);
     assert_eq!(expected_assets.len(), 9, "shared asset must be stored once");
+    let complete_job = files(&job);
+    for path in original_outputs.keys() {
+        std::fs::write(root.path().join("out").join(path), b"live output mutated").unwrap();
+    }
+    assert_eq!(files(&job), complete_job);
+    std::fs::remove_dir_all(root.path().join("input")).unwrap();
+    std::fs::remove_dir_all(root.path().join("out")).unwrap();
+    assert_eq!(files(&job), complete_job);
+    read_job(&job);
+}
+
+#[test]
+fn skipped_css_outputs_relocate_resources_without_rewriting_literal_examples() {
+    const TEMPLATE: &str = r##"---
+example: |
+  <style>.example { background: url(.markitai/assets/poster.png); }</style>
+quoted: "<div style='background:url(.markitai/assets/poster.png)'>"
+---
+# Saved CSS output
+
+<div style="background: url(&quot;@POSTER@?size=1&amp;theme=dark#preview&quot;); --example: 'url(.markitai/assets/poster.png)'">Styled</div>
+<p STYLE='mask-image: u\72l("@ESCAPED_POSTER@?\76 =1\26 mode=dark#\70 review"); background: url("@ENTITY_POSTER@?v=2&amp;mode=light#thumb")'>Escapes and entities</p>
+<i style=background-image:url(@POSTER@) data-style="url(.markitai/assets/poster.png)">Unquoted attribute</i>
+<style>
+@import "@THEME@?variant=night#sheet" screen;
+@import url('@THEME@?version=2') print;
+@font-face { font-family: Fixture; src: local("url(.markitai/assets/font.woff2)"), url('@FONT@?#face') format("woff2"); }
+.plain { background: URL( @POSTER@?x=1&amp;y=2#raw ); }
+.escaped { background: u\72l('@ESCAPED_POSTER@?\76 =1\26 mode=dark#\70 review'); }
+.choices { background-image: image-set("@POSTER@?density=1#one" 1x, url('.markitai/assets/shared.png') 2x); }
+.webkit { background-image: -webkit-image-set(url("@POSTER@") 1x, ".markitai/assets/shared.png" 2x); }
+.remote { background-image: url(https://example.invalid/p.png), url("data:image/svg+xml,%3Csvg%3E,%3C/svg%3E"); }
+.literal::before { content: "url(.markitai/assets/poster.png) image-set('.markitai/assets/shared.png' 2x) &quot;"; }
+/* url(.markitai/assets/poster.png) @import '.markitai/assets/theme.css'; */
+</style>
+
+`<span style="background:url(.markitai/assets/poster.png)">` and `url(.markitai/assets/poster.png)`.
+```css
+@import ".markitai/assets/theme.css";
+.example { background: url(.markitai/assets/poster.png); }
+```
+    <div style="background:url(.markitai/assets/poster.png)">Indented example</div>
+<!-- <style>.example { background: url(.markitai/assets/poster.png); }</style> -->
+<pre><style>.example { background: url(.markitai/assets/poster.png); }</style></pre>
+<code><span style="background:url(.markitai/assets/poster.png)">Code</span></code>
+<script type="text/plain">const example = '<style>.x { background: url(.markitai/assets/poster.png); }</style>';</script>
+<p title="url(.markitai/assets/poster.png)" data-style="url(.markitai/assets/poster.png)">Literal .markitai/assets/poster.png</p>
+"##;
+    fn document(suffix: &str) -> String {
+        let poster = format!(".markitai/assets/poster{suffix}.png");
+        // Identity paths retain their original CSS/HTML spelling. A relocated
+        // path is rendered from the archive name; its surrounding syntax and
+        // escaped query/fragment remain independently observable in TEMPLATE.
+        let escaped = if suffix.is_empty() {
+            r".markitai/assets/p\6f ster.png"
+        } else {
+            &poster
+        };
+        let entity = if suffix.is_empty() {
+            ".markitai/assets/p&#111;ster.png"
+        } else {
+            &poster
+        };
+        TEMPLATE
+            .replace("@POSTER@", &poster)
+            .replace("@ESCAPED_POSTER@", escaped)
+            .replace("@ENTITY_POSTER@", entity)
+            .replace("@THEME@", &format!(".markitai/assets/theme{suffix}.css"))
+            .replace("@FONT@", &format!(".markitai/assets/font{suffix}.woff2"))
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let mut cfg = configure(root.path());
+    cfg["output"]["on_conflict"] = json!("skip");
+    save(root.path(), &cfg);
+    let original = document("");
+    let shared = b"Identical saved image payload, reused by both CSS documents.\n";
+    let mut expected_assets = BTreeMap::new();
+    for (folder, suffix) in [("a", ""), ("b", "-2")] {
+        write(
+            root.path(),
+            &format!("input/{folder}/page.txt"),
+            "Archive the saved output without converting this input.\n",
+        );
+        write(root.path(), &format!("out/{folder}/page.txt.md"), &original);
+        for (stem, extension) in [("poster", "png"), ("font", "woff2"), ("theme", "css")] {
+            let bytes = if extension == "css" {
+                // Imported stylesheets need no recursive resource copying.
+                format!("/* Theme for {folder} */ body {{ color: blue; }}\n")
+            } else {
+                format!("Saved {stem} payload from root {folder}.\n")
+            };
+            write(
+                root.path(),
+                &format!("out/{folder}/.markitai/assets/{stem}.{extension}"),
+                &bytes,
+            );
+            expected_assets.insert(
+                PathBuf::from(format!(".markitai/assets/{stem}{suffix}.{extension}")),
+                bytes.into_bytes(),
+            );
+        }
+        write(
+            root.path(),
+            &format!("out/{folder}/.markitai/assets/shared.png"),
+            std::str::from_utf8(shared).unwrap(),
+        );
+    }
+    expected_assets.insert(
+        PathBuf::from(".markitai/assets/shared.png"),
+        shared.to_vec(),
+    );
+    let original_outputs = files(&root.path().join("out"));
+    let original_inputs = files(&root.path().join("input"));
+    let cli = envelope(
+        &invoke(
+            root.path(),
+            &["input", "-o", "out", "--record-history", "--json"],
+        ),
+        0,
+    );
+    assert_eq!(cli["items"].as_array().unwrap().len(), 2);
+    assert!(
+        cli["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["status"] == "skipped" && item["skip_reason"] == "exists")
+    );
+    assert_eq!(files(&root.path().join("input")), original_inputs);
+    for (path, bytes) in &original_outputs {
+        assert_eq!(
+            std::fs::read(root.path().join("out").join(path)).unwrap(),
+            *bytes
+        );
+    }
+
+    let (job, meta) = only_job(root.path());
+    let archived = job.join("out");
+    let items = meta["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let mut expected_files = expected_assets.clone();
+    for (index, (name, suffix)) in [("page.txt.md", ""), ("page.txt (2).md", "-2")]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            items[index]["name"],
+            format!("{}/page.txt", ["a", "b"][index])
+        );
+        assert_eq!(items[index]["output"], name);
+        assert_eq!(items[index]["status"], "done");
+        assert_eq!(items[index]["skipped"], true);
+        assert_eq!(items[index]["skip_reason"], "exists");
+        let actual = std::fs::read_to_string(archived.join(name)).unwrap();
+        assert_eq!(actual, document(suffix));
+        expected_files.insert(PathBuf::from(name), actual.into_bytes());
+
+        // These are the resource URLs after CSS/HTML escape decoding. Exact
+        // document comparison above protects every authored spelling and
+        // literal example, while these checks resolve all local resources.
+        for url in [
+            format!(".markitai/assets/poster{suffix}.png?size=1&theme=dark#preview"),
+            format!(".markitai/assets/poster{suffix}.png?v=1&mode=dark#preview"),
+            format!(".markitai/assets/poster{suffix}.png?v=2&mode=light#thumb"),
+            format!(".markitai/assets/poster{suffix}.png"),
+            format!(".markitai/assets/theme{suffix}.css?variant=night#sheet"),
+            format!(".markitai/assets/theme{suffix}.css?version=2"),
+            format!(".markitai/assets/font{suffix}.woff2?#face"),
+            format!(".markitai/assets/poster{suffix}.png?x=1&amp;y=2#raw"),
+            format!(".markitai/assets/poster{suffix}.png?density=1#one"),
+            ".markitai/assets/shared.png".into(),
+        ] {
+            let path = Path::new(url.split(['?', '#']).next().unwrap());
+            assert_eq!(
+                std::fs::read(archived.join(path)).unwrap(),
+                expected_assets[path]
+            );
+        }
+    }
+    assert_eq!(expected_assets.len(), 7, "identical shared image is reused");
+    assert_eq!(files(&archived), expected_files);
     let complete_job = files(&job);
     for path in original_outputs.keys() {
         std::fs::write(root.path().join("out").join(path), b"live output mutated").unwrap();

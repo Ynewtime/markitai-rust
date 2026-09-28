@@ -6,6 +6,8 @@ use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+mod css;
+
 pub(crate) fn apply(markdown: &mut String, metadata: &mut Map<String, Value>, cfg: &Value) {
     match cfg.pointer("/output/profile").and_then(Value::as_str) {
         Some("rag") => *markdown = transform(markdown, true, false, true, Replacements::None),
@@ -457,20 +459,34 @@ fn html_literal_end(text: &str) -> Option<usize> {
     if !text.starts_with('<') {
         return None;
     }
-    for tag in ["pre", "code", "script", "style"] {
-        if text
-            .get(1..tag.len() + 1)
-            .is_some_and(|name| name.eq_ignore_ascii_case(tag))
-            && text[tag.len() + 1..].starts_with(|ch: char| ch == '>' || ch.is_whitespace())
+    if let Some(style) = style_block(text) {
+        return Some(style.end);
+    }
+    let opening = html_reference(text)?;
+    if ["pre", "code", "script"]
+        .iter()
+        .any(|tag| opening.name.eq_ignore_ascii_case(tag))
+    {
+        return Some(
+            html_closing(text, opening.tag_end, opening.name).map_or(text.len(), |(_, end)| end),
+        );
+    }
+    None
+}
+
+fn html_closing(text: &str, start: usize, tag: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let prefix = format!("</{tag}");
+    let mut index = start;
+    while index + prefix.len() < bytes.len() {
+        if bytes[index..index + prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+            && bytes
+                .get(index + prefix.len())
+                .is_some_and(|byte| html_space(*byte as char) || b"/>".contains(byte))
         {
-            let closing = format!("</{tag}>");
-            return Some(
-                text.as_bytes()
-                    .windows(closing.len())
-                    .position(|window| window.eq_ignore_ascii_case(closing.as_bytes()))
-                    .map_or(text.len(), |end| end + closing.len()),
-            );
+            return html_tag_end(&text[index..]).map(|length| (index, index + length));
         }
+        index += 1;
     }
     None
 }
@@ -481,6 +497,8 @@ enum HtmlAttributeKind {
     Href,
     Poster,
     Srcset,
+    Style,
+    CssType,
 }
 
 struct HtmlAttribute {
@@ -499,7 +517,7 @@ struct HtmlReference<'a> {
 
 impl HtmlReference<'_> {
     fn image_attribute(&self, kind: HtmlAttributeKind) -> bool {
-        (self.name.eq_ignore_ascii_case("img") && kind != HtmlAttributeKind::Href)
+        (self.name.eq_ignore_ascii_case("img") && kind == HtmlAttributeKind::Src)
             || kind == HtmlAttributeKind::Srcset
             || kind == HtmlAttributeKind::Poster
     }
@@ -529,7 +547,13 @@ fn html_reference(text: &str) -> Option<HtmlReference<'_>> {
         return None;
     }
     let mut index = 1;
-    while bytes.get(index).is_some_and(u8::is_ascii_alphanumeric) {
+    if !bytes.get(index).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || b"-:_".contains(byte))
+    {
         index += 1;
     }
     let name = &text[1..index];
@@ -549,7 +573,7 @@ fn html_reference(text: &str) -> Option<HtmlReference<'_>> {
         } else if name.eq_ignore_ascii_case("a") {
             &[("href", HtmlAttributeKind::Href)]
         } else {
-            return None;
+            &[]
         };
     if !bytes
         .get(index)
@@ -626,15 +650,23 @@ fn html_reference(text: &str) -> Option<HtmlReference<'_>> {
                 index += 1;
             }
         }
-        if let Some((_, kind)) = kinds
-            .iter()
-            .find(|(wanted, _)| wanted.eq_ignore_ascii_case(attribute_name))
+        let kind = if attribute_name.eq_ignore_ascii_case("style") {
+            Some(HtmlAttributeKind::Style)
+        } else if name.eq_ignore_ascii_case("style") && attribute_name.eq_ignore_ascii_case("type")
         {
-            let bit = 1u8 << (*kind as u8);
+            Some(HtmlAttributeKind::CssType)
+        } else {
+            kinds
+                .iter()
+                .find(|(wanted, _)| wanted.eq_ignore_ascii_case(attribute_name))
+                .map(|(_, kind)| *kind)
+        };
+        if let Some(kind) = kind {
+            let bit = 1u8 << (kind as u8);
             let active = seen & bit == 0;
             seen |= bit;
             attributes.push(HtmlAttribute {
-                kind: *kind,
+                kind,
                 active,
                 start: name_start,
                 end: index,
@@ -666,6 +698,84 @@ fn html_tag_end(text: &str) -> Option<usize> {
         }
     }
     None
+}
+
+struct StyleBlock<'a> {
+    opening: HtmlReference<'a>,
+    body: std::ops::Range<usize>,
+    end: usize,
+    css: bool,
+}
+
+fn style_block(text: &str) -> Option<StyleBlock<'_>> {
+    if !text
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("<style"))
+    {
+        return None;
+    }
+    let opening = html_reference(text)?;
+    if !opening.name.eq_ignore_ascii_case("style") {
+        return None;
+    }
+    let css = opening
+        .attributes
+        .iter()
+        .find(|attribute| attribute.active && attribute.kind == HtmlAttributeKind::CssType)
+        .is_none_or(|attribute| {
+            let value = html_unescape(&text[attribute.value.clone()]);
+            value.is_empty() || value.eq_ignore_ascii_case("text/css")
+        });
+    let start = opening.tag_end;
+    if let Some((body_end, end)) = html_closing(text, start, "style") {
+        return Some(StyleBlock {
+            opening,
+            body: start..body_end,
+            end,
+            css,
+        });
+    }
+    Some(StyleBlock {
+        opening,
+        body: start..text.len(),
+        end: text.len(),
+        css,
+    })
+}
+
+fn rewrite_css(
+    source: &str,
+    replacement: Replacements<'_>,
+    visible: bool,
+    attribute: bool,
+) -> Option<String> {
+    let decoded = if attribute {
+        DecodedHtml::new(source)
+    } else {
+        DecodedHtml {
+            text: Cow::Borrowed(source),
+            offsets: None,
+        }
+    };
+    let edits = css::edits(&decoded.text, replacement, visible, !attribute);
+    if edits.is_empty() {
+        return None;
+    }
+    let mut result = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for edit in edits {
+        let start = decoded.raw_offset(edit.range.start);
+        let end = decoded.raw_offset(edit.range.end);
+        result.push_str(&source[cursor..start]);
+        if attribute {
+            result.push_str(&html_escape(&edit.value));
+        } else {
+            result.push_str(&edit.value);
+        }
+        cursor = end;
+    }
+    result.push_str(&source[cursor..]);
+    Some(result)
 }
 
 /// Decode one HTML character reference in attribute context. The shared HTML
@@ -1073,7 +1183,15 @@ fn rewrite_html_reference(
             continue;
         }
         let target = &source[attribute.value.clone()];
-        let (edit, surviving) = if attribute.kind == HtmlAttributeKind::Srcset {
+        let (edit, surviving) = if attribute.kind == HtmlAttributeKind::Style {
+            (
+                rewrite_css(target, replacement, visible, true)
+                    .map_or(AttributeEdit::Keep, AttributeEdit::Value),
+                false,
+            )
+        } else if attribute.kind == HtmlAttributeKind::CssType {
+            (AttributeEdit::Keep, false)
+        } else if attribute.kind == HtmlAttributeKind::Srcset {
             srcset_edit(target, replacement, visible)
         } else {
             let edit = html_target_edit(target, replacement, visible, false);
@@ -1878,6 +1996,26 @@ fn inline_nested(
             index += end;
             continue;
         }
+        if let Some(style) = style_block(tail) {
+            output.push_str(&rewrite_html_reference(
+                tail,
+                &style.opening,
+                replacement,
+                visible,
+            ));
+            let body = &tail[style.body.clone()];
+            if style.css {
+                output.push_str(
+                    &rewrite_css(body, replacement, visible, false)
+                        .unwrap_or_else(|| body.to_owned()),
+                );
+            } else {
+                output.push_str(body);
+            }
+            output.push_str(&tail[style.body.end..style.end]);
+            index += style.end;
+            continue;
+        }
         if let Some(end) = html_literal_end(tail) {
             if rag && tail.starts_with("<!--") && tail[..end].ends_with("-->") {
                 let comment = tail[4..end - 3].trim();
@@ -1890,7 +2028,17 @@ fn inline_nested(
                     continue;
                 }
             }
-            output.push_str(&tail[..end]);
+            if let Some(opening) = html_reference(tail) {
+                output.push_str(&rewrite_html_reference(
+                    tail,
+                    &opening,
+                    replacement,
+                    visible,
+                ));
+                output.push_str(&tail[opening.tag_end..end]);
+            } else {
+                output.push_str(&tail[..end]);
+            }
             index += end;
             continue;
         }
@@ -2327,6 +2475,14 @@ mod tests {
         assert_eq!(
             rewrite_asset_target(source, "assets/a.png", "assets/b.png"),
             source
+                .replace(
+                    "background: url(assets/a.png)",
+                    "background: url(assets/b.png)"
+                )
+                .replace(
+                    "style='background:url(assets/a.png)'",
+                    "style='background:url(assets/b.png)'"
+                )
         );
         let source = "<StYlE>url(assets/a.png)</sTyLe><img srcset='assets/a.png 1x'>";
         assert_eq!(

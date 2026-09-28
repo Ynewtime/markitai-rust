@@ -80,7 +80,7 @@ this avoids an extra copy that the reference writer can create.
 Reference rewriting shares the native Markdown parser and looks up each original
 destination once. It supports links, definitions, wikilinks, HTML `a[href]`,
 `img[src/srcset]`, `source[src/srcset]`, `video[src/poster]`, `audio[src]` and
-`track[src]`, plus exact frontmatter path scalars, including percent-encoded
+`track[src]`, [CSS resources in HTML styles](css-resources.md), plus exact frontmatter path scalars, including percent-encoded
 spellings. All supported attributes in a tag are processed together; duplicate
 attribute names use their first occurrence, including a valueless attribute.
 Image candidate URLs are separated from their descriptors after decoding HTML
@@ -93,11 +93,11 @@ These behaviors deliberately improve on the reference writer's
 global text replacement and retained `../` paths; byte parity with those defects
 is not a target.
 
-CSS URL syntax and other element/attribute families, including custom lazy-load
-attributes, are not parsed by the relocation helper. Arbitrary Markdown or model output using these forms can
-retain a stale reference when an asset collision changes a name. Those syntax
-families remain a tracked fidelity gap; common generated Markdown references
-are covered by the current implementation.
+Additional element/attribute families, including custom lazy-load attributes,
+are not parsed by the relocation helper. Arbitrary Markdown or model output
+using these forms can retain a stale reference when an asset collision changes
+a name. External stylesheet contents and dynamically computed CSS URLs are also
+outside destination rewriting; these remain tracked fidelity gaps.
 
 The newer media syntax is covered by source tests and
 [round-eleven native release acceptance](validation/html-media-round11.md);

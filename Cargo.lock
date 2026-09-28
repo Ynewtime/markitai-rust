@@ -1536,6 +1536,7 @@ dependencies = [
  "base64 0.22.1",
  "cfb",
  "chrono",
+ "cssparser",
  "csv",
  "dotenvy",
  "encoding_rs",

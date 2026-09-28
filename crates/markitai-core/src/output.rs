@@ -511,6 +511,84 @@ pub fn write_with_publication(
 mod tests {
     use super::*;
     #[test]
+    fn css_resources_publish_exact_assets_in_both_outputs_and_visible_profiles() {
+        let first = b"first css resource".to_vec();
+        let second = b"second css resource".to_vec();
+        let first_digest = format!("{:x}", Sha256::digest(&first));
+        let second_digest = format!("{:x}", Sha256::digest(&second));
+        let first_name = format!("{}.bin", &first_digest[..24]);
+        let second_name = format!("{}.bin", &second_digest[..24]);
+        let source = format!(
+            "<div style=\"background:url(.markitai/assets/first.bin?x=1&amp;y=2#part);content:'url(.markitai/assets/first.bin)'\"></div>\n\
+<style>\n\
+@import '.markitai/assets/{first_name}';\n\
+.image {{ background:image-set('.markitai/assets/first.bin' 1x, url(.markitai/assets/duplicate.bin) 2x); }}\n\
+@font-face {{ src:url('.markitai/assets/{first_name}?v=1&x=2#face'); }}\n\
+/* url(.markitai/assets/first.bin) */\n\
+</style>\n\
+`<style>.literal{{background:url(.markitai/assets/first.bin)}}</style>`\n"
+        );
+        for profile in ["default", "rag", "obsidian"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut cfg = config::defaults();
+            if profile != "default" {
+                cfg["output"]["profile"] = json!(profile);
+            }
+            cfg["llm"]["keep_base"] = json!(true);
+            cfg["llm"]["pure"] = json!(true);
+            let prefix = if profile == "default" {
+                ".markitai/assets"
+            } else {
+                "assets"
+            };
+            let expected = format!(
+                "<div style=\"background:url({prefix}/{first_name}?x=1&amp;y=2#part);content:'url(.markitai/assets/first.bin)'\"></div>\n\
+<style>\n\
+@import '{prefix}/{second_name}';\n\
+.image {{ background:image-set('{prefix}/{first_name}' 1x, url({prefix}/{first_name}) 2x); }}\n\
+@font-face {{ src:url('{prefix}/{second_name}?v=1&x=2#face'); }}\n\
+/* url(.markitai/assets/first.bin) */\n\
+</style>\n\
+`<style>.literal{{background:url(.markitai/assets/first.bin)}}</style>`\n"
+            );
+            let mut result = ConversionOutput {
+                markdown: source.clone(),
+                llm_markdown: Some(source.clone()),
+                base_frontmatter: Some(Map::new()),
+                ..Default::default()
+            };
+            apply_profiles(&mut result, &cfg);
+            let assets = [
+                Asset {
+                    name: "first.bin".into(),
+                    bytes: first.clone(),
+                },
+                Asset {
+                    name: first_name.clone(),
+                    bytes: second.clone(),
+                },
+                Asset {
+                    name: "duplicate.bin".into(),
+                    bytes: first.clone(),
+                },
+            ];
+            write(root.path(), "document", &mut result, &assets, &cfg).unwrap();
+            assert_eq!(result.markdown, expected, "{profile}");
+            assert_eq!(result.llm_markdown.as_deref(), Some(expected.as_str()));
+            assert_eq!(result.assets.len(), 2);
+            for (name, bytes) in [(&first_name, &first), (&second_name, &second)] {
+                assert_eq!(
+                    std::fs::read(root.path().join(prefix).join(name)).unwrap(),
+                    *bytes
+                );
+            }
+            for path in [result.output_path.unwrap(), result.llm_output_path.unwrap()] {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
     fn asset_publication_rewrites_original_paths_once_in_base_and_enhanced_outputs() {
         let first = b"first asset".to_vec();
         let second = b"different asset".to_vec();

@@ -180,3 +180,10 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   host; text/50 sample ranges overlap. The [failed correctness attempt](html-media-round11-benchmark-r1.json),
   [final identities](html-media-round11-final-check.json) and
   [executed drivers](drivers/round11/README.md) preserve the experiment's boundaries.
+
+## Round-twelve CSS resources
+
+- [CSS source acceptance](css-round12.md) records 625 Rust executions /482 distinct,
+  26 harness tests and independent parser reviews. The [gate record](css-round12-gate.json)
+  retains 96 unchanged source identities. Release artifacts, installed packages
+  and browser consumption remain subsequent acceptance stages.

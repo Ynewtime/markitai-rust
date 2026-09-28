@@ -37,3 +37,4 @@
 - Concurrent writers reuse identical content-addressed assets after exact byte verification; conflicting stored bytes fail without replacement.
 - HTML image candidate lists and media attributes retain their asset destinations after filtering, publication and history relocation.
 - Asset preparation and publication rewrite original paths in one pass, preventing renamed paths from being redirected or removed by a later asset.
+- CSS resource destinations in HTML styles follow asset renaming and filtering while preserving ordinary strings, comments and code examples.

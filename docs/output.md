@@ -39,18 +39,24 @@ Output names preserve the source extension: `report.pdf.md` and
 as private configuration fields. Assets are addressed by SHA-256 content prefixes.
 The public result contains only durable asset paths when an output directory was
 provided. Asset remapping recognizes inline images/links, wiki references,
-reference definitions, and HTML `img`/`a` destinations, including multiline tags.
-It preserves titles and other attributes while leaving code and literal examples
-untouched for fenced/indented code, same-line code spans and comments, and
-line-start literal HTML blocks. Inline code spans crossing line boundaries and
-literal HTML/comments beginning inside a paragraph still need broader parsing.
+reference definitions, HTML media attributes and candidate lists, and
+[CSS resource destinations](css-resources.md), including multiline HTML.
+It preserves titles and unrelated attributes while protecting fenced/indented
+code, inline code spans, comments and pre/code/script bodies. Asset preparation
+and publication each use one original-to-final path map, so an inserted filename
+cannot be mistaken for another original reference. Query/fragment suffixes are
+kept separate from replacement filename data.
 Reference definition destinations and optional titles must share one physical
 line. Filtered reference images are removed together with their definitions;
 download-link labels remain readable.
 
-The current implementation serializes file reservations and writing within one
-process. Cross-process reservations and throughput on asset-heavy batches still
-need dedicated validation. Malformed input frontmatter remains content.
+The core serializes file reservations and writing within one process. The CLI
+also has [per-member publication ownership](output-ownership.md); this does not
+turn the in-process binding API into a batch recovery coordinator. Existing
+content-addressed asset bytes are verified before reuse. Malformed input
+frontmatter remains content. [Round-eleven measurements](validation/html-media-round11.md)
+record a limited asset-heavy CLI comparison; binding overhead and peak memory
+remain unmeasured by that experiment.
 
 ## Verification
 
