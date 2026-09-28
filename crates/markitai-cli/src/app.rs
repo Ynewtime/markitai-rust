@@ -1,5 +1,9 @@
+use crate::report::{
+    self, ItemKind, ItemStatus, ReportOptions, RunFinished, RunInfo, RunItem, RunMode,
+};
+use chrono::{Local, SecondsFormat};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
-use markitai_core::{ConversionOutput, ConvertContext, ConvertOptions, config};
+use markitai_core::{ConversionOutput, ConversionUsage, ConvertContext, ConvertOptions, config};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -8,6 +12,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc,
 };
+use std::time::Instant;
 
 #[derive(Parser, Debug)]
 #[command(name="markitai", version=markitai_core::VERSION,
@@ -364,9 +369,6 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     if config::enabled(&cfg, "/history/record") {
         return Err(unsupported("history.record"));
     }
-    if config::enabled(&cfg, "/output/report") {
-        return Err(unsupported("Persistent conversion reports"));
-    }
     if let Some(bypass) = tri(cli.no_cache, cli.cache) {
         cfg["cache"]["no_cache"] = json!(bypass);
     }
@@ -409,11 +411,22 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     }
     config::validate(&cfg).map_err(runtime)?;
     let input_path = Path::new(input);
-    let batch = input_path.is_dir()
-        || input_path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("urls"));
-    if !input_path.is_dir() && (!cli.globs.is_empty() || cli.max_depth.is_some()) {
+    let directory = !is_url(input) && input_path.is_dir();
+    let batch = !is_url(input)
+        && (directory
+            || input_path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("urls")));
+    let mode = if directory {
+        RunMode::Directory
+    } else if batch {
+        RunMode::UrlList
+    } else if is_url(input) {
+        RunMode::SingleUrl
+    } else {
+        RunMode::SingleFile
+    };
+    if !directory && (!cli.globs.is_empty() || cli.max_depth.is_some()) {
         return Err((2, "--glob and --max-depth require a directory input".into()));
     }
     let mut output = cli.output.clone();
@@ -443,7 +456,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
                 .to_owned(),
         );
     }
-    let mut tasks = if input_path.is_dir() {
+    let mut tasks = if directory {
         discover(input_path, output.as_deref().unwrap(), cli, &cfg)?
     } else if batch {
         parse_urls(input_path, output.as_deref().unwrap())?
@@ -451,12 +464,27 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         vec![Task {
             source: input.into(),
             display: input.into(),
-            output,
+            report_key: if is_url(input) {
+                input.into()
+            } else {
+                input_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            },
+            output: output.clone(),
             filename: None,
             reserved_stem: None,
             source_file: None,
         }]
     };
+    if mode == RunMode::UrlList && tasks.is_empty() {
+        return Err((
+            1,
+            format!("No valid URLs found in {}.", input_path.display()),
+        ));
+    }
     if cli.dry_run {
         if !is_url(input) && !input_path.exists() {
             return Err((1, format!("Input does not exist: {input}")));
@@ -473,6 +501,32 @@ fn execute(cli: &Cli) -> CliResult<i32> {
         }
         return Ok(0);
     }
+    if tasks.is_empty() {
+        if cli.json {
+            emit_json(&[], None);
+        }
+        return Ok(0);
+    }
+    let run_clock = Instant::now();
+    let started_at = timestamp();
+    let report_plan = if let Some(output_dir) = output {
+        report::plan(
+            RunInfo {
+                mode,
+                input: input.into(),
+                output_dir,
+                started_at,
+                log_file: None,
+                options: ReportOptions::from_config(&cfg, cli.max_depth, &cli.globs),
+            },
+            cfg["output"]["report"].as_bool(),
+            cfg["output"]["on_conflict"].as_str().unwrap_or("rename"),
+            config::enabled(&cfg, "/output/allow_symlinks"),
+        )
+        .map_err(runtime)?
+    } else {
+        None
+    };
     let context = ConvertContext {
         explicit_fetch_strategy: cli
             .strategy
@@ -481,11 +535,25 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     };
     if !batch {
         let task = &tasks[0];
-        let result = convert_task(task, &cfg, context);
-        let item = outcome(task, &result);
+        let (record, result) = convert_item(task, 0, &cfg, context);
+        let item = outcome(&record);
         let failed = result.is_err();
+        let report_error = if record.status == ItemStatus::Completed {
+            finish_report(
+                report_plan.as_ref(),
+                std::slice::from_ref(&record),
+                run_clock,
+                cli.verbose && !cli.quiet,
+            )
+            .err()
+        } else {
+            None
+        };
+        if let Some(error) = &report_error {
+            eprintln!("Error: {error}");
+        }
         if cli.json {
-            emit_json(&[item], None);
+            emit_json(&[item], report_error.as_deref());
         } else {
             match result {
                 Ok(result) => {
@@ -507,13 +575,17 @@ fn execute(cli: &Cli) -> CliResult<i32> {
                 Err(error) => eprintln!("Error: {error}"),
             }
         }
-        return Ok(if failed { 1 } else { 0 });
+        return Ok(if failed || report_error.is_some() {
+            1
+        } else {
+            0
+        });
     }
     reserve_batch_names(&mut tasks, &cfg)?;
     let tasks = Arc::new(tasks);
     let cursor = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel();
-    let concurrency = if input_path.is_dir() {
+    let concurrency = if directory {
         cfg["batch"]["concurrency"].as_u64().unwrap_or(10)
     } else {
         cfg["batch"]["url_concurrency"].as_u64().unwrap_or(5)
@@ -530,19 +602,29 @@ fn execute(cli: &Cli) -> CliResult<i32> {
                     let Some(task) = tasks.get(index) else {
                         break;
                     };
-                    let result = convert_task(task, cfg, context);
-                    let item = outcome(task, &result);
-                    if sender.send(item).is_err() {
+                    let (record, _) = convert_item(task, index, cfg, context);
+                    if sender.send(record).is_err() {
                         break;
                     }
                 }
             });
         }
         drop(sender);
-        let items: Vec<Value> = receiver.into_iter().collect();
+        let records: Vec<RunItem> = receiver.into_iter().collect();
+        let report_error = finish_report(
+            report_plan.as_ref(),
+            &records,
+            run_clock,
+            cli.verbose && !cli.quiet,
+        )
+        .err();
+        if let Some(error) = &report_error {
+            eprintln!("Error: {error}");
+        }
+        let items: Vec<Value> = records.iter().map(outcome).collect();
         let failed = items.iter().filter(|i| i["status"] == "failed").count();
         if cli.json {
-            emit_json(&items, None);
+            emit_json(&items, report_error.as_deref());
         } else {
             for item in &items {
                 if !cli.quiet {
@@ -575,7 +657,13 @@ fn execute(cli: &Cli) -> CliResult<i32> {
                 );
             }
         }
-        if failed > 0 { 10 } else { 0 }
+        if failed > 0 {
+            10
+        } else if report_error.is_some() {
+            1
+        } else {
+            0
+        }
     });
     Ok(exit_code)
 }
@@ -584,6 +672,7 @@ fn execute(cli: &Cli) -> CliResult<i32> {
 struct Task {
     source: String,
     display: String,
+    report_key: String,
     output: Option<PathBuf>,
     filename: Option<String>,
     reserved_stem: Option<String>,
@@ -703,42 +792,133 @@ fn convert_task(
         other => Err(other.to_string()),
     })
 }
-fn outcome(task: &Task, result: &Result<ConversionOutput, String>) -> Value {
-    let mut item = json!({"kind":if is_url(&task.source){"url"}else{"file"},"source":task.display,"status":"failed","output":null,"error":null,"warnings":[],"skip_reason":null,"images":0,"screenshots":0,"cost_usd":0.0,"duration_s":null,"cache_hit":false,"fetch_cache_hit":false,"llm_cache_hit":false,"fetch_strategy":null,"source_file":task.source_file,"llm_usage":{}});
-    match result {
-        Ok(result) => {
-            item["status"] = json!(if result.skip_reason.is_some() {
-                "skipped"
+fn timestamp() -> String {
+    Local::now().to_rfc3339_opts(SecondsFormat::Micros, false)
+}
+
+fn convert_item(
+    task: &Task,
+    index: usize,
+    cfg: &Value,
+    context: ConvertContext<'_>,
+) -> (RunItem, Result<ConversionOutput, String>) {
+    let clock = Instant::now();
+    let started_at = timestamp();
+    let result = convert_task(task, cfg, context);
+    let mut record = RunItem {
+        index,
+        kind: if is_url(&task.source) {
+            ItemKind::Url
+        } else {
+            ItemKind::File
+        },
+        display: task.display.clone(),
+        report_key: task.report_key.clone(),
+        source_file: task.source_file.clone(),
+        status: ItemStatus::Failed,
+        output: None,
+        error: None,
+        warnings: Vec::new(),
+        skip_reason: None,
+        started_at,
+        completed_at: timestamp(),
+        elapsed_s: clock.elapsed().as_secs_f64(),
+        conversion_duration_s: None,
+        images: 0,
+        screenshots: 0,
+        usage: ConversionUsage::default(),
+        llm_cache_hit: false,
+        fetch_cache_hit: false,
+        fetch_strategy: None,
+    };
+    match &result {
+        Ok(output) => {
+            record.status = if output.skip_reason.is_some() {
+                ItemStatus::Skipped
             } else {
-                "completed"
-            });
-            item["output"] = json!(
-                result
-                    .llm_output_path
-                    .as_ref()
-                    .or(result.output_path.as_ref())
-            );
-            item["warnings"] = json!(result.warnings);
-            item["skip_reason"] = json!(result.skip_reason);
-            item["images"] = json!(result.assets.len());
-            item["screenshots"] = json!(result.screenshots.len());
-            item["cost_usd"] = json!(round(result.usage.cost_usd, 1_000_000.0));
-            item["duration_s"] = json!(round(result.duration, 1000.0));
-            item["llm_usage"] = json!(result.usage.by_model);
-            item["llm_cache_hit"] = json!(result.llm_cache_hit());
-            item["cache_hit"] = json!(result.llm_cache_hit());
-            item["fetch_cache_hit"] = json!(result.fetch_cache_hit());
-            if is_url(&task.source) {
-                item["fetch_strategy"] = result
-                    .frontmatter
-                    .get("fetch_strategy")
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                ItemStatus::Completed
+            };
+            record.output = output
+                .llm_output_path
+                .as_ref()
+                .or(output.output_path.as_ref())
+                .cloned();
+            record.warnings = output.warnings.clone();
+            record.skip_reason = output.skip_reason.clone();
+            record.images = output.assets.len();
+            record.screenshots = output.screenshots.len();
+            record.conversion_duration_s = Some(output.duration);
+            record.usage = ConversionUsage {
+                cost_usd: output.usage.cost_usd,
+                requests: output.usage.requests,
+                input_tokens: output.usage.input_tokens,
+                output_tokens: output.usage.output_tokens,
+                by_model: output.usage.by_model.clone(),
+            };
+            record.llm_cache_hit = output.llm_cache_hit();
+            record.fetch_cache_hit = output.fetch_cache_hit();
+            if record.kind == ItemKind::Url {
+                record.fetch_strategy = output.fetch_strategy().map(str::to_owned);
             }
         }
-        Err(error) => item["error"] = json!(error),
+        Err(error) => record.error = Some(error.clone()),
     }
-    item
+    (record, result)
+}
+
+fn outcome(item: &RunItem) -> Value {
+    json!({
+        "kind": if item.kind == ItemKind::Url { "url" } else { "file" },
+        "source": item.display,
+        "status": match item.status {
+            ItemStatus::Completed => "completed",
+            ItemStatus::Skipped => "skipped",
+            ItemStatus::Failed => "failed",
+        },
+        "output": item.output,
+        "error": item.error,
+        "warnings": item.warnings,
+        "skip_reason": item.skip_reason,
+        "images": item.images,
+        "screenshots": item.screenshots,
+        "cost_usd": round(item.usage.cost_usd, 1_000_000.0),
+        "duration_s": item.conversion_duration_s.map(|duration| round(duration, 1000.0)),
+        "cache_hit": item.llm_cache_hit,
+        "fetch_cache_hit": item.fetch_cache_hit,
+        "llm_cache_hit": item.llm_cache_hit,
+        "fetch_strategy": item.fetch_strategy,
+        "source_file": item.source_file,
+        "llm_usage": item.usage.by_model,
+    })
+}
+
+fn finish_report(
+    plan: Option<&report::ReportPlan>,
+    items: &[RunItem],
+    clock: Instant,
+    show_path: bool,
+) -> Result<(), String> {
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let finished = RunFinished {
+        updated_at: timestamp(),
+        duration_s: clock.elapsed().as_secs_f64(),
+    };
+    let bytes = report::render(plan, items, &finished)?;
+    match report::publish(plan, &bytes)? {
+        crate::report_store::Publication::Written(path) => {
+            if show_path {
+                eprintln!("Report: {}", path.display());
+            }
+        }
+        crate::report_store::Publication::SkippedExisting(path) => {
+            if show_path {
+                eprintln!("Existing report preserved: {}", path.display());
+            }
+        }
+    }
+    Ok(())
 }
 fn round(value: f64, factor: f64) -> f64 {
     (value * factor).round() / factor
@@ -775,11 +955,16 @@ fn discover(input: &Path, output: &Path, cli: &Cli, cfg: &Value) -> CliResult<Ve
     let mut positive = GlobSetBuilder::new();
     let mut negative = GlobSetBuilder::new();
     let mut has_positive = false;
-    for pattern in &cli.globs {
+    for pattern in cli
+        .globs
+        .iter()
+        .map(|pattern| pattern.trim())
+        .filter(|pattern| !pattern.is_empty())
+    {
         let (exclude, pattern) = pattern
             .strip_prefix('!')
             .map(|p| (true, p))
-            .unwrap_or((false, pattern.as_str()));
+            .unwrap_or((false, pattern));
         let glob = GlobBuilder::new(pattern)
             .literal_separator(true)
             .build()
@@ -841,6 +1026,7 @@ fn discover(input: &Path, output: &Path, cli: &Cli, cfg: &Value) -> CliResult<Ve
             tasks.push(Task {
                 source: path.to_string_lossy().into_owned(),
                 display: relative.to_string_lossy().replace('\\', "/"),
+                report_key: relative.to_string_lossy().replace('\\', "/"),
                 output: Some(out),
                 filename: None,
                 reserved_stem: None,
@@ -857,6 +1043,8 @@ fn discover(input: &Path, output: &Path, cli: &Cli, cfg: &Value) -> CliResult<Ve
         }
     }
     tasks.sort_by(|a, b| a.display.cmp(&b.display));
+    let mut url_keys = std::collections::HashSet::new();
+    tasks.retain(|task| !is_url(&task.source) || url_keys.insert(task.report_key.clone()));
     Ok(tasks)
 }
 fn absolute(path: &Path) -> PathBuf {
@@ -909,7 +1097,12 @@ fn parse_urls(path: &Path, output: &Path) -> CliResult<Vec<Task>> {
             eprintln!("Warning: skipping invalid URL entry in {}", path.display());
             continue;
         }
-        let filename = match name.filter(|n| !n.is_empty()) {
+        let name = name.filter(|name| !name.is_empty());
+        let report_key = name
+            .as_ref()
+            .map(|name| format!("{url} {name}"))
+            .unwrap_or_else(|| url.to_string());
+        let filename = match name {
             Some(name) => {
                 if name.contains(['/', '\\']) || name == "." || name == ".." {
                     return Err((
@@ -925,15 +1118,13 @@ fn parse_urls(path: &Path, output: &Path) -> CliResult<Vec<Task>> {
             }
             None => None,
         };
-        if tasks
-            .iter()
-            .any(|t: &Task| t.source == url && t.filename == filename)
-        {
+        if tasks.iter().any(|t: &Task| t.report_key == report_key) {
             continue;
         }
         tasks.push(Task {
             source: url.into(),
             display: url.into(),
+            report_key,
             output: Some(output.to_owned()),
             filename,
             reserved_stem: None,
@@ -1274,6 +1465,7 @@ mod tests {
                 .map(|id| Task {
                     source: format!("https://example.com/page?id={id}"),
                     display: id.to_string(),
+                    report_key: format!("https://example.com/page?id={id}"),
                     output: Some(dir.path().to_owned()),
                     filename: Some("shared.md".into()),
                     reserved_stem: None,

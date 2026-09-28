@@ -1,17 +1,21 @@
 # Run reports, resume state and history
 
-Status: **planned; none of the persistence capabilities in this decision is
-implemented**. The CLI already converts batches, reserves output names and emits
-stdout JSON. It rejects `--resume`, enabled history and explicit persistent
-reports; these guards remain until the corresponding implementation passes its
-acceptance tests. Structural configuration support does not imply runtime support.
+Status: **reports implemented; resume and history planned**. The CLI publishes
+all four report projections, including mixed file/URL directories. Source-level
+acceptance tests and a four-success-case development differential audit pass;
+clean-source release validation is pending. See [reports](../reports.md) for
+current runtime behavior and exact validation limits. The CLI still rejects
+`--resume` and enabled history. Structural configuration support does not imply
+runtime support for those remaining features.
 
 This design follows a read-only audit of reference revision
 `ba374322f884b0e720b45466cc1196f4574a3da5`, against native baseline `658cf00`.
-Round-six artifacts use `e0cf110fdf89724555b8afb4a23a53dfa5e89055`; the run
-persistence implementation is still absent. Reference anchors below are relative
-to `packages/markitai/src/markitai/` in the reference repository. The audit did not
-execute its code or inspect real user state.
+Round-six artifacts use `e0cf110fdf89724555b8afb4a23a53dfa5e89055` and predate the
+report implementation. These are historical design baselines, not the revision
+of the newly validated implementation. Reference anchors below are relative to
+`packages/markitai/src/markitai/` in the reference repository. The initial audit
+did not execute its code or inspect real user state; subsequent report comparison
+uses isolated CLI processes and loopback fixtures.
 
 ## Scope and architecture
 
@@ -20,11 +24,12 @@ behavior; directory/URL-list resume; and optional history export. Keep these as
 three projections of a typed run model, with separate schemas and lifecycles.
 The stdout JSON envelope is neither a report nor a recovery checkpoint.
 
-The run model must retain raw source identity, relative file key, raw URL custom
-name, source list, claimed base target, actual output, status, start/end time,
-duration, image/screenshot counts, usage, independent fetch/LLM cache hits,
-warnings and skip reason. A coordinator owns run state and receives worker
-claim/start/terminal events. Workers must not repeatedly serialize the full run.
+The implemented report model retains raw source identity, relative file key, raw
+URL custom name, source list, actual output, status, start/end time, duration,
+image/screenshot counts, usage, independent fetch/LLM cache hits, warnings and
+skip reason. Workers return typed terminal records; the coordinator serializes
+the report once. Recovery will additionally retain claimed base targets and
+persist claim/start/terminal events before allowing dependent work.
 
 Keep persistence in the CLI initially. Public `ConvertOptions`, conversion JSON
 and Node/Python/Go calls must not gain report/history side effects. This work does
@@ -33,23 +38,24 @@ workspace. History uses the compatible job export format without requiring them.
 
 ## Controls and lifecycle
 
-| Control | Planned behavior |
-|---|---|
-| `output.report = null` | Off for one file/URL; on for directory/URL-list batches |
-| `output.report = true/false` | Explicit report selection; disabling reports still permits batch state |
-| `--resume` | Load and merge directory/URL-list state; unavailable/corrupt state starts fresh with a diagnostic |
-| `--record-history` / `--no-record-history` | Override environment/configuration; preserve paired-flag precedence |
-| `MARKITAI_RECORD_HISTORY` | Trimmed nonempty value overrides config; `1,true,yes,on` enable, other nonempty values disable |
-| `history.record` | Default false; applies without a CLI/environment override |
-| Stdout conversion | No history or single-item report side effects |
-| Dry run / empty discovery | No history; dry run must not publish reports/state |
-| Conversion failures | Exit 1 for a failed single item, 10 for any failed batch, including an all-failed batch; otherwise 0 |
-| History write failure | Warning; preserve the conversion exit status |
-| Report/state write failure | Surface normal write failures; abort-time save failure must not mask the original interruption/error |
+| Control | Behavior | Status |
+|---|---|---|
+| `output.report = null` | Off for one file/URL; on for directory/URL-list batches | Implemented |
+| `output.report = true/false` | Explicit report selection; future batch state remains independent | Reports implemented; state planned |
+| `--resume` | Load and merge directory/URL-list state; unavailable/corrupt state starts fresh with a diagnostic | Planned; request rejected |
+| `--record-history` / `--no-record-history` | Override environment/configuration; preserve paired-flag precedence | Enabled history rejected; disabling supported |
+| `MARKITAI_RECORD_HISTORY` | Trimmed nonempty value overrides config; `1,true,yes,on` enable, other nonempty values disable | Precedence implemented; enabled history rejected |
+| `history.record` | Default false; applies without a CLI/environment override | Enabled history rejected |
+| Stdout conversion | No single-item report side effects | Implemented; history remains unsupported |
+| Dry run / empty discovery | No report; no recovery/history files are currently written | Implemented |
+| Conversion failures | Exit 1 for a failed single item, 10 for any failed batch, including an all-failed batch; otherwise 0 | Implemented |
+| History write failure | Warning; preserve the conversion exit status | Planned |
+| Report write failure | Preserve completed output and JSON items; surface error, exit 1 or retain batch failure 10 | Implemented |
+| State write failure | Surface normal write failures; abort-time save failure must not mask the original interruption/error | Planned |
 
-Publish history after normal success or partial failure using only this
-invocation's outcomes. The reference interruption path flushes resume state but
-does not publish history; do not mistake an interrupt for an ordinary failed run.
+The planned history stage will publish after normal success or partial failure
+using only this invocation's outcomes. The reference interruption path flushes
+resume state but does not publish history; do not mistake an interrupt for an ordinary failed run.
 Quiet mode and JSON stdout must remain compatible while diagnostics use stderr.
 
 Sources: `cli/main.py:950,1429`, `runs/report.py:209`,
@@ -58,7 +64,8 @@ Sources: `cli/main.py:950,1429`, `runs/report.py:209`,
 
 ## Identity and physical paths
 
-Reports and recovery state belong to the output directory:
+Reports belong to the output directory. The two state paths below are reserved
+for the planned recovery stage and are not currently created:
 
 ```text
 <output>/.markitai/reports/markitai.<hash>.report.json
@@ -87,11 +94,16 @@ model, prompt, profile, pure mode, strategy, cache and conflict policy are absen
 from some or all hash identities. Completed-state reuse does not validate them.
 Check the stored input/output scope before trusting any saved target.
 
-Report rename uses `.v2` through `.v9999`; the directory helper then falls back
-to a timestamp, while the shared helper uses UUID fallback. State always has one
-stable base and sidecar. Write checkpoints by atomic replacement, never version
-renaming. The reference report writers overwrite an existing base report even
-under `skip`; that defect needs the explicit decision described below.
+The reference directory report helper tries `.v2` through `.v9999`, then a
+timestamp. Its shared helper for single files, single URLs and URL lists instead
+increments `.vN` without a bound. Native publication deliberately bounds both:
+after `.v9999`, directories try a timestamp then timestamp-plus-UUID on collision;
+the other modes use UUID names. At most 64 fallback candidates are attempted.
+Native report `skip` preserves existing bytes, correcting the reference's
+overwrite behavior. These differences are explicit acceptance targets.
+
+Planned state always has one stable base and sidecar. Write checkpoints by atomic
+replacement, never version renaming.
 
 File keys are relative to input. URL state keys are the bare URL, or
 `url + " " + raw_custom_name`; preserve raw spelling before adding `.md` to an
@@ -126,7 +138,8 @@ uses `cli`; current URL-list reports with absent source provenance use
 
 When URL cache flags are present, report `cache_hit` is fetch OR LLM, with
 `cache_details:{fetch,llm}`. Do not synthesize details from absent flags; directory
-state-derived reports have a narrower shape. The existing CLI stdout meaning of
+reports retain the narrower reference state-shaped entries. Their `cache_hit`
+and summary `url_cache_hits` are LLM-only. The existing CLI stdout meaning of
 `cache_hit` remains LLM-only. Keep the flags separate internally.
 
 Format numeric durations as one-decimal seconds below a minute, then `MM:SS` or
@@ -135,15 +148,17 @@ values in run state; report formatting must not mutate the model.
 
 Top-level usage is `{models,requests,input_tokens,output_tokens,cost_usd}`; sort
 models, sum requests/tokens from their records and cost from item totals.
-Directory model records additionally initialize `cached_input_tokens`. Successful
-skips count as completed; directory pending counts include failed work. Minimal
-resume state cannot recover past usage, warnings or skip reasons, so a resumed
-report must not fabricate those values.
+Both directory and URL-list aggregate model records initialize and accumulate
+`cached_input_tokens`; URL-list aggregation includes completed items only.
+Directory skips count as completed, while URL-list skips retain their separate
+status and do not increment completed counts. Directory pending counts include
+failed work. Planned minimal resume state cannot recover past usage, warnings or
+skip reasons, so a resumed report must not fabricate those values.
 
 Sources: `runs/report.py:19,31,58,82,164`, `json_order.py:161,242,268,329`,
 `batch.py:338,1288,1330,1635`, `cli/processors/url.py:1193,1370`.
 
-## Recovery journal and scheduler
+## Recovery journal and scheduler (planned)
 
 Base state contains `version,options,documents,urls`. A file entry always has
 `status`; a URL entry additionally has `source_file`. Completed entries retain
@@ -191,7 +206,7 @@ Sources: `batch.py:51,193,208,220,314,406,444,1048,1137,1214,1263`,
 `cli/processors/url.py:1186,1257,1270`, `security.py:130,192`,
 `utils/output.py:125`, `config.py:530`, `constants.py:18`.
 
-## Optional history export
+## Optional history export (planned)
 
 Publish one job under `config::home()/serve/jobs/<12-hex-uuid-prefix>/`, honoring
 `MARKITAI_HOME` and independent of `cache.global_dir`. Never use the reference's
@@ -237,49 +252,65 @@ Compatibility does not make these reference limitations new guarantees:
 - Directory resume may append new-key events without first saving merged keys,
   which replay then ignores after a hard kill. The native coordinator will save
   merged keys first, matching the safer existing URL-list path.
-- Reference locks are process-local and JSONL is not explicitly bounded. Native
-  ownership/limits are safety additions, tested separately from schema parity.
+- Reference locks are process-local and JSONL is not explicitly bounded. Planned
+  native ownership/limits need their own tests, separately from schema parity.
 - An edited state's arbitrary absolute target must not authorize an overwrite
   outside validated output scope or through forbidden symlinks.
-- Existing report `skip` can overwrite. The planned safety correction is to
-  preserve that report and surface the skip, distinct from document processing.
-  Record this intentional divergence in release notes and paired acceptance
-  fixtures; do not silently claim exact behavior parity for this branch.
+- Existing report `skip` can overwrite. Native publication now preserves that
+  report, distinct from document processing; this has dedicated acceptance tests.
+  Do not claim exact reference behavior for this branch.
+- Reference shared report naming increments versions indefinitely. Native naming
+  bounds version/fallback attempts as described above; exhausted candidates
+  produce a normal publication error rather than an unbounded loop.
+- Reference explicit enhanced-output reports can retain a stale intermediate
+  path. Native reports use the actual finalized output; subprocess acceptance
+  checks that the reported file exists.
 - Minimal state loses old usage, warnings and skip reasons. Preserve absence
   rather than inventing recovered totals. URL-list grouping/hash quirks remain
   compatibility targets, not reasons to redesign all serialized output.
 
-All three stores can contain plaintext URLs, custom names, local paths, errors
-and document contents. Hash filenames provide no confidentiality. Keep global
-history opt-in; test only explicit temporary roots, disable real providers and
-never copy existing real caches/history as fixtures. Bound asset copies and
-apply the native output containment/symlink policy before every publication.
+Reports and planned recovery/history metadata can contain plaintext URLs, custom
+names, local paths and errors; history additionally copies document contents and
+assets. Reports do not serialize document bodies or complete provider settings.
+Hash filenames provide no confidentiality. Keep global history opt-in; test only
+explicit temporary roots, disable real providers and never copy existing real
+caches/history as fixtures. Bound future asset copies and apply the native
+output containment/symlink policy before every publication.
 
 ## Delivery order and acceptance gates
 
-1. **Typed run model and atomic writer:** preserve raw named-URL identity and
-   ownership; golden-test Python-compatible hash bytes, including Unicode and
-   spaces. Keep stdout/binding JSON unchanged.
-2. **Report projections:** first local single-file/directory, then URL/list
-   coverage using loopback HTTP. Test actual final JSON, mode defaults, cache
-   flags, usage, duration formatting, conflicts and write failures. This is the
-   smallest independent runtime slice; resume/history guards stay in place.
-3. **Recovery and scheduling:** read Python-shaped base/sidecar fixtures; test
+1. **Typed terminal model and atomic report writer — implemented:** preserve raw
+   named-URL identity and reservations; golden-test Python-compatible hash bytes,
+   including Unicode and spaces. Keep stdout/binding JSON unchanged.
+2. **Four report projections — implemented:** single-file, single-URL, URL-list
+   and mixed directory coverage using temporary files, loopback HTTP and mock
+   models. Tests inspect final JSON, defaults, cache flags, usage, timing, actual
+   output, conflicts and write failures. The final source gate passes 296 Rust
+   executions / 273 distinct tests plus 23 Python harness tests. Development R3
+   matches four successful reference report schemas, values and recursive key
+   order, with empty model usage. Nonzero usage has native mock/unit coverage;
+   neither it nor multiple-model ordering has reference differential evidence
+   from this run. This is not clean-source release validation or differential
+   coverage of all failure, mixed-input and model-usage branches; resume/history
+   guards remain in place.
+3. **Recovery and scheduling — planned:** read Python-shaped base/sidecar fixtures; test
    failure-only retries, already-completed runs, mixed file/URL collisions,
    custom-name identities, legacy adoption, changed cwd, corrupt/oversized and
    truncated journals, claim ownership, interruption, merge-before-work and
    cross-process exclusion. Report-disabled batches must still be resumable.
-4. **History export:** test all dispatch modes, precedence, stdout/dry-run/quiet,
+4. **History export — planned:** test all dispatch modes, precedence, stdout/dry-run/quiet,
    partial failures, no new items after completed resume, exact item metadata,
    staged publication failures, asset deduplication/renaming and reference
    rewriting with encoded spaces, wikilinks, frontmatter and literal code.
 
-Current integration points are CLI `app.rs`'s `Task`, `parse_urls`,
-`reserve_batch_names`, `convert_task` and `outcome`. Extend the existing reservation
-path rather than inventing another filename allocator. The final-value worker
-channel needs typed lifecycle events; failure durations and original usage must
-survive until report/history projection. Reuse a narrow atomic-write utility
-instead of duplicating incompatible checkpoint writers.
+Current CLI integration uses `app.rs`'s `Task`, `parse_urls`,
+`reserve_batch_names`, `convert_item`, `outcome` and `finish_report`. `report.rs`
+owns the typed terminal records and ordered projections; `report_store.rs` owns
+hashing and atomic report publication. Failure timing and original usage survive
+until projection. Future recovery must extend the existing reservation path
+with durable ownership and lifecycle events rather than inventing a second
+filename allocator. Its stable checkpoint replacement has a different lifecycle
+from versioned report publication.
 
 Reference test anchors, relative to `packages/markitai/tests/unit/`:
 
@@ -292,6 +323,7 @@ Reference test anchors, relative to `packages/markitai/tests/unit/`:
 | History schema and asset collisions | `runs/test_history.py:40,123,150,171,191,216,224,242,272,288,326,372,407` |
 
 Each stage needs fresh source/artifact provenance and its own passing tests before
-the corresponding unsupported guard is removed. This decision is planning
-evidence; it is not a claim that any persistent run behavior has been validated
-in the Rust runtime.
+the corresponding unsupported guard is removed. Report source tests and the
+limited development differential check have passed; clean-source release evidence
+is pending. Recovery and history remain design work and have no runtime
+validation claim. The [control center](../CONTROL.md) tracks subsequent checkpoints.

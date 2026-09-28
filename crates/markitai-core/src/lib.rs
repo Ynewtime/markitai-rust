@@ -206,8 +206,17 @@ pub fn convert_with_context(
             }
         }
     }
+    let fetch_strategy = if is_url {
+        doc.metadata
+            .get("fetch_strategy")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    } else {
+        None
+    };
     let mut result = output::prepare(source, &name, &mut doc, &cfg);
     result.fetch_cache_hit = fetch_cache_hit;
+    result.fetch_strategy = fetch_strategy;
     if config::enabled(&cfg, "/llm/enabled") {
         let source_context = if is_url {
             output::redact_url(source)

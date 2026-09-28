@@ -481,6 +481,25 @@ fn cached_url_reuses_extracted_content_without_changing_binding_json() {
     assert_eq!(first.markdown, hit.markdown);
     assert_eq!(hit.frontmatter["title"], "Page title");
     assert!(hit.output_path.unwrap().is_file());
+    let mut pure_cfg = cfg.clone();
+    pure_cfg["llm"]["pure"] = json!(true);
+    let pure = convert(
+        &url,
+        ConvertOptions {
+            config: Some(pure_cfg),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(pure.fetch_cache_hit());
+    assert!(pure.frontmatter.get("fetch_strategy").is_none());
+    assert_eq!(pure.fetch_strategy(), Some("static"));
+    assert!(
+        serde_json::to_value(&pure)
+            .unwrap()
+            .get("fetch_strategy")
+            .is_none()
+    );
     let response: Value = serde_json::from_str(&convert_json(
         &json!({"source":url,"options":{"config":cfg}}).to_string(),
     ))
@@ -491,6 +510,7 @@ fn cached_url_reuses_extracted_content_without_changing_binding_json() {
         "cache_hit",
         "llm_cache_hit",
         "fetch_cache_hit",
+        "fetch_strategy",
         "explicit_fetch_strategy",
     ] {
         assert!(response["result"].get(internal).is_none());

@@ -124,6 +124,8 @@ pub struct ConversionOutput {
     pub(crate) llm_cache_hit: bool,
     #[serde(skip)]
     pub(crate) fetch_cache_hit: bool,
+    #[serde(skip)]
+    pub(crate) fetch_strategy: Option<String>,
 }
 
 impl ConversionOutput {
@@ -136,5 +138,14 @@ impl ConversionOutput {
     /// Whether a fetched page was reused directly or after HTTP validation.
     pub fn fetch_cache_hit(&self) -> bool {
         self.fetch_cache_hit
+    }
+
+    /// The strategy actually used to fetch a URL, including pure output mode.
+    pub fn fetch_strategy(&self) -> Option<&str> {
+        self.fetch_strategy.as_deref().or_else(|| {
+            self.frontmatter
+                .get("fetch_strategy")
+                .and_then(Value::as_str)
+        })
     }
 }

@@ -1,0 +1,1081 @@
+use crate::report_store;
+use markitai_core::ConversionUsage;
+use serde::ser::{Serialize, SerializeMap, Serializer};
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunMode {
+    SingleFile,
+    SingleUrl,
+    Directory,
+    UrlList,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemKind {
+    File,
+    Url,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemStatus {
+    Completed,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug)]
+pub(crate) struct RunItem {
+    pub(crate) index: usize,
+    pub(crate) kind: ItemKind,
+    pub(crate) display: String,
+    pub(crate) report_key: String,
+    pub(crate) source_file: Option<String>,
+    pub(crate) status: ItemStatus,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) error: Option<String>,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) skip_reason: Option<String>,
+    pub(crate) started_at: String,
+    pub(crate) completed_at: String,
+    pub(crate) elapsed_s: f64,
+    pub(crate) conversion_duration_s: Option<f64>,
+    pub(crate) images: usize,
+    pub(crate) screenshots: usize,
+    pub(crate) usage: ConversionUsage,
+    pub(crate) llm_cache_hit: bool,
+    pub(crate) fetch_cache_hit: bool,
+    pub(crate) fetch_strategy: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReportOptions {
+    llm: bool,
+    ocr: bool,
+    screenshot: bool,
+    alt: bool,
+    desc: bool,
+    cache: bool,
+    concurrency: u64,
+    scan_max_depth: usize,
+    globs: Vec<String>,
+    models: Vec<String>,
+}
+
+impl ReportOptions {
+    pub(crate) fn from_config(cfg: &Value, max_depth: Option<usize>, globs: &[String]) -> Self {
+        let flag = |path| cfg.pointer(path).and_then(Value::as_bool).unwrap_or(false);
+        Self {
+            llm: flag("/llm/enabled"),
+            ocr: flag("/ocr/enabled"),
+            screenshot: flag("/screenshot/enabled"),
+            alt: flag("/image/alt_enabled"),
+            desc: flag("/image/desc_enabled"),
+            cache: cfg
+                .pointer("/cache/enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            concurrency: cfg
+                .pointer("/batch/concurrency")
+                .and_then(Value::as_u64)
+                .unwrap_or(10),
+            scan_max_depth: max_depth.unwrap_or_else(|| {
+                cfg.pointer("/batch/scan_max_depth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(5) as usize
+            }),
+            globs: globs
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            models: cfg
+                .pointer("/llm/model_list")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|model| {
+                    model
+                        .pointer("/litellm_params/model")
+                        .and_then(Value::as_str)
+                })
+                .map(String::from)
+                .collect(),
+        }
+    }
+
+    fn hash_options(&self, mode: RunMode) -> Value {
+        match mode {
+            RunMode::SingleUrl => json!({"llm": self.llm}),
+            RunMode::UrlList => json!({"llm": self.llm, "alt": self.alt, "desc": self.desc}),
+            RunMode::SingleFile | RunMode::Directory => {
+                let mut options = json!({"llm": self.llm, "ocr": self.ocr,
+                    "screenshot": self.screenshot, "alt": self.alt, "desc": self.desc});
+                if mode == RunMode::Directory {
+                    options["scan_max_depth"] = json!(self.scan_max_depth);
+                    if !self.globs.is_empty() {
+                        options["glob_patterns"] = json!(self.globs);
+                    }
+                }
+                options
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RunInfo {
+    pub(crate) mode: RunMode,
+    pub(crate) input: String,
+    pub(crate) output_dir: PathBuf,
+    pub(crate) started_at: String,
+    pub(crate) log_file: Option<PathBuf>,
+    pub(crate) options: ReportOptions,
+}
+
+#[derive(Debug)]
+pub(crate) struct RunFinished {
+    pub(crate) updated_at: String,
+    pub(crate) duration_s: f64,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReportPlan {
+    run: RunInfo,
+    task_hash: String,
+    on_conflict: String,
+    allow_symlinks: bool,
+    input_dir: Option<PathBuf>,
+    output_dir: PathBuf,
+}
+
+pub(crate) fn plan(
+    run: RunInfo,
+    selection: Option<bool>,
+    on_conflict: &str,
+    allow_symlinks: bool,
+) -> Result<Option<ReportPlan>, String> {
+    let batch = matches!(run.mode, RunMode::Directory | RunMode::UrlList);
+    if !selection.unwrap_or(batch) {
+        return Ok(None);
+    }
+    if !matches!(on_conflict, "rename" | "overwrite" | "skip") {
+        return Err("Invalid report conflict policy".into());
+    }
+    let output_dir = report_store::resolve_path(&run.output_dir).map_err(|e| e.to_string())?;
+    let input_dir = if run.mode == RunMode::Directory {
+        Some(report_store::resolve_path(Path::new(&run.input)).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let input = match run.mode {
+        RunMode::SingleUrl | RunMode::UrlList => output_dir.as_path(),
+        _ => Path::new(&run.input),
+    };
+    let task_hash =
+        report_store::task_hash(input, &output_dir, &run.options.hash_options(run.mode))
+            .map_err(|e| e.to_string())?;
+    Ok(Some(ReportPlan {
+        run,
+        task_hash,
+        on_conflict: on_conflict.into(),
+        allow_symlinks,
+        input_dir,
+        output_dir,
+    }))
+}
+
+pub(crate) fn publish(
+    plan: &ReportPlan,
+    bytes: &[u8],
+) -> Result<report_store::Publication, String> {
+    // Retain the caller's path spelling so the store can inspect symlink components.
+    report_store::publish(
+        &plan.run.output_dir,
+        &plan.task_hash,
+        &plan.on_conflict,
+        plan.allow_symlinks,
+        plan.run.mode == RunMode::Directory,
+        bytes,
+    )
+    .map_err(|e| e.to_string())
+}
+
+// Order is local to reports; enabling serde_json's preserve_order globally would
+// also change the established CLI and bindings JSON representation.
+enum Ordered {
+    Value(Value),
+    Object(Vec<(String, Ordered)>),
+}
+
+impl Serialize for Ordered {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Value(value) => value.serialize(serializer),
+            Self::Object(fields) => {
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                for (key, value) in fields {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+fn value(value: impl Into<Value>) -> Ordered {
+    Ordered::Value(value.into())
+}
+
+fn object(fields: impl IntoIterator<Item = (&'static str, Ordered)>) -> Ordered {
+    Ordered::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
+}
+
+fn path_value(path: Option<&Path>) -> Ordered {
+    value(
+        path.map(|p| Value::String(p.to_string_lossy().into_owned()))
+            .unwrap_or(Value::Null),
+    )
+}
+
+fn option_string(text: Option<&str>) -> Ordered {
+    value(text.map(Value::from).unwrap_or(Value::Null))
+}
+
+fn duration(seconds: f64) -> Ordered {
+    if seconds < 60.0 {
+        value(format!("{seconds:.1}s"))
+    } else {
+        let seconds = seconds as u64;
+        if seconds >= 3600 {
+            value(format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            ))
+        } else {
+            value(format!("{:02}:{:02}", seconds / 60, seconds % 60))
+        }
+    }
+}
+
+fn ordered_model(record: &Value) -> Ordered {
+    let Some(record) = record.as_object() else {
+        return value(record.clone());
+    };
+    let preferred = ["requests", "input_tokens", "output_tokens", "cost_usd"];
+    let mut fields = Vec::with_capacity(record.len());
+    for key in preferred {
+        if let Some(v) = record.get(key) {
+            fields.push((key.to_owned(), value(v.clone())));
+        }
+    }
+    for (key, v) in record {
+        if !preferred.contains(&key.as_str()) {
+            fields.push((key.clone(), value(v.clone())));
+        }
+    }
+    Ordered::Object(fields)
+}
+
+fn models(records: &Map<String, Value>) -> Ordered {
+    Ordered::Object(
+        records
+            .iter()
+            .map(|(name, record)| (name.clone(), ordered_model(record)))
+            .collect(),
+    )
+}
+
+fn counter(record: &Value, key: &str) -> u64 {
+    record.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn totals(records: &Map<String, Value>) -> Result<(u64, u64, u64), String> {
+    let mut result = (0u64, 0u64, 0u64);
+    for record in records.values() {
+        for (target, key) in [
+            (&mut result.0, "requests"),
+            (&mut result.1, "input_tokens"),
+            (&mut result.2, "output_tokens"),
+        ] {
+            *target = target
+                .checked_add(counter(record, key))
+                .ok_or("Report usage counter overflow")?;
+        }
+    }
+    Ok(result)
+}
+
+fn usage_block(records: &Map<String, Value>, cost: f64) -> Result<Ordered, String> {
+    let (requests, input, output) = totals(records)?;
+    Ok(object([
+        ("models", models(records)),
+        ("requests", value(requests)),
+        ("input_tokens", value(input)),
+        ("output_tokens", value(output)),
+        ("cost_usd", value(cost)),
+    ]))
+}
+
+fn aggregate(items: &[&RunItem], mode: RunMode) -> Result<(Map<String, Value>, f64), String> {
+    let mut combined = Map::<String, Value>::new();
+    let mut cost = 0.0;
+    for item in items {
+        if mode == RunMode::UrlList && item.status != ItemStatus::Completed {
+            continue;
+        }
+        cost += item.usage.cost_usd;
+        for (name, usage) in &item.usage.by_model {
+            let merged = combined.entry(name.clone()).or_insert_with(|| {
+                json!({
+                    "requests": 0, "input_tokens": 0, "output_tokens": 0,
+                    "cost_usd": 0.0, "cached_input_tokens": 0,
+                })
+            });
+            for key in [
+                "requests",
+                "input_tokens",
+                "output_tokens",
+                "cached_input_tokens",
+            ] {
+                merged[key] = json!(
+                    counter(merged, key)
+                        .checked_add(counter(usage, key))
+                        .ok_or("Report usage counter overflow")?
+                );
+            }
+            let model_cost = merged["cost_usd"].as_f64().unwrap_or(0.0)
+                + usage["cost_usd"].as_f64().unwrap_or(0.0);
+            if !model_cost.is_finite() {
+                return Err("Report model cost total is not finite".into());
+            }
+            merged["cost_usd"] = json!(model_cost);
+        }
+    }
+    if !cost.is_finite() {
+        return Err("Report usage total is not finite".into());
+    }
+    Ok((combined, cost))
+}
+
+fn completed(item: &RunItem, mode: RunMode) -> bool {
+    item.status == ItemStatus::Completed
+        || (mode == RunMode::Directory && item.status == ItemStatus::Skipped)
+}
+
+fn status(item: &RunItem, mode: RunMode) -> &'static str {
+    if completed(item, mode) {
+        "completed"
+    } else if item.status == ItemStatus::Skipped {
+        "skipped"
+    } else {
+        "failed"
+    }
+}
+
+fn directory_entry(item: &RunItem) -> Ordered {
+    let mut fields = vec![
+        ("status", value(status(item, RunMode::Directory))),
+        ("cache_hit", value(item.llm_cache_hit)),
+        ("output", path_value(item.output.as_deref())),
+        ("error", option_string(item.error.as_deref())),
+    ];
+    if item.kind == ItemKind::Url {
+        fields.push((
+            "fetch_strategy",
+            option_string(item.fetch_strategy.as_deref()),
+        ));
+    }
+    fields.extend([
+        ("started_at", value(item.started_at.clone())),
+        ("completed_at", value(item.completed_at.clone())),
+        ("duration", duration(item.elapsed_s)),
+        ("images", value(item.images)),
+        ("screenshots", value(item.screenshots)),
+        ("cost_usd", value(item.usage.cost_usd)),
+        ("llm_usage", models(&item.usage.by_model)),
+    ]);
+    object(fields)
+}
+
+fn single_file_entry(item: &RunItem) -> Result<Ordered, String> {
+    let (_, input, output) = totals(&item.usage.by_model)?;
+    Ok(object([
+        ("status", value("completed")),
+        ("output", path_value(item.output.as_deref())),
+        ("error", option_string(item.error.as_deref())),
+        ("duration", duration(item.elapsed_s)),
+        ("images", value(item.images)),
+        ("screenshots", value(item.screenshots)),
+        (
+            "llm_usage",
+            object([
+                ("cost_usd", value(item.usage.cost_usd)),
+                ("input_tokens", value(input)),
+                ("output_tokens", value(output)),
+            ]),
+        ),
+    ]))
+}
+
+fn single_url_entry(item: &RunItem) -> Ordered {
+    object([
+        ("status", value("completed")),
+        (
+            "cache_hit",
+            value(item.fetch_cache_hit || item.llm_cache_hit),
+        ),
+        (
+            "cache_details",
+            object([
+                ("fetch", value(item.fetch_cache_hit)),
+                ("llm", value(item.llm_cache_hit)),
+            ]),
+        ),
+        ("output", path_value(item.output.as_deref())),
+        ("error", option_string(item.error.as_deref())),
+        (
+            "fetch_strategy",
+            option_string(item.fetch_strategy.as_deref()),
+        ),
+        ("duration", duration(item.elapsed_s)),
+        ("images", value(item.images)),
+        ("screenshots", value(item.screenshots)),
+        ("llm_usage", models(&item.usage.by_model)),
+    ])
+}
+
+fn list_entry(item: &RunItem) -> Ordered {
+    if item.status != ItemStatus::Completed {
+        return object([
+            ("status", value(status(item, RunMode::UrlList))),
+            (
+                "error",
+                if item.status == ItemStatus::Skipped {
+                    value("Output exists")
+                } else {
+                    option_string(item.error.as_deref())
+                },
+            ),
+        ]);
+    }
+    object([
+        ("status", value("completed")),
+        ("output", path_value(item.output.as_deref())),
+        ("error", option_string(item.error.as_deref())),
+        (
+            "fetch_strategy",
+            option_string(item.fetch_strategy.as_deref()),
+        ),
+        ("images", value(item.images)),
+        ("screenshots", value(item.screenshots)),
+    ])
+}
+
+fn url_groups(items: &[&RunItem], mode: RunMode) -> Ordered {
+    let mut groups = BTreeMap::<&str, Vec<&RunItem>>::new();
+    for item in items.iter().filter(|item| item.kind == ItemKind::Url) {
+        let source = match mode {
+            RunMode::SingleUrl => "cli",
+            RunMode::UrlList => "unknown.urls",
+            _ => item.source_file.as_deref().unwrap_or("unknown.urls"),
+        };
+        groups.entry(source).or_default().push(item);
+    }
+    Ordered::Object(
+        groups
+            .into_iter()
+            .map(|(source, group)| {
+                let entry = object([
+                    ("total", value(group.len())),
+                    (
+                        "completed",
+                        value(group.iter().filter(|item| completed(item, mode)).count()),
+                    ),
+                    (
+                        "failed",
+                        value(
+                            group
+                                .iter()
+                                .filter(|item| item.status == ItemStatus::Failed)
+                                .count(),
+                        ),
+                    ),
+                    (
+                        "urls",
+                        Ordered::Object(
+                            group
+                                .iter()
+                                .map(|item| {
+                                    let data = match mode {
+                                        RunMode::SingleUrl => single_url_entry(item),
+                                        RunMode::UrlList => list_entry(item),
+                                        _ => directory_entry(item),
+                                    };
+                                    (item.report_key.clone(), data)
+                                })
+                                .collect(),
+                        ),
+                    ),
+                ]);
+                (source.into(), entry)
+            })
+            .collect(),
+    )
+}
+
+fn options(plan: &ReportPlan, items: &[&RunItem]) -> Option<Ordered> {
+    let opts = &plan.run.options;
+    match plan.run.mode {
+        RunMode::SingleUrl => Some(object([
+            ("llm", value(opts.llm)),
+            ("cache", value(opts.cache)),
+            ("alt", value(opts.alt)),
+            ("desc", value(opts.desc)),
+            (
+                "fetch_strategy",
+                option_string(items[0].fetch_strategy.as_deref()),
+            ),
+        ])),
+        RunMode::Directory => {
+            let mut fields = vec![
+                ("concurrency", value(opts.concurrency)),
+                ("llm", value(opts.llm)),
+                ("ocr", value(opts.ocr)),
+                ("screenshot", value(opts.screenshot)),
+                ("alt", value(opts.alt)),
+                ("desc", value(opts.desc)),
+            ];
+            if opts.llm && !opts.models.is_empty() {
+                fields.push(("models", value(json!(opts.models))));
+            }
+            fields.extend([
+                ("input_dir", path_value(plan.input_dir.as_deref())),
+                ("output_dir", path_value(Some(&plan.output_dir))),
+                ("scan_max_depth", value(opts.scan_max_depth)),
+            ]);
+            if !opts.globs.is_empty() {
+                fields.push(("glob_patterns", value(json!(opts.globs))));
+            }
+            Some(object(fields))
+        }
+        _ => None,
+    }
+}
+
+fn summary(mode: RunMode, items: &[&RunItem], finished: &RunFinished) -> Ordered {
+    let count = |kind, predicate: fn(&RunItem) -> bool| {
+        items
+            .iter()
+            .filter(|item| item.kind == kind && predicate(item))
+            .count()
+    };
+    let files = count(ItemKind::File, |_| true);
+    let file_failed = count(ItemKind::File, |item| item.status == ItemStatus::Failed);
+    let urls = count(ItemKind::Url, |_| true);
+    let url_failed = count(ItemKind::Url, |item| item.status == ItemStatus::Failed);
+    let mut fields = vec![
+        ("total_documents", value(files)),
+        ("completed_documents", value(files - file_failed)),
+        ("failed_documents", value(file_failed)),
+    ];
+    if mode == RunMode::Directory {
+        fields.push(("pending_documents", value(file_failed)));
+    }
+    if mode != RunMode::SingleFile {
+        fields.extend([
+            ("total_urls", value(urls)),
+            (
+                "completed_urls",
+                value(
+                    items
+                        .iter()
+                        .filter(|item| item.kind == ItemKind::Url && completed(item, mode))
+                        .count(),
+                ),
+            ),
+            ("failed_urls", value(url_failed)),
+        ]);
+    }
+    if mode == RunMode::Directory {
+        fields.extend([
+            ("pending_urls", value(url_failed)),
+            (
+                "url_cache_hits",
+                value(
+                    items
+                        .iter()
+                        .filter(|item| {
+                            item.kind == ItemKind::Url
+                                && completed(item, mode)
+                                && item.llm_cache_hit
+                        })
+                        .count(),
+                ),
+            ),
+            (
+                "url_sources",
+                value(
+                    items
+                        .iter()
+                        .filter(|item| item.kind == ItemKind::Url)
+                        .map(|item| item.source_file.as_deref().unwrap_or("unknown.urls"))
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                ),
+            ),
+        ]);
+    }
+    let elapsed = if matches!(mode, RunMode::SingleFile | RunMode::SingleUrl) {
+        items[0].elapsed_s
+    } else {
+        finished.duration_s
+    };
+    fields.push(("duration", duration(elapsed)));
+    if mode == RunMode::Directory {
+        fields.push((
+            "processing_time",
+            duration(items.iter().map(|item| item.elapsed_s).sum()),
+        ));
+    }
+    object(fields)
+}
+
+pub(crate) fn render(
+    plan: &ReportPlan,
+    items: &[RunItem],
+    finished: &RunFinished,
+) -> Result<Vec<u8>, String> {
+    if items.is_empty() {
+        return Err("Cannot render a report without processed items".into());
+    }
+    let mode = plan.run.mode;
+    if matches!(mode, RunMode::SingleFile | RunMode::SingleUrl)
+        && (items.len() != 1 || items[0].status != ItemStatus::Completed)
+    {
+        return Err("A single-item report requires one completed item".into());
+    }
+    let mut keys = BTreeSet::new();
+    for item in items {
+        if (mode == RunMode::SingleFile && item.kind != ItemKind::File)
+            || (matches!(mode, RunMode::SingleUrl | RunMode::UrlList) && item.kind != ItemKind::Url)
+        {
+            return Err("Report item kind does not match run mode".into());
+        }
+        if !keys.insert((item.kind == ItemKind::Url, &item.report_key)) {
+            return Err("Duplicate report item identity".into());
+        }
+        if !item.elapsed_s.is_finite() || item.elapsed_s < 0.0 || !item.usage.cost_usd.is_finite() {
+            return Err("Report item contains an invalid numeric measurement".into());
+        }
+    }
+    if !finished.duration_s.is_finite()
+        || finished.duration_s < 0.0
+        || !items
+            .iter()
+            .map(|item| item.elapsed_s)
+            .sum::<f64>()
+            .is_finite()
+    {
+        return Err("Report run duration is invalid".into());
+    }
+    let mut items: Vec<_> = items.iter().collect();
+    items.sort_by_key(|item| item.index);
+    let mut fields = vec![
+        ("version", value("1.0")),
+        ("generated_at", value(finished.updated_at.clone())),
+    ];
+    if mode == RunMode::Directory {
+        fields.extend([
+            ("started_at", value(plan.run.started_at.clone())),
+            ("updated_at", value(finished.updated_at.clone())),
+        ]);
+    }
+    fields.push(("log_file", path_value(plan.run.log_file.as_deref())));
+    if let Some(options) = options(plan, &items) {
+        fields.push(("options", options));
+    }
+    fields.push(("summary", summary(mode, &items, finished)));
+    let usage = if matches!(mode, RunMode::SingleFile | RunMode::SingleUrl) {
+        usage_block(&items[0].usage.by_model, items[0].usage.cost_usd)?
+    } else {
+        let (records, cost) = aggregate(&items, mode)?;
+        usage_block(&records, cost)?
+    };
+    fields.push(("llm_usage", usage));
+    if matches!(mode, RunMode::SingleFile | RunMode::Directory) {
+        let mut documents = Vec::new();
+        for item in items.iter().filter(|item| item.kind == ItemKind::File) {
+            documents.push((
+                item.report_key.clone(),
+                if mode == RunMode::Directory {
+                    directory_entry(item)
+                } else {
+                    single_file_entry(item)?
+                },
+            ));
+        }
+        documents.sort_by(|a, b| a.0.cmp(&b.0));
+        fields.push(("documents", Ordered::Object(documents)));
+    }
+    if mode != RunMode::SingleFile {
+        fields.push(("url_sources", url_groups(&items, mode)));
+    }
+    serde_json::to_vec_pretty(&object(fields)).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(index: usize, kind: ItemKind, key: &str) -> RunItem {
+        RunItem {
+            index,
+            kind,
+            display: format!("display-{key}"),
+            report_key: key.into(),
+            source_file: None,
+            status: ItemStatus::Completed,
+            output: Some(PathBuf::from("out/final.md")),
+            error: None,
+            warnings: vec!["not in reports".into()],
+            skip_reason: None,
+            started_at: "2026-09-28T12:00:00+08:00".into(),
+            completed_at: "2026-09-28T12:00:01+08:00".into(),
+            elapsed_s: 1.23456,
+            conversion_duration_s: Some(1.12345),
+            images: 2,
+            screenshots: 0,
+            usage: ConversionUsage::default(),
+            llm_cache_hit: false,
+            fetch_cache_hit: false,
+            fetch_strategy: Some("static".into()),
+        }
+    }
+
+    fn run(root: &Path, mode: RunMode, cfg: Value) -> RunInfo {
+        RunInfo {
+            mode,
+            input: root.join("input 世界").to_string_lossy().into_owned(),
+            output_dir: root.join("output"),
+            started_at: "2026-09-28T12:00:00+08:00".into(),
+            log_file: None,
+            options: ReportOptions::from_config(&cfg, None, &[]),
+        }
+    }
+
+    fn finish() -> RunFinished {
+        RunFinished {
+            updated_at: "2026-09-28T12:01:01+08:00".into(),
+            duration_s: 61.9,
+        }
+    }
+
+    fn decode(plan: &ReportPlan, items: &[RunItem]) -> (String, Value) {
+        let bytes = render(plan, items, &finish()).unwrap();
+        (
+            String::from_utf8(bytes.clone()).unwrap(),
+            serde_json::from_slice(&bytes).unwrap(),
+        )
+    }
+
+    #[test]
+    fn defaults_and_mode_specific_hashes_do_not_create_output() {
+        let root = tempfile::tempdir().unwrap();
+        for mode in [RunMode::SingleFile, RunMode::SingleUrl] {
+            assert!(
+                plan(run(root.path(), mode, json!({})), None, "rename", false)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for mode in [RunMode::Directory, RunMode::UrlList] {
+            assert!(
+                plan(run(root.path(), mode, json!({})), None, "rename", false)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                plan(
+                    run(root.path(), mode, json!({})),
+                    Some(false),
+                    "rename",
+                    false
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+        let cfg =
+            json!({"llm":{"enabled":true},"ocr":{"enabled":true},"batch":{"scan_max_depth":9}});
+        let single = plan(
+            run(root.path(), RunMode::SingleFile, cfg.clone()),
+            Some(true),
+            "rename",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let expected = report_store::task_hash(
+            Path::new(&single.run.input),
+            &single.output_dir,
+            &json!({"llm":true,"ocr":true,"screenshot":false,"alt":false,"desc":false}),
+        )
+        .unwrap();
+        assert_eq!(single.task_hash, expected);
+        let mut first_url = run(root.path(), RunMode::SingleUrl, cfg.clone());
+        first_url.input = "https://example.test/a?key=first".into();
+        let mut next_url = run(root.path(), RunMode::SingleUrl, cfg);
+        next_url.input = "https://example.test/other".into();
+        let a = plan(first_url, Some(true), "rename", false)
+            .unwrap()
+            .unwrap();
+        let b = plan(next_url, Some(true), "rename", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.task_hash, b.task_hash);
+        assert_eq!(
+            a.task_hash,
+            report_store::task_hash(&a.output_dir, &a.output_dir, &json!({"llm":true})).unwrap()
+        );
+        assert!(!root.path().join("output").exists());
+    }
+
+    #[test]
+    fn single_file_preserves_flat_usage_final_path_and_field_order() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(
+            run(root.path(), RunMode::SingleFile, json!({})),
+            Some(true),
+            "rename",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let mut row = item(0, ItemKind::File, "notes.txt");
+        row.output = Some(root.path().join("chosen.md"));
+        row.usage.cost_usd = 0.00000049;
+        row.usage.input_tokens = 999;
+        row.usage.by_model =
+            json!({"z-model":{"requests":2,"input_tokens":7,"output_tokens":3,"cost_usd":8.0}})
+                .as_object()
+                .unwrap()
+                .clone();
+        let (text, body) = decode(&plan, &[row]);
+        assert_eq!(
+            body["documents"]["notes.txt"]["output"],
+            root.path().join("chosen.md").to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            body["documents"]["notes.txt"]["llm_usage"],
+            json!({"input_tokens":7,"output_tokens":3,"cost_usd":0.00000049})
+        );
+        assert_eq!(body["llm_usage"]["cost_usd"], 0.00000049);
+        assert_eq!(body["llm_usage"]["requests"], 2);
+        assert_eq!(body["summary"]["duration"], "1.2s");
+        assert!(body.get("options").is_none() && body.get("url_sources").is_none());
+        assert!(body["documents"]["notes.txt"].get("warnings").is_none());
+        let keys = [
+            "\"version\"",
+            "\"generated_at\"",
+            "\"log_file\"",
+            "\"summary\"",
+            "\"llm_usage\"",
+            "\"documents\"",
+        ];
+        assert!(
+            keys.windows(2)
+                .all(|pair| text.find(pair[0]).unwrap() < text.find(pair[1]).unwrap())
+        );
+    }
+
+    #[test]
+    fn single_url_uses_actual_strategy_and_independent_cache_details() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(run(root.path(), RunMode::SingleUrl,
+            json!({"fetch":{"strategy":"auto","headers":{"Authorization":"secret"}},"llm":{"enabled":true,"api_key":"secret"}})), Some(true), "rename", false).unwrap().unwrap();
+        let mut row = item(0, ItemKind::Url, "https://example.test/a");
+        row.fetch_cache_hit = true;
+        row.source_file = Some("must-not-appear.urls".into());
+        let (text, body) = decode(&plan, &[row]);
+        let url = &body["url_sources"]["cli"]["urls"]["https://example.test/a"];
+        assert_eq!(url["cache_hit"], true);
+        assert_eq!(url["cache_details"], json!({"fetch":true,"llm":false}));
+        assert_eq!(body["options"]["fetch_strategy"], "static");
+        assert_eq!(body["options"].as_object().unwrap().len(), 5);
+        assert!(url.get("source_file").is_none() && body.get("documents").is_none());
+        assert!(!text.contains("secret") && !text.contains("must-not-appear"));
+    }
+
+    #[test]
+    fn directory_keeps_failed_pending_skips_completed_and_source_order() {
+        let root = tempfile::tempdir().unwrap();
+        let mut info = run(
+            root.path(),
+            RunMode::Directory,
+            json!({"llm":{"enabled":true,
+            "model_list":[{"litellm_params":{"model":"m","api_key":"secret"}}]}}),
+        );
+        info.options = ReportOptions::from_config(
+            &json!({"llm":{"enabled":true,
+            "model_list":[{"litellm_params":{"model":"m","api_key":"secret"}}]}}),
+            Some(3),
+            &[" *.txt ".into(), " ".into()],
+        );
+        let plan = plan(info, None, "rename", false).unwrap().unwrap();
+        let mut failure = item(1, ItemKind::File, "z/bad.txt");
+        failure.status = ItemStatus::Failed;
+        failure.error = Some("failure".into());
+        failure.output = None;
+        let mut skip = item(0, ItemKind::File, "a/skip.txt");
+        skip.status = ItemStatus::Skipped;
+        skip.skip_reason = Some("exists".into());
+        let mut first = item(2, ItemKind::Url, "https://example.test/z name");
+        first.source_file = Some("links.urls".into());
+        first.fetch_cache_hit = true;
+        let mut second = item(3, ItemKind::Url, "https://example.test/a name.md");
+        second.source_file = Some("links.urls".into());
+        second.llm_cache_hit = true;
+        second.usage.by_model =
+            json!({"m":{"requests":1,"input_tokens":9,"output_tokens":4,"cost_usd":0.1}})
+                .as_object()
+                .unwrap()
+                .clone();
+        let (text, body) = decode(&plan, &[second, failure, first, skip]);
+        assert_eq!(body["summary"]["completed_documents"], 1);
+        assert_eq!(body["summary"]["failed_documents"], 1);
+        assert_eq!(body["summary"]["pending_documents"], 1);
+        assert_eq!(body["summary"]["url_cache_hits"], 1);
+        assert_eq!(body["documents"]["a/skip.txt"]["status"], "completed");
+        assert_eq!(body["summary"]["duration"], "01:01");
+        assert_eq!(body["summary"]["processing_time"], "4.9s");
+        assert_eq!(body["options"]["scan_max_depth"], 3);
+        assert_eq!(body["options"]["glob_patterns"], json!(["*.txt"]));
+        assert_eq!(body["options"]["models"], json!(["m"]));
+        assert_eq!(body["llm_usage"]["models"]["m"]["cached_input_tokens"], 0);
+        assert!(
+            body["url_sources"]["links.urls"]["urls"]["https://example.test/z name"]
+                .get("cache_details")
+                .is_none()
+        );
+        assert!(
+            text.find("https://example.test/z name").unwrap()
+                < text.find("https://example.test/a name.md").unwrap()
+        );
+        assert!(!text.contains("secret") && !text.contains("not in reports"));
+    }
+
+    #[test]
+    fn url_list_omits_details_and_keeps_unknown_source_and_skip_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(
+            run(root.path(), RunMode::UrlList, json!({})),
+            None,
+            "rename",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let mut good = item(0, ItemKind::Url, "https://example.test/a name");
+        good.source_file = Some("actual.urls".into());
+        good.llm_cache_hit = true;
+        let mut skip = item(1, ItemKind::Url, "https://example.test/a name.md");
+        skip.status = ItemStatus::Skipped;
+        skip.skip_reason = Some("exists".into());
+        let mut bad = item(2, ItemKind::Url, "https://example.test/b");
+        bad.status = ItemStatus::Failed;
+        bad.error = Some("failed fetch".into());
+        let (_, body) = decode(&plan, &[good, skip, bad]);
+        assert_eq!(body["summary"]["completed_urls"], 1);
+        assert_eq!(body["summary"]["failed_urls"], 1);
+        assert_eq!(body["summary"]["total_urls"], 3);
+        assert!(body.get("options").is_none());
+        let urls = &body["url_sources"]["unknown.urls"]["urls"];
+        assert_eq!(
+            urls["https://example.test/a name.md"],
+            json!({"status":"skipped","error":"Output exists"})
+        );
+        assert_eq!(
+            urls["https://example.test/b"],
+            json!({"status":"failed","error":"failed fetch"})
+        );
+        for key in [
+            "duration",
+            "cost_usd",
+            "llm_usage",
+            "cache_hit",
+            "source_file",
+        ] {
+            assert!(urls["https://example.test/a name"].get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn duration_boundaries_and_invalid_measurements_are_explicit() {
+        for (seconds, expected) in [
+            (0.0, "0.0s"),
+            (59.94, "59.9s"),
+            (60.0, "01:00"),
+            (3599.9, "59:59"),
+            (3600.0, "01:00:00"),
+            (360000.0, "100:00:00"),
+        ] {
+            assert_eq!(serde_json::to_value(duration(seconds)).unwrap(), expected);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(
+            run(root.path(), RunMode::SingleFile, json!({})),
+            Some(true),
+            "rename",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let mut bad = item(0, ItemKind::File, "a.txt");
+        bad.elapsed_s = f64::NAN;
+        assert!(render(&plan, &[bad], &finish()).is_err());
+        assert!(render(&plan, &[], &finish()).is_err());
+    }
+
+    #[test]
+    fn batch_usage_merges_models_but_takes_total_cost_from_items() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = plan(
+            run(root.path(), RunMode::UrlList, json!({})),
+            None,
+            "rename",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let mut first = item(0, ItemKind::Url, "https://example.test/first");
+        first.usage.cost_usd = 0.123456789;
+        first.usage.by_model = json!({"m":{"requests":1,"input_tokens":8,"output_tokens":2,"cached_input_tokens":3,"cost_usd":1.5}}).as_object().unwrap().clone();
+        let mut second = item(1, ItemKind::Url, "https://example.test/second");
+        second.usage.by_model =
+            json!({"m":{"requests":2,"input_tokens":4,"output_tokens":5,"cost_usd":2.0}})
+                .as_object()
+                .unwrap()
+                .clone();
+        let mut skipped = item(2, ItemKind::Url, "https://example.test/skipped");
+        skipped.status = ItemStatus::Skipped;
+        skipped.usage.cost_usd = 9.0;
+        skipped.usage.by_model = json!({"must-not-be-merged":{"requests":99}})
+            .as_object()
+            .unwrap()
+            .clone();
+        let (_, body) = decode(&plan, &[first, second, skipped]);
+        assert_eq!(
+            body["llm_usage"],
+            json!({
+                "models":{"m":{"requests":3,"input_tokens":12,"output_tokens":7,"cached_input_tokens":3,"cost_usd":3.5}},
+                "requests":3,"input_tokens":12,"output_tokens":7,"cost_usd":0.123456789,
+            })
+        );
+    }
+}

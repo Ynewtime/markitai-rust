@@ -119,3 +119,10 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   `ab6b141` is a 6.14%-smaller CLI candidate with broadly similar measured timings
   on six inputs. New paired measurements and all equivalence gates are recorded;
   candidate package validation remains open and the default is unchanged.
+
+## Round-seven report implementation
+
+- [Report contracts and differential method](reports-round7.md): 296 Rust test
+  executions, 23 harness checks and four matching development report pairs.
+  Clean-source release/package evidence will be recorded after the source
+  checkpoint; history/resume and complete runtime parity remain unfinished.
