@@ -129,8 +129,10 @@ does not establish those rendering semantics.
 Table geometry is deliberately disabled when curves, resource-dependent colours,
 transparency, Form/image invocations, shading or nonrectangular clipping make its
 verdict uncertain. Text extraction can still proceed. Borderless or merged-cell
-tables, complex columns, mathematical layout, local OCR and vector charts remain
-open. The historical five-page sample's chart must not be presented as recovered
+tables, complex columns, mathematical layout and structured vector charts remain
+open. Explicit [page media processing](pdf-ocr.md) provides rendering and local
+OCR separately from this text reader, with its own accuracy limits.
+The historical five-page sample's chart must not be presented as recovered
 merely because its textual labels are extractable.
 
 The additional positioned pass still reparses the PDF. Local page-content reuse

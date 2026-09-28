@@ -5,6 +5,12 @@ request and response contract. Neither an installed CLI nor a Python worker is
 used for conversion. Feature availability is therefore the same as the core;
 an installed binding does not add missing format, OCR, or browser capabilities.
 
+The latest [installed-package validation](validation/pdf-native-round17.md)
+targets source `b0cc1a064134bd86d827e8973d78946da05ce99a` on macOS arm64.
+Python 3.13, Node 24 and Go 1.27.1 checks pass, including identical three-page
+PDF PNG captures across all three adapters. The current native PDF/OCR backend
+is platform-specific; this does not validate every host version or operating system.
+
 ## Shared contract
 
 ```json

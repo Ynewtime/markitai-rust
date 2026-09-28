@@ -25,7 +25,7 @@ network policy and optional model enhancement belong to the orchestration layer.
 | XLS, XLSX, XLSM, XLSB | anydoc document model | Native sheet content; XLS/XLSX/XLSM single-sheet names are recovered from package metadata; exact cell-format compatibility has not been established |
 | ODT, ODS, ODP, RTF | anydoc document model | Native structured documents through the same Markdown renderer |
 | EPUB | anydoc + OPF metadata | Spine content and the original title/authors/language/publisher/date/description/identifier preamble |
-| PDF | pdf-inspector + lopdf | Per-page text/layout extraction, page markers, partial-page recovery and bounded extraction of supported embedded images |
+| PDF | pdf-inspector + lopdf; optional macOS CoreGraphics/Vision | Per-page text/layout, partial recovery and embedded images; explicit local-file page OCR and screenshots through the shared media pipeline |
 
 The native Office renderer reads the document once and preserves referenced
 embedded bytes. Shared image preparation then applies configured filtering and
@@ -98,8 +98,8 @@ limits and the cost of the additional parsing pass.
 
 PDF inspection reports invisible rendering modes, transparent text, white text
 and very small text when they accompany text operators, including inside forms.
-This is a diagnostic contract: complete hidden-text removal, page screenshots,
-vector drawing rasterization, image-region text grouping and local OCR remain
+This is a diagnostic contract: complete hidden-text removal and
+image-region text grouping remain
 unimplemented. The pinned reader patch suppresses nonpainting Tr3/Tr7 text while
 preserving graphics state and cursor movement; other visibility and layout
 heuristics retain their documented limits in [PDF layout](pdf.md).
@@ -109,7 +109,10 @@ used by the readers above.
 
 ## Explicit remaining compatibility work
 
-Numbers, HEIF/AVIF decoding and PDF OCR remain unfinished. Local image OCR is
+Numbers and HEIF/AVIF decoding remain unfinished. Local PDF files support explicit
+page rendering, screenshots and OCR through the [PDF media pipeline](pdf-ocr.md),
+including its documented accuracy gap; URL PDF media remains unfinished.
+Local image OCR is
 available on macOS through [Vision](ocr.md). Standalone SVG
 rasterization is implemented with bounded native rendering; embedded SVG vision
 and additional image pathways remain separate work.

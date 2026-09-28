@@ -6,9 +6,11 @@ The Rust core does not start Python, Node, PyMuPDF or a rendering command. The
 initial renderer and OCR backends use macOS system frameworks; other platforms
 return an explicit error when the required backend is unavailable.
 
-This describes the round-seventeen implementation. Coordinated tests and real
-PDF acceptance are pending. The existing [image OCR evidence](validation/native-backends-round16.md)
-does not establish this PDF integration's fidelity.
+The [round-seventeen validation](validation/pdf-native-round17.md) records
+coordinated tests and real CLI/binding acceptance. Routing checks pass; exact
+transcription has the unresolved error below. Existing
+[image OCR evidence](validation/native-backends-round16.md) does not establish
+this PDF integration's general fidelity.
 
 ## Page and model routing
 

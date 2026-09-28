@@ -4,6 +4,10 @@ An implementation checkpoint is reproducible only when it records the command,
 source revision, test inputs, build profile, and platform. Passing new unit
 tests establishes specific contracts; it does not imply reference parity.
 
+Latest: [round seventeen](pdf-native-round17.md), native PDF media and rebuilt
+Python/Node/Go bindings. Workflow tests pass; exact scanned-text accuracy remains
+partial and is reported separately.
+
 ## Local checks
 
 Run `scripts/check.sh` for Rust formatting, workspace tests, lint, and audit
