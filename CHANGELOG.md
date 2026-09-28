@@ -36,6 +36,7 @@
 
 - PDF page-number cleanup preserves substantive Page N paragraphs; nonpainting text modes persist across text blocks and nested Forms without changing glyph positions.
 - VLM OCR opt-out selects local recognition and text-only enhancement without sending image bytes.
+- Screenshot-only history retains every capture tile without treating JPEG bytes as Markdown.
 
 - HTML code targets share membership and language indexes; documents without note references skip footnote indexing, and PDF inspection and table geometry reuse each page's decoded operations.
 - Markdown cleanup preserves fenced code bytes, including blank lines, trailing spaces and literal image/link examples.

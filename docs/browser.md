@@ -67,7 +67,9 @@ capture; closed roots and browser-internal content remain opaque.
 The core publishes JPEGs under `.markitai/screenshots` and returns every tile in
 the result. Identical captures reuse existing files; changed captures receive a
 versioned filename so older results keep their referenced bytes. Screenshot-only
-conversion without an LLM publishes captures without an empty Markdown file.
+CLI history retains all tiles as binary assets in its self-contained archive.
+Screenshot-only conversion without an LLM publishes captures without an empty
+Markdown file.
 For this CLI mode, an omitted output directory defaults to the configured output
 directory or current directory. The in-memory API requires an output directory
 unless the LLM produces Markdown: if enhancement fails and neither text nor

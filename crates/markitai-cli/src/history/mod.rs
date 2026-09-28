@@ -128,18 +128,31 @@ impl Plan {
                         ),
                     }
                 }
-                let ascend = if item.kind == ItemKind::File {
+                let mut ascend = if item.kind == ItemKind::File {
                     Path::new(&item.report_key)
                         .parent()
                         .map_or(0, |path| path.components().count())
                 } else {
                     0
                 };
+                if item.screenshots > 0
+                    && source
+                        .parent()
+                        .is_some_and(|parent| parent.ends_with(".markitai/screenshots"))
+                {
+                    // A visual-only output lives two levels below its asset root.
+                    // The root lookup still enforces the configured output boundary.
+                    ascend += 2;
+                }
                 if let Some(root) =
                     assets::find_root(source, ascend, &boundary, self.allow_symlinks)?
                 {
                     let documents = roots.entry(root.clone()).or_default();
-                    if let Some(name) = &copied {
+                    if let Some(name) = &copied
+                        && source
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                    {
                         let parent = crate::report_store::resolve_path(
                             source.parent().unwrap_or(Path::new(".")),
                         )?;
@@ -624,6 +637,51 @@ mod tests {
             job.file_name().unwrap().to_str().unwrap()
         );
         assert_eq!(meta["job_id"].as_str().unwrap().len(), 12);
+    }
+
+    #[test]
+    fn screenshot_only_history_preserves_all_tiles_as_binary_assets() {
+        for mode in [RunMode::SingleUrl, RunMode::UrlList] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let primary = root.join("output/.markitai/screenshots/page.full.jpg");
+            let secondary = root.join("output/.markitai/screenshots/page.full--1.jpg");
+            let first_bytes = b"\xff\xd8\x80first tile\xff\xd9";
+            let second_bytes = b"\xff\xd8\x90second tile\xff\xd9";
+            put(&primary, first_bytes);
+            put(&secondary, second_bytes);
+            put(
+                &root.join("output/.markitai/states/private.json"),
+                b"private",
+            );
+            let mut item = record(0, "https://example.test/page", Some(primary));
+            item.kind = ItemKind::Url;
+            item.screenshots = 2;
+            let job = plan(root, mode).publish(&[item]).unwrap().unwrap();
+            fs::remove_dir_all(root.join("output")).unwrap();
+            let meta = metadata(&job);
+            assert_eq!(meta["items"][0]["output"], "page.full.jpg");
+            assert_eq!(meta["items"][0]["output_name"], "page.full.jpg");
+            assert_eq!(meta["items"][0]["llm_enhanced"], false);
+            assert_eq!(
+                fs::read(job.join("out/page.full.jpg")).unwrap(),
+                first_bytes
+            );
+            for (filename, expected) in [
+                ("page.full.jpg", first_bytes.as_slice()),
+                ("page.full--1.jpg", second_bytes.as_slice()),
+            ] {
+                assert_eq!(
+                    fs::read(job.join("out/.markitai/screenshots").join(filename)).unwrap(),
+                    expected
+                );
+            }
+            assert!(!job.join("out/.markitai/states").exists());
+            assert_eq!(
+                meta["dir_size_bytes"],
+                (first_bytes.len() * 2 + second_bytes.len()) as u64
+            );
+        }
     }
 
     #[test]
