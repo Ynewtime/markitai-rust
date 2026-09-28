@@ -34,7 +34,9 @@ recall is diagnostic, never a substitute for the exact-content checks.
 - [MSG/HTML recovery](formats-recovery-r5.md): 17/24 exact passes; four differences and three expected image-only rejections.
 - [Final round-three format check](formats-recovery-r6.md): the same 24 case outcomes after the CSS visibility fix.
 - [Round-four format check](formats-recovery-r7.md): 17/24 exact passes; PPTX text recovered, image differences retained.
-- [Full HTML corpus](html-corpus.md): 27/209 exact local API passes, 182 differences and zero conversion errors.
+- [First round-five format check](formats-recovery-r8.md): historical 979d205 snapshot, unchanged 24 outcomes.
+- [Final round-five format check](formats-recovery-r9.md): 17/24 exact passes; all r8 outcomes retained.
+- [Full HTML corpus](html-corpus.md): 43/209 exact local API passes, 166 differences and zero conversion errors.
 
 Each record identifies a frozen artifact; later fixes do not retroactively change
 its measurements. Full JSON reports retain the complete fixture denominator.
@@ -76,5 +78,25 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   and explicit boundaries; source `5280fd3`.
 - [Artifact identities](artifacts-round4.json), [CLI samples](cli-round4.json)
   and [C-ABI samples](api-round4.json) are unchanged copies of the local records.
-- Persistent document caching is tested with local request counters. Fetch
-  caching remains a [planned implementation](../decisions/0003-persistent-fetch-cache.md).
+- Persistent document caching is tested with local request counters. At this
+  historical checkpoint, page caching was still planned.
+
+## Round-five evidence
+
+- [Source, artifacts and performance](performance-round5.md): 240 Rust executions,
+  installed bindings, synthetic CLI/C-ABI measurements and explicit limitations;
+  frozen source `0022e09`.
+- [Artifact identities](artifacts-round5-final.json),
+  [CLI samples](cli-round5-final.json) and [C-ABI samples](api-round5-final.json)
+  are unchanged copies of the original records.
+- [Static-page fetching](../fetch.md) documents conditional requests, TTL,
+  bypass-refresh behavior and admission boundaries. Cache request avoidance is
+  established with loopback counters, not a provider latency/cost benchmark.
+- [Independent HTML review](html-review-round5-final.json) passes 11 cases;
+  [full-corpus evidence](html-corpus.md) retains the shared-reference whitespace
+  defect as an intentional exact-output difference after the native fix.
+- The [first round-five checkpoint](round5-first.md), artifacts and measurements
+  remain historical evidence. Its extra parity pass was not evidence of better
+  extraction quality; later review found and corrected two structural defects.
+- The [performance plan](../performance-plan.md) covers profile selection,
+  complete binding costs, retained binary code/data and sustained memory checks.

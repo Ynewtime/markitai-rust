@@ -195,6 +195,13 @@ Those differences must be measured rather than inferred from successful parsing.
 
 ## Corpus diagnostic
 
+The [latest full corpus audit](validation/html-corpus.md) records r5: 43/209
+strict local-file API matches, 166 output differences and no conversion errors.
+Fourteen of 28 footnote fixtures match exactly. All r3 strict passes remain;
+the single lost r4 match preserves source whitespace that the reference local
+API drops. The audit also verifies repaired continuation ownership in the
+Dhammatalks fixture. Successful conversion does not establish full compatibility.
+
 The reference checkout contains 209 HTML files paired with 209 upstream expected
 Markdown files under `packages/markitai/tests/defuddle_fixtures`. Its quality test
 suite checks nonempty text, title presence, site-chrome phrases and word-count
@@ -206,7 +213,7 @@ Run the new diagnostic from the Rust repository after a coordinator release buil
 python3 scripts/audit_html.py \
   --reference /Users/example-user/work/markitai \
   --library target/release/libmarkitai_ffi.dylib \
-  --output .local/audits/html-corpus-20260928-r1 \
+  --output .local/audits/html-corpus-20260928-r5 \
   --jobs 4
 ```
 

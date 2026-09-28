@@ -151,11 +151,11 @@ layout and PDF image placement require further compatibility work.
 
 ## Reference audit and acceptance corpus
 
-The [frozen r8 format audit](validation/formats-recovery-r8.md) records 17 strict
-passes out of 24 fixtures, with four output drifts and three expected image-only
-rejections. All 24 records are unchanged from r7. Metadata matches for all 21
-successful conversions, while PDF and PPTX assets still differ. These results
-do not establish full parity across every supported format.
+The [frozen r9 format audit](validation/formats-recovery-r9.md) of `0022e09`
+records 17 strict passes out of 24 fixtures, with four output drifts and three
+expected image-only rejections. All 24 records and input hashes are unchanged
+from r8. Metadata matches for all 21 successful conversions and assets for
+19/21; PDF and PPTX assets still differ. Complete format parity remains open.
 
 The reference implementation was inspected read-only at
 `/Users/example-user/work/markitai`. At the audit it contained 209 Python source modules
