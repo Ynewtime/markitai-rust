@@ -1,0 +1,18 @@
+[package]
+name = "markitai-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "markitai_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+markitai-core.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

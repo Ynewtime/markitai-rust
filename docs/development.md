@@ -2,8 +2,10 @@
 
 Start at `docs/CONTROL.md`; inspect `git status --short --branch` before work.
 Use Rust stable, Node 24+, Go 1.22+, and Python 3.11+ for adapter testing.
+The manifest floor is Rust 1.89 due to resolved dependencies; this checkpoint
+was verified with Rust 1.98.1, not with the minimum compiler.
 
-Planned standard checks:
+Standard checks (`scripts/check.sh` runs them with isolated state):
 
 ```sh
 cargo fmt --all --check

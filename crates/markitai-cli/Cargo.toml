@@ -1,0 +1,27 @@
+[package]
+name = "markitai-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "markitai"
+path = "src/main.rs"
+
+[[bin]]
+name = "mkai"
+path = "src/mkai.rs"
+
+[dependencies]
+markitai-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+walkdir = "2"
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile.workspace = true

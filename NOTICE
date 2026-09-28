@@ -1,0 +1,17 @@
+Markitai Rust
+Copyright (c) 2026 Ynewtime
+
+This repository contains a new Rust implementation of Markitai's public
+conversion interfaces. Project source is licensed under MIT; see LICENSE.
+The standard license text and original project attribution are retained.
+
+Document parsers and runtime dependencies are resolved in Cargo.lock. The
+initial implementation uses anydoc, pdf-inspector, scraper/html5ever, htmd,
+mail-parser, reqwest/rustls, and other Rust crates under their respective
+licenses. It does not bundle or invoke the reference Python PDF engine.
+
+Before distributing a release, generate the resolved dependency inventory
+and include each dependency's applicable license/copyright notices. A crate's
+metadata license identifier alone is not the complete notice bundle.
+Reference test fixtures remain in the reference checkout; audit reports record
+fixture hashes and never redistribute them as newly authored fixtures.

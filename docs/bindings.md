@@ -1,0 +1,225 @@
+# Native language bindings
+
+All bindings execute the Rust core in the host process. They share a UTF-8 JSON
+request and response contract. Neither an installed CLI nor a Python worker is
+used for conversion. Feature availability is therefore the same as the core;
+an installed binding does not add missing format, OCR, or browser capabilities.
+
+## Shared contract
+
+```json
+{"source":"report.md","options":{"llm":false,"config":{}}}
+```
+
+`source` is a local path or HTTP(S) URL. Options are `output_dir`, `config`,
+`llm`, `ocr`, `screenshot`, `alt`, `desc`, and `profile`. Omitted booleans inherit
+configuration; `false` explicitly disables the feature. An explicit empty
+`config` uses built-in defaults and bypasses configuration files. An omitted
+configuration follows the core's configuration loading rules.
+
+Success is `{"ok":true,"result":{...}}`; failure is
+`{"ok":false,"error":{"code":"...","message":"..."}}`. The typed adapters
+unwrap this envelope into a result or host-language error. Result fields are
+`source`, `markdown`, `llm_markdown`, `frontmatter`, `output_path`,
+`llm_output_path`, `assets`, `screenshots`, `images`, `usage`, `skip_reason`,
+`duration`, and `warnings`. Durations are seconds. In-memory conversions have
+null output paths and empty asset/screenshot path lists.
+
+JSON serialization adds copies at the boundary. Benchmark total host-call time
+separately from native extraction when evaluating this cost. The protocol is
+deliberately shared so compatibility can be checked across every host before
+introducing format-specific zero-copy interfaces.
+
+## Python
+
+Python 3.10+ loads the PyO3 extension `markitai._native`. Its ABI3 build can be
+packaged for multiple supported CPython versions on the same OS/architecture.
+The extension releases the GIL during conversion. `aconvert` dispatches to
+Python's thread pool; cancellation stops waiting, but an already running
+conversion can finish and write its requested output.
+
+```python
+import asyncio
+from pathlib import Path
+import markitai
+
+out = markitai.convert(Path("report.md"), config={}, llm=False)
+print(out.markdown)
+
+async def main():
+    out = await markitai.aconvert("report.md", output_dir="out", config={})
+    assert isinstance(out.output_path, Path)
+
+asyncio.run(main())
+```
+
+`convert` and `aconvert` retain the existing keyword arguments. Results remain
+dataclasses, and filesystem result fields are `pathlib.Path`. Calling
+`convert` from a running event loop raises `RuntimeError` as in the reference.
+`enable_worker_processes` remains an importable compatibility hook; Rust does
+not require Python worker processes.
+
+`MarkitaiConfig` supports mutable section attributes, keyword construction,
+`model_dump(mode="json")`, `model_dump_json`, `model_copy`, `model_validate`,
+and `model_validate_json`. Defaults and basic validation come from Rust:
+
+```python
+cfg = markitai.MarkitaiConfig(output={"on_conflict": "overwrite"})
+cfg.llm.enabled = False
+out = markitai.convert("report.md", config=cfg)
+```
+
+This class is not a Pydantic `BaseModel`. Pydantic validators, schemas, the full
+`model_dump` option set, and all old nested config classes are not yet
+implemented. JSON dictionaries and external objects exposing
+`model_dump(mode="json")` also work. The wrapper never mutates supplied config.
+Native `fetch_error` maps to `FetchError`; input/configuration errors map to
+`ValueError`; conversion/unsupported errors map to `ConversionError` with a
+`code` attribute. Specific filesystem and missing-model codes map to the
+existing named exception types when supplied by the core.
+
+Build from the repository root in a private environment:
+
+```sh
+python3 -m venv .local/python-env
+.local/python-env/bin/python -m pip install 'maturin>=1.9,<2'
+source .local/python-env/bin/activate
+cd bindings/python
+maturin develop --release
+MARKITAI_HOME=../../.local/test-home python -m unittest discover -s tests -v
+maturin build --release --out ../../dist/python
+```
+
+The wheel contains the extension and small typed Python wrapper. Building
+requires Rust and a compatible Python interpreter; using a built wheel does
+not require Rust. Wheel release automation and additional OS/architecture
+validation remain release work.
+
+## Node.js
+
+The addon targets Node-API 8 and Node.js 18+. `convert` uses a native async
+worker, leaving the JavaScript event loop available. `convertSync` blocks the
+calling thread. Concurrency uses the host's libuv worker pool; hosts may set
+`UV_THREADPOOL_SIZE` before startup after measuring their workload.
+
+```javascript
+const { convert, convertSync, ConversionError } = require('./bindings/node');
+
+const out = await convert('report.md', { config: {}, llm: false });
+console.log(out.markdown);
+const sync = convertSync('report.md', { config: {}, llm: false });
+```
+
+Both functions expose the same snake_case result and option fields as the
+shared protocol. Native conversion failures reject/throw `ConversionError`
+with a stable `code`. TypeScript declarations ship with the package.
+
+```sh
+npm --prefix bindings/node run build
+MARKITAI_HOME="$PWD/.local/test-home" npm --prefix bindings/node test
+cd bindings/node
+npm pack
+```
+
+`MARKITAI_BUILD_PROFILE=debug` or `dist` selects another Cargo profile. The
+build script copies the compiled dynamic library to `markitai.node`; it is a
+build-time tool, never a runtime fallback. A packed package contains a native
+addon for the build machine's OS and architecture. Publish platform-specific
+artifacts before promising a universal npm install. Node-API compatibility
+does not remove operating-system or architecture requirements.
+
+## Go and C ABI
+
+The Go package uses cgo and the C header in `bindings/c/markitai.h`. Build the
+native library before compiling Go:
+
+```sh
+cargo build --release -p markitai-ffi
+cd bindings/go
+MARKITAI_HOME="$PWD/../../.local/test-home" go test -race ./...
+```
+
+The development module name is `markitai.local/go`; use a local `replace`
+directive while the release repository/module path is being decided. The
+default cgo linker searches `target/release` and embeds its path as an rpath on
+macOS/Linux. Deployment must package `libmarkitai_ffi` and configure the loader
+path for the destination. `CGO_LDFLAGS` can supply additional library paths;
+`DYLD_LIBRARY_PATH` on macOS or `LD_LIBRARY_PATH` on Linux can select a test
+build. A portable static-link recipe and Windows cgo distribution are not yet
+validated. Go consumers need cgo enabled and a C linker at build time.
+
+```go
+out, err := markitai.Convert("report.md", &markitai.Options{
+    Config: map[string]any{},
+    LLM: markitai.Bool(false),
+})
+if err != nil { return err }
+fmt.Println(out.Markdown)
+```
+
+Go result optional text/path fields are pointers so null and empty string stay
+distinct. `ConvertJSON` returns a raw envelope for callers that need the
+language-neutral protocol. Go calls can run concurrently. Cancellation is not
+currently propagated into native work.
+
+The C ABI is version 1:
+
+1. Call `markitai_convert_json(request, len)` with valid readable bytes that
+   remain alive through the call. The input is borrowed, never freed by Rust.
+   Requests larger than 64 MiB, malformed JSON, or invalid UTF-8 receive error
+   envelopes. Null with zero length is accepted as an empty, invalid request.
+2. The returned `MarkitaiBuffer` owns exactly `len` UTF-8 bytes; there is no NUL
+   terminator. Copy or consume them before releasing the buffer.
+3. Pass the address of that same buffer to `markitai_buffer_free`. It clears
+   its pointer and length, making a repeated free on that struct harmless.
+   Never copy the ownership handle, change its fields, free it with C `free`,
+   or retain a data pointer after release.
+
+Go passes only byte storage, which contains no Go pointers, during the cgo
+call. Rust never retains it. Go copies the response into Go-managed memory
+and defers native freeing on every return path. Native panics during
+conversion are caught at each language boundary. Invalid foreign pointers,
+double frees of copied handles, allocation failure, and builds configured to
+abort on panic remain outside this recoverable contract.
+
+## Verification and maintenance
+
+`cargo test -p markitai-ffi` exercises null pointers and oversized lengths,
+invalid UTF-8, repeated Unicode conversions, and explicit release. Python,
+Node, and Go integration suites load compiled native artifacts and cover
+Unicode, concurrent repeated calls, output files, and structured failures.
+Local HTTP-server tests also verify that Python's GIL and Node's event loop
+remain available while native work runs.
+Conversion tests pass explicit empty config (or a test-owned config object)
+and disable LLM. The missing-model exception test enables LLM only inside an
+empty test environment and directory. No test reads user configuration or
+sends model requests.
+No mock native extension is used. Run each suite against newly rebuilt
+artifacts after core or ABI changes.
+
+Implementation references: [PyO3 function and module interface](https://pyo3.rs/v0.27.2/module.html),
+[PyO3 GIL release](https://pyo3.rs/v0.27.2/parallelism.html), and
+[NAPI-RS native async tasks](https://napi.rs/docs/concepts/async-task).
+
+## Verified checkpoint: 2026-09-28
+
+Platform: macOS arm64. Toolchain: Rust 1.98.1, Python 3.13.15, maturin 1.15.0,
+Node.js 24.21.0, Go 1.27.1. Native libraries use the Cargo `release` profile;
+the Python wheel additionally targets macOS 11.0 through maturin.
+
+| Adapter | Verification | Result |
+|---|---|---|
+| Python | Build wheel, install into `.local/bindings-venv`, run `unittest discover -s bindings/python/tests -v` from repository root | 8 passed against the installed wheel |
+| Node | `node --test bindings/node/test.cjs` using the rebuilt addon | 3 passed |
+| Node package | `npm pack`, local archive install under `.local/node-installed`, Unicode conversion | Passed from installed package |
+| Go | `go test -race -count=1 ./...` in `bindings/go` | Passed |
+| C library | `otool -L target/release/libmarkitai_ffi.dylib` | Relocatable `@rpath/libmarkitai_ffi.dylib`; only macOS system-library dependencies |
+
+The test wheel is
+`.local/bindings-wheels/markitai-1.3.0.dev0-cp310-abi3-macosx_11_0_arm64.whl`:
+6,575,897 compressed bytes and 13,433,091 unpacked bytes, including maturin's
+SBOM. The test npm archive is
+`.local/bindings-packages/markitai-1.3.0-dev.0.tgz`: 6,493,005 compressed bytes
+and 13,064,120 unpacked bytes. These are local development artifacts, not
+published releases or cross-platform size guarantees. Artifacts and test
+environments stay ignored; source and reproducible build commands are tracked.

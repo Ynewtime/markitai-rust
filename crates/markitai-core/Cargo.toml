@@ -1,0 +1,29 @@
+[package]
+name = "markitai-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip", "brotli"] }
+url = "2"
+sha2 = "0.10"
+serde_yaml = "0.9"
+dotenvy = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+regex = "1"
+anydoc = "0.2.4"
+encoding_rs = "0.8"
+csv = "1"
+scraper = "0.27"
+htmd = "0.5"
+quick-xml = "0.41"
+mail-parser = "0.11"
+
+[dev-dependencies]
+tempfile.workspace = true
