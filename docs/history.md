@@ -74,6 +74,8 @@ Assets with the same destination and bytes are shared. Different contents get
 `-2`, `-3` before the final extension. Unicode case aliases are reserved across
 directories and files. Hashes narrow duplicate candidates; exact byte comparison
 proves reuse. Each document uses only its own asset root's relocation map.
+Identical contents can also reuse a previously renamed conflicting variant;
+this avoids an extra copy that the reference writer can create.
 
 Reference rewriting shares the native Markdown parser and looks up each original
 destination once. It supports links, definitions, wikilinks, HTML `img[src]` /
@@ -118,5 +120,8 @@ automatically pruned. This is cooperative local-process protection, not a defens
 against a privileged actor replacing ancestors during system calls.
 
 Current source tests exercise the native recorder and isolated real CLI processes.
-Cross-platform execution, a complete paired reference-history audit and consuming
-these archives through the future native server remain separate acceptance work.
+The [round-ten release audit](validation/history-round10.md) passes five authored
+archive contract pairs, four strictly after declared identity/time normalization.
+The failed-notebook pair retains its existing parser diagnostic difference.
+Broader paired coverage, cross-platform execution and consuming these archives
+through the future native server remain separate acceptance work.

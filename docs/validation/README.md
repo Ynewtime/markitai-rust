@@ -148,3 +148,18 @@ files. This isolates the exercised configuration paths; it is not an OS sandbox.
   [reports](recovery-round9-reports.json), [release recovery](recovery-round9-release.json)
   and [packages](recovery-round9-packages.json) retain unmodified records. See the
   narrative for Unix scope, signal limits, artifact size and remaining boundaries.
+
+## Round-ten optional history export
+
+- [History validation](history-round10.md): 590 Rust executions /447 distinct,
+  26 harness tests and 14 Unix history process cases. Clean `1686ed4` release
+  passes 5/5 authored archive contract pairs (4/5 strict; one pinned parser-error
+  wording difference), all 266 assertions and four ordinary report pairs.
+  Rebuilt installed Python/Node packages and Go race checks pass; all 18 prior
+  archives remain unchanged. The CLI is 17.75 MiB, +0.90% from round nine.
+- [Build](history-round10-build.json), [gate](history-round10-gate.json),
+  [history pairs](history-round10-release.json), [report pairs](history-round10-reports.json),
+  [packages](history-round10-packages.json) and [final identity check](history-round10-final-check.json)
+  preserve exact records. [Executed drivers](drivers/round10/README.md) retain the
+  historical commands and private-state protections. Remaining asset syntax,
+  consumer, fault-matrix and platform acceptance is explicit in the narrative.
