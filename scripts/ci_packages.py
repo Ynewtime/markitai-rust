@@ -75,6 +75,22 @@ def verify_node_licenses(package, licenses):
                 raise RuntimeError(f"Node package {name} differs from the source")
 
 
+def stage_node_licenses(directory, licenses):
+    """Preserve original evidence names despite npm's nested *.orig default."""
+    overrides = {}
+    for name, content in licenses.items():
+        target = directory / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        if target.suffix == ".orig":
+            overrides.setdefault(target.parent, []).append("!" + target.name)
+    for parent, entries in overrides.items():
+        (parent / ".npmignore").write_text("\n".join(sorted(entries)) + "\n", encoding="utf-8")
+    # npm propagates default exclusions through explicit nested file entries.
+    # Listing their private staging directories lets the leaf override apply.
+    return sorted(parent.relative_to(directory).as_posix() for parent in overrides)
+
+
 def supplement_wheel_licenses(source, destination, licenses):
     """Keep the original wheel and record a separate, explicitly supplemented wheel.
 
@@ -261,15 +277,12 @@ def main():
         node_source.mkdir()
         for name in ["index.cjs", "index.d.ts", "package.json"]:
             shutil.copy2(root / "bindings/node" / name, node_source / name)
-        for name, content in licenses.items():
-            target = node_source / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
+        evidence_directories = stage_node_licenses(node_source, licenses)
         package_json = node_source / "package.json"
         package = json.loads(package_json.read_text(encoding="utf-8"))
-        package["files"] = list(dict.fromkeys([*package.get("files", []), *licenses]))
+        package["files"] = list(dict.fromkeys([*package.get("files", []), *licenses, *evidence_directories]))
         package_json.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
-        record["node_staging"] = {"operation": "include_project_and_pricing_attribution_in_files", "package_json": identity(package_json)}
+        record["node_staging"] = {"operation": "include_attribution_and_preserve_nested_orig_evidence", "package_json": identity(package_json)}
         shutil.copy2(release / libraries[1], node_source / "markitai.node")
         npm = shutil.which("npm")
         if not npm:

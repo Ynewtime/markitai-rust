@@ -1,16 +1,19 @@
-"""Counterexamples for package validation; no compiler, npm or installation."""
+"""Counterexamples for package validation; one offline npm pack, no installation."""
 import base64
 import csv
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
 import zipfile
 
-from ci_packages import (npm_command, source_snapshot, supplement_wheel_licenses,
+from ci_packages import (npm_command, source_snapshot, stage_node_licenses, supplement_wheel_licenses,
                          verify_node_licenses)
 
 
@@ -78,6 +81,26 @@ class PackageValidationTests(unittest.TestCase):
             else:
                 with self.assertRaises(RuntimeError):
                     verify_node_licenses(package, {"NOTICE": b"notice"})
+
+    @unittest.skipUnless(shutil.which("npm"), "npm required for actual archive regression")
+    def test_npm_preserves_nested_original_manifest_and_hidden_provenance(self):
+        licenses = {
+            "NOTICE": b"fixture notice\n",
+            "licenses/upstream/local-evidence/example/Cargo.toml.orig": b"original bytes\n",
+            "licenses/upstream/local-evidence/example/.cargo_vcs_info.json": b'{}\n',
+        }
+        directories = stage_node_licenses(self.root, licenses)
+        (self.root / "package.json").write_text(json.dumps({
+            "name": "markitai-attribution-fixture", "version": "1.0.0", "files": [*licenses, *directories]
+        }), encoding="utf-8")
+        result = subprocess.run([*npm_command(shutil.which("npm"), shutil.which("node")),
+                                 "pack", "--json", "--ignore-scripts", "--offline"],
+                                cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        package = self.root / json.loads(result.stdout)[0]["filename"]
+        verify_node_licenses(package, licenses)
+        with tarfile.open(package) as archive:
+            self.assertFalse(any(name.endswith(".npmignore") for name in archive.getnames()))
 
     def test_supplemented_wheel_retains_native_bytes_and_has_verifiable_record(self):
         source = self.root / "raw.whl"
