@@ -370,3 +370,12 @@ The final wheel and npm archive are preserved in
 record the exact source and hashes. The earlier round-three packages remain
 available in their own ignored directories; subsequent builds do not replace
 this evidence. Cross-platform release validation remains unfinished.
+
+R28 actual macOS arm64 static-package validation is recorded in
+[its evidence page](validation/routing-domains-static-round28.md). The isolated
+packaging environment explicitly sets the selected macOS SDK for absolute Apple
+clang; this avoids missing system headers in cgo. Seven installed race tests and
+a relocated 24-call consumer pass. The mechanical notice inventory retains 15
+missing-text entries; this is not a completed release review. The current sample
+consumer retains Go debug information, so its measured size is not a minimal
+Go delivery size.
