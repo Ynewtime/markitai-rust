@@ -155,7 +155,9 @@ fn timeout_kills_child_group_and_output_growth_stops_export() {
         &output,
         &profile,
         "pdf",
-        Instant::now() + Duration::from_millis(500),
+        // Parallel framework tests can delay process startup; allow the mock
+        // to publish its child PID before exercising the actual kill deadline.
+        Instant::now() + Duration::from_secs(2),
         MAX_BYTES,
     )
     .err()

@@ -216,6 +216,8 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
                     .to_string_lossy()
                     .into_owned()
             };
+            let browser_runtime =
+                markitai_core::BrowserRuntime::new(1).map_err(ApiError::internal)?;
             let explicit = work.explicit.as_deref();
             let converted = match markitai_core::convert_with_context_detailed(
                 &source,
@@ -227,6 +229,7 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
                 markitai_core::ConvertContext {
                     explicit_fetch_strategy: explicit,
                     llm_runtime: Some(&work.runtime),
+                    browser_runtime: Some(&browser_runtime),
                 },
             ) {
                 Ok(result) => {

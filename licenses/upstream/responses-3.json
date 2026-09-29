@@ -1,0 +1,112 @@
+[
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/dispatch2",
+    "path": "directories/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a-crates-dispatch2.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:23.436339+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/dispatch2",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 245363,
+    "sha256": "27c4365169367f651a34a647ea9ef702742410079cae3c29c4954427db5052b4"
+  },
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/objc2",
+    "path": "directories/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a-crates-objc2.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:23.436801+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/objc2",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 249243,
+    "sha256": "e33a0f3d40f5b74a0bce748e04a93f6bb274c0f12eeff8617dbcff190de826dd"
+  },
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-foundation",
+    "path": "directories/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b-framework-crates-objc2-core-foundation.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:23.440651+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-foundation",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 259879,
+    "sha256": "593f6fa5fe504a9c5636bfed69dbd02a590da77a553d81458d352b41c9177009"
+  },
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-graphics",
+    "path": "directories/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b-framework-crates-objc2-core-graphics.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:23.442641+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-graphics",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 259250,
+    "sha256": "944e14e47d81f31bedb963046c8767868c5019f7530bfbeed9801277fcafd5d2"
+  },
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/8d214f5477365ffcbcbb7de058c86ed9a518efb7/crates/objc2-encode",
+    "path": "directories/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7-crates-objc2-encode.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:24.378549+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/8d214f5477365ffcbcbb7de058c86ed9a518efb7/crates/objc2-encode",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 237533,
+    "sha256": "05dfb8700e64666e70100ed04cff8b9c12f32b89492cf9af02667f195cf92680"
+  },
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation",
+    "path": "directories/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b-framework-crates-objc2-foundation.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:24.522039+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 261602,
+    "sha256": "09404fa401abdb484d8c1347ef03caa28c375172862bbbde755ac12f0a094e40"
+  },
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-image-io",
+    "path": "directories/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b-framework-crates-objc2-image-io.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:24.560897+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-image-io",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 256578,
+    "sha256": "2559c64c8bfa38a5f247c0908559aca7927004d36c13166173e7de70d89836d1"
+  },
+  {
+    "url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-vision",
+    "path": "directories/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b-framework-crates-objc2-vision.html",
+    "purpose": "Check package directory for license texts omitted from published crate",
+    "retrieved_at": "2026-09-29T07:19:24.668017+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/tree/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-vision",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 259188,
+    "sha256": "6742b91c285b2443d505de7c82dcc266071d6daf479778da5c031f93d417f960"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+    "path": "upstream/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+    "purpose": "Exact LICENSE.md path verified in same commit root directory; packaged README LICENSE.txt link stale",
+    "retrieved_at": "2026-09-29T07:19:25.330989+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 1339,
+    "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+    "path": "upstream/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+    "purpose": "Actual per-source copyright and MPL notice at package exact commit",
+    "retrieved_at": "2026-09-29T07:19:25.478679+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 643,
+    "sha256": "d54c6e13e9e952dac17d209171df8657e3cae93beaddace4906150cdec8d02e9"
+  }
+]

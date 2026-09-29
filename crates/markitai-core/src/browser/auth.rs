@@ -14,6 +14,16 @@ pub(super) struct Credentials {
     password: String,
 }
 
+impl Credentials {
+    pub(super) fn identity(&self) -> (String, &str, &str) {
+        (
+            self.origin.ascii_serialization(),
+            &self.username,
+            &self.password,
+        )
+    }
+}
+
 fn invalid() -> Error {
     Error::Config("Browser http_credentials require bounded username/password strings, an optional HTTP(S) origin, and send=unauthorized or always".into())
 }

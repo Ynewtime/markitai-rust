@@ -1156,15 +1156,11 @@ fn run_mode(
     stop: Option<&std::sync::atomic::AtomicBool>,
     structured: Option<structured::Wire>,
 ) -> std::result::Result<(String, ConversionUsage), VisionFailure> {
-    let strategy = cfg
-        .pointer("/llm/router_settings/routing_strategy")
-        .and_then(Value::as_str)
-        .unwrap_or("simple-shuffle");
-    if !matches!(strategy, "simple-shuffle" | "least-busy") {
-        return Err(Error::Unsupported(format!(
-            "LLM routing strategy '{strategy}' requires persistent routing metrics and is not implemented"
-        )).into());
-    }
+    let strategy = routing::Strategy::parse(
+        cfg.pointer("/llm/router_settings/routing_strategy")
+            .and_then(Value::as_str)
+            .unwrap_or("simple-shuffle"),
+    )?;
     let entries = deployments(cfg, env)?;
     let groups = fallback_groups(cfg, &entries)?;
     let timeout = cfg
@@ -1193,7 +1189,7 @@ fn run_mode(
             &local_runtime
         }
     };
-    let routing_keys: Vec<_> = if strategy == "least-busy" {
+    let routing_keys: Vec<_> = if strategy.adaptive() {
         entries
             .iter()
             .map(|entry| runtime.routing().key(entry))
@@ -1225,6 +1221,16 @@ fn run_mode(
         if candidates.is_empty() {
             continue;
         }
+        let metric_group = if strategy.adaptive() {
+            runtime.routing().group_key(
+                strategy,
+                prompts.image.is_some(),
+                &routing_keys,
+                &candidates,
+            )
+        } else {
+            None
+        };
         let mut failed = HashSet::new();
         for attempt in 0..=retries {
             if budget > 0 && attempts >= budget || document_exhausted() {
@@ -1258,15 +1264,31 @@ fn run_mode(
                 // Selection happens after queueing and budget admission. In
                 // least-busy mode reservation and selection share one lock;
                 // queued callers cannot reserve a stale deployment choice.
-                let (selected, _routing) = if strategy == "least-busy" {
-                    let (index, lease) = runtime.routing().reserve(&routing_keys, eligible);
+                let (selected, route) = if strategy.adaptive() {
+                    let (index, lease) = runtime.routing().select(
+                        strategy,
+                        metric_group,
+                        &routing_keys,
+                        eligible,
+                        random_ticket(),
+                    );
                     (index, Some(lease))
                 } else {
                     (weighted_index(&entries, eligible, random_ticket()), None)
                 };
                 attempts = attempts.saturating_add(1);
-                let response =
-                    request_with_mode(&client, &entries[selected], prompts, &mut usage, structured);
+                let mut observation = routing::Observation::default();
+                let response = request_with_mode(
+                    &client,
+                    &entries[selected],
+                    prompts,
+                    &mut usage,
+                    structured,
+                    strategy.measured().then_some(&mut observation),
+                );
+                if let Some(route) = &route {
+                    route.observe(observation);
+                }
                 if let Err(failure) = &response {
                     let future = entries.iter().any(|entry| {
                         groups[group_index + 1..].contains(&entry.group)
@@ -1384,6 +1406,7 @@ fn request_with_mode(
     prompts: &Prompts,
     usage: &mut ConversionUsage,
     structured: Option<structured::Wire>,
+    mut observation: Option<&mut routing::Observation>,
 ) -> std::result::Result<String, Failure> {
     let mut request = client.post(&entry.endpoint);
     if let Some(key) = &entry.key {
@@ -1396,13 +1419,18 @@ fn request_with_mode(
     if entry.protocol == Protocol::Anthropic {
         request = request.header("anthropic-version", "2023-06-01");
     }
-    let response = request
-        .json(&structured.map_or_else(
-            || payload(entry, prompts),
-            |wire| wire.payload(entry, prompts),
-        ))
-        .send()
-        .map_err(|error| Failure {
+    let request = request.json(&structured.map_or_else(
+        || payload(entry, prompts),
+        |wire| wire.payload(entry, prompts),
+    ));
+    let started = observation.as_ref().map(|_| std::time::Instant::now());
+    let response = request.send().map_err(|error| {
+        if error.is_timeout()
+            && let Some(observation) = observation.as_deref_mut()
+        {
+            *observation = routing::Observation::Timeout;
+        }
+        Failure {
             kind: FailureKind::Transport,
             error: Error::Conversion(
                 if error.is_timeout() {
@@ -1416,7 +1444,8 @@ fn request_with_mode(
             fatal: false,
             document_fatal: false,
             retry_after: None,
-        })?;
+        }
+    })?;
     let status = response.status().as_u16();
     let retry_after = response
         .headers()
@@ -1438,15 +1467,29 @@ fn request_with_mode(
     response
         .take(limit + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| Failure {
-            kind: FailureKind::Transport,
-            error: Error::Conversion("Cannot read LLM response".into()),
-            retryable: true,
-            fatal: false,
-            document_fatal: false,
-            retry_after: None,
+        .map_err(|error| {
+            if metric_read_timeout(&error)
+                && let Some(observation) = observation.as_deref_mut()
+            {
+                *observation = routing::Observation::Timeout;
+            }
+            Failure {
+                kind: FailureKind::Transport,
+                error: Error::Conversion("Cannot read LLM response".into()),
+                retryable: true,
+                fatal: false,
+                document_fatal: false,
+                retry_after: None,
+            }
         })?;
     if status >= 300 {
+        // The reference provider adapters classify an explicit HTTP 408 as a
+        // timeout, independently of whether it also reports paid usage.
+        if status == 408
+            && let Some(observation) = observation.as_deref_mut()
+        {
+            *observation = routing::Observation::Timeout;
+        }
         // Some providers return usage alongside an unsuccessful response. Keep
         // those paid tokens even when the retry/error policy rejects its body.
         if let Ok(data) = serde_json::from_slice::<Value>(&bytes)
@@ -1502,6 +1545,20 @@ fn request_with_mode(
     let data: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Failure::terminal("LLM response is not valid JSON"))?;
     record_usage(usage, entry, &data);
+    let envelope = match entry.protocol {
+        Protocol::Anthropic => data.get("content").is_some_and(Value::is_array),
+        _ => data
+            .pointer("/choices/0/message")
+            .is_some_and(Value::is_object),
+    };
+    if envelope && let Some(observation) = observation {
+        let (total_tokens, output_tokens) = metric_tokens(entry, &data);
+        *observation = routing::Observation::Success {
+            elapsed: started.map_or(Duration::ZERO, |start| start.elapsed()),
+            total_tokens,
+            output_tokens,
+        };
+    }
     if let Some(wire) = structured {
         return wire.decode(entry.protocol, &data);
     }
@@ -1548,6 +1605,59 @@ fn request_with_mode(
             document_fatal: false,
             retry_after: None,
         })
+}
+
+fn metric_read_timeout(error: &std::io::Error) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = current {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if io.kind() == std::io::ErrorKind::TimedOut {
+                return true;
+            }
+            // io::Error::source skips its wrapped error. reqwest's blocking
+            // body reader wraps a timeout in an Other-kind io::Error, so inspect
+            // that wrapper before continuing through its source chain.
+            if let Some(inner) = io.get_ref() {
+                current = Some(inner);
+                continue;
+            }
+        }
+        if error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
+// Unknown usage stays unknown for routing. Paid-output accounting retains its
+// established shape and is performed independently, including HTTP errors.
+fn metric_tokens(entry: &Deployment, data: &Value) -> (Option<u64>, Option<u64>) {
+    let output = data
+        .pointer("/usage/completion_tokens")
+        .or_else(|| data.pointer("/usage/output_tokens"))
+        .and_then(Value::as_u64);
+    let mut input = data
+        .pointer("/usage/prompt_tokens")
+        .or_else(|| data.pointer("/usage/input_tokens"))
+        .and_then(Value::as_u64);
+    if entry.protocol == Protocol::Anthropic && data.pointer("/usage/prompt_tokens").is_none() {
+        for name in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
+            if let Some(value) = data.get("usage").and_then(|usage| usage.get(name)) {
+                input = input
+                    .zip(value.as_u64())
+                    .and_then(|(a, b)| a.checked_add(b));
+            }
+        }
+    }
+    let total = data
+        .pointer("/usage/total_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| input.zip(output).and_then(|(a, b)| a.checked_add(b)));
+    (total, output)
 }
 
 fn record_usage(usage: &mut ConversionUsage, entry: &Deployment, data: &Value) {
@@ -2574,7 +2684,7 @@ mod tests {
             request["messages"][1]["content"][1]["image_url"]["url"],
             "data:image/jpeg;base64,aW1hZ2U="
         );
-        cfg["llm"]["router_settings"]["routing_strategy"] = json!("usage-based-routing");
+        cfg["llm"]["router_settings"]["routing_strategy"] = json!("not-a-native-strategy");
         assert!(matches!(
             run(&plain(), &cfg, &HashMap::new(), &mut |_| {}),
             Err(Error::Unsupported(_))
@@ -2649,5 +2759,43 @@ mod tests {
             matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock)
         );
         assert_eq!(context.usage().requests, 0);
+    }
+
+    #[test]
+    fn metric_usage_keeps_unknown_and_known_zero_separate_without_rewriting_paid_totals() {
+        let entry = deployments(
+            &cfg("openai/fixture", "http://127.0.0.1:9"),
+            &HashMap::new(),
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(metric_tokens(&entry, &json!({})), (None, None));
+        assert_eq!(
+            metric_tokens(&entry, &json!({"usage":{"prompt_tokens":2}})),
+            (None, None)
+        );
+        assert_eq!(
+            metric_tokens(
+                &entry,
+                &json!({"usage":{"prompt_tokens":0,"completion_tokens":0}})
+            ),
+            (Some(0), Some(0))
+        );
+        assert_eq!(
+            metric_tokens(
+                &entry,
+                &json!({"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":0}})
+            ),
+            (Some(0), Some(3))
+        );
+        let mut anthropic = entry;
+        anthropic.protocol = Protocol::Anthropic;
+        let value = json!({"usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":2}});
+        assert_eq!(metric_tokens(&anthropic, &value), (Some(62), Some(2)));
+        let mut usage = ConversionUsage::default();
+        record_usage(&mut usage, &anthropic, &value);
+        assert_eq!(usage.requests, 1);
+        assert_eq!(usage.input_tokens, 60);
+        assert_eq!(usage.output_tokens, 2);
     }
 }

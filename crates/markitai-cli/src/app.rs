@@ -1,3 +1,5 @@
+#[path = "app/compat.rs"]
+mod compat;
 #[path = "app/doctor.rs"]
 mod doctor;
 #[path = "app/guided.rs"]
@@ -31,98 +33,144 @@ use std::time::Instant;
     about="Convert documents and URLs to Markdown", disable_help_subcommand=true, args_override_self=true)]
 struct Cli {
     #[arg(value_name = "INPUT")]
+    /// Document, URL, .urls list, directory or atomic .numbers package.
     input: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
     #[arg(short = 'o', long, value_name = "PATH")]
+    /// Output directory, or exact .md path for a single input. Omit for Markdown on stdout.
     output: Option<PathBuf>,
     #[arg(long, requires="output", conflicts_with_all=["dry_run","llm_batch_collect"])]
+    /// Print one JSON result on stdout; requires -o. Usage errors remain on stderr.
     json: bool,
     #[arg(short = 'c', long, global = true)]
+    /// Configuration path; must exist except for config set/edit, which can create it.
     config: Option<PathBuf>,
     #[arg(long, global = true)]
+    /// Deep-merge inline JSON over the config file; explicit conversion flags still win.
     config_json: Option<String>,
     #[arg(short = 'p', long)]
+    /// Use minimal, standard, rich or a configured preset (case-insensitive).
     preset: Option<String>,
     #[arg(long, value_parser=["rag","obsidian","okf"], ignore_case=true)]
+    /// Shape assets/frontmatter for rag, obsidian or okf; independent of the preset.
     profile: Option<String>,
     #[arg(long, overrides_with = "no_llm")]
+    /// Enable model processing; paired flags use the last occurrence and otherwise inherit config.
     llm: bool,
     #[arg(long, overrides_with = "llm")]
+    /// Disable model processing.
     no_llm: bool,
     #[arg(long, overrides_with = "no_alt")]
+    /// Generate image alt text when LLM processing is enabled.
     alt: bool,
     #[arg(long, overrides_with = "alt")]
+    /// Disable image alt text generation.
     no_alt: bool,
     #[arg(long, overrides_with = "no_desc")]
+    /// Write image descriptions when LLM processing is enabled.
     desc: bool,
     #[arg(long, overrides_with = "desc")]
+    /// Disable image descriptions.
     no_desc: bool,
     #[arg(long, overrides_with = "no_ocr")]
+    /// Read scanned content: macOS Vision locally, or page images with a vision model.
     ocr: bool,
     #[arg(long, overrides_with = "ocr")]
+    /// Disable OCR.
     no_ocr: bool,
     #[arg(long, overrides_with = "no_screenshot")]
+    /// Capture supported document pages or browser pages; optional backends may be required.
     screenshot: bool,
     #[arg(long, overrides_with = "screenshot")]
+    /// Disable screenshots.
     no_screenshot: bool,
     #[arg(long, overrides_with = "no_screenshot_only")]
+    /// Use screenshots as content (implies --screenshot). With --llm, read pixels; without --llm, ordinary web pages save images without Markdown. PDF media retains Markdown. URL --pure takes precedence.
     screenshot_only: bool,
     #[arg(long, overrides_with = "screenshot_only")]
+    /// Disable screenshot-only content selection.
     no_screenshot_only: bool,
     #[arg(long, overrides_with = "no_pure")]
+    /// Preserve source text without ordinary generated metadata; URL pure takes precedence over visual LLM input.
     pure: bool,
     #[arg(long, overrides_with = "pure")]
+    /// Disable pure mode.
     no_pure: bool,
     #[arg(long)]
+    /// Keep the base Markdown alongside enhanced output.
     keep_base: bool,
     #[arg(long)]
+    /// Resume a directory or .urls batch with matching paths/options; completed entries stay completed.
     resume: bool,
     #[arg(long, overrides_with = "compress")]
+    /// Disable image compression.
     no_compress: bool,
     #[arg(long, overrides_with = "no_compress")]
+    /// Enable image compression.
     compress: bool,
     #[arg(long, overrides_with = "cache")]
+    /// Bypass cache reads while still writing successful fresh results.
     no_cache: bool,
     #[arg(long, overrides_with = "no_cache")]
+    /// Allow cache reads without forcing a disabled cache on.
     cache: bool,
     #[arg(long)]
+    /// Comma-separated glob patterns that bypass cache reads for matching inputs.
     no_cache_for: Option<String>,
     #[arg(short='j', long, value_parser=clap::value_parser!(u32).range(1..))]
+    /// Maximum concurrent file conversions; independent of URL and model request limits.
     batch_concurrency: Option<u32>,
     #[arg(long, value_parser=clap::value_parser!(u32).range(1..))]
+    /// Maximum concurrent URL conversions, separately from file processing.
     url_concurrency: Option<u32>,
     #[arg(long, value_parser=clap::value_parser!(u32).range(1..))]
+    /// Maximum in-flight model requests shared by this conversion run.
     llm_concurrency: Option<u32>,
     #[arg(short='g', long="glob", action=ArgAction::Append)]
+    /// Include/exclude relative directory paths; repeatable, ! prefix excludes. Quote patterns in the shell.
     globs: Vec<String>,
     #[arg(long)]
+    /// Directory scan depth; 0 scans only the input directory.
     max_depth: Option<usize>,
     #[arg(long)]
+    /// Provider Batch API (not implemented in this Rust development build).
     llm_batch: bool,
     #[arg(long, value_parser=clap::value_parser!(u64).range(60..))]
+    /// Provider Batch API timeout (not implemented in this Rust development build).
     llm_batch_timeout: Option<u64>,
     #[arg(long)]
+    /// Provider Batch API collection (not implemented in this Rust development build).
     llm_batch_collect: Option<String>,
     #[arg(short='s', long, value_parser=["auto","static","playwright","defuddle","jina","cloudflare"])]
+    /// URL strategy: auto/static/playwright are local; remote strategies remain explicitly unsupported.
     strategy: Option<String>,
     #[arg(short='b', long, value_parser=["native","cloudflare"])]
+    /// File backend; native is implemented, cloudflare remains explicitly unsupported.
     backend: Option<String>,
     #[arg(long)]
+    /// Forbid remote extraction services; does not disable explicitly configured model requests.
     no_remote_fetch: bool,
     #[arg(short = 'v', long)]
+    /// Show details for single inputs that are quiet by default; stdout Markdown stays clean.
     verbose: bool,
     #[arg(short = 'q', long)]
+    /// Suppress progress/info; single inputs are already quiet by default, unlike batch runs.
     quiet: bool,
     #[arg(long, value_parser=["DEBUG","INFO","WARNING","ERROR","CRITICAL"])]
+    /// Conversion file-log level; needs log.dir. Console output still follows --verbose/--quiet.
     log_level: Option<String>,
     #[arg(long)]
+    /// Preview discovery without conversion or output publication.
     dry_run: bool,
     #[arg(long, overrides_with = "no_record_history")]
+    /// Archive this run for serve history; stdout-only conversions are not archived.
     record_history: bool,
     #[arg(long, overrides_with = "record_history")]
+    /// Disable history recording for this run.
     no_record_history: bool,
     #[arg(short = 'I', long)]
+    /// Choose a conversion in a terminal; edits apply to this session only.
     interactive: bool,
 }
 
@@ -235,7 +283,14 @@ pub fn run() -> i32 {
         println!();
         return 0;
     }
-    let cli = Cli::parse();
+    let arguments: Vec<_> = std::env::args_os().collect();
+    if let Some(message) = compat::removed_option(&arguments[1..]) {
+        let _ = Cli::command()
+            .error(clap::error::ErrorKind::UnknownArgument, message)
+            .print();
+        return 2;
+    }
+    let cli = Cli::parse_from(arguments);
     let code = match execute(&cli) {
         Ok(code) => code,
         Err((code, message)) => {
@@ -617,12 +672,14 @@ fn execute_conversion(
     } else {
         None
     };
+    let browser_runtime = markitai_core::BrowserRuntime::new(8).map_err(runtime)?;
     let context = ConvertContext {
         explicit_fetch_strategy: cli
             .strategy
             .as_deref()
             .filter(|strategy| *strategy != "auto"),
         llm_runtime: llm_runtime.as_ref(),
+        browser_runtime: Some(&browser_runtime),
     };
     if !batch {
         let mut task = tasks.remove(0);

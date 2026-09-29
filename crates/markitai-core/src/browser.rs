@@ -1,4 +1,4 @@
-//! Optional Chromium rendering through native CDP, with an isolated process per fetch.
+//! Optional Chromium rendering through native CDP with caller-owned session reuse.
 mod auth;
 #[cfg(test)]
 mod auth_tests;
@@ -7,6 +7,9 @@ mod download;
 #[cfg(test)]
 mod download_tests;
 mod options;
+pub(crate) mod pool;
+#[cfg(test)]
+mod runtime_tests;
 
 use crate::{Asset, Error, Result};
 use base64::Engine;
@@ -198,6 +201,10 @@ pub(crate) fn http_credentials_configured(cfg: &Value) -> bool {
 pub(crate) fn identity_configured(cfg: &Value) -> bool {
     http_credentials_configured(cfg)
         || cfg
+            .pointer("/fetch/playwright/session_mode")
+            .and_then(Value::as_str)
+            == Some("domain_persistent")
+        || cfg
             .pointer("/fetch/playwright/cookies")
             .and_then(Value::as_array)
             .is_some_and(|cookies| !cookies.is_empty())
@@ -356,10 +363,48 @@ fn final_http_url(value: &str) -> Result<Url> {
 }
 
 pub(crate) fn fetch(source: &str, cfg: &Value, screenshot: bool) -> Result<BrowserResponse> {
+    let runtime = crate::BrowserRuntime::new(1)?;
+    fetch_with_runtime(source, cfg, screenshot, Some(&runtime))
+}
+
+pub(crate) fn fetch_with_runtime(
+    source: &str,
+    cfg: &Value,
+    screenshot: bool,
+    runtime: Option<&crate::BrowserRuntime>,
+) -> Result<BrowserResponse> {
+    let Some(runtime) = runtime else {
+        return fetch(source, cfg, screenshot);
+    };
     let url = Url::parse(source).map_err(|_| Error::InvalidInput("Invalid browser URL".into()))?;
     let options = options::Options::from_config(cfg, &url, screenshot)?;
     let executable = discover().ok_or_else(|| Error::Unsupported("Chromium is not installed; install Chrome/Chromium or set MARKITAI_BROWSER_EXECUTABLE to its executable".into()))?;
-    let mut browser = cdp::Browser::launch(&executable, &options)?;
+    let mut lease = runtime.pool.acquire(&executable, &url, cfg, &options)?;
+    lease.browser().begin_page(&options)?;
+    let result = fetch_page(source, cfg, screenshot, &url, &options, lease.browser());
+    match result {
+        Ok(mut response) => {
+            if lease.finish().is_err() {
+                let warnings = match &mut response {
+                    BrowserResponse::Page(page) => &mut page.warnings,
+                    BrowserResponse::Pdf(pdf) => &mut pdf.warnings,
+                };
+                warnings.push("Browser session cleanup failed; the completed response was retained and the process discarded.".into());
+            }
+            Ok(response)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn fetch_page(
+    source: &str,
+    cfg: &Value,
+    screenshot: bool,
+    url: &Url,
+    options: &options::Options,
+    browser: &mut cdp::Browser,
+) -> Result<BrowserResponse> {
     browser.deadline = Instant::now() + Duration::from_millis(options.timeout);
     let navigation = match browser.navigate(source)? {
         cdp::Navigation::Page(value) => value,
@@ -438,7 +483,7 @@ pub(crate) fn fetch(source: &str, cfg: &Value, screenshot: bool) -> Result<Brows
     let mut screenshots = Vec::new();
     if screenshot {
         browser.deadline = Instant::now() + Duration::from_millis(options.timeout);
-        match capture(&mut browser, &options, &url) {
+        match capture(browser, options, url) {
             Ok(assets) => screenshots = assets,
             Err(error)
                 if crate::config::enabled(cfg, "/screenshot/screenshot_only")
@@ -499,14 +544,14 @@ mod tests {
         );
     }
     #[test]
-    fn unsupported_session_and_malformed_credentials_fail_before_browser_discovery() {
-        let cfg = json!({"fetch":{"playwright":{"session_mode":"domain_persistent"}}});
+    fn invalid_session_and_malformed_credentials_fail_before_browser_discovery() {
+        let cfg = json!({"fetch":{"playwright":{"session_mode":"invalid"}}});
         assert!(
             fetch("http://127.0.0.1/", &cfg, false)
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("not implemented")
+                .contains("session_mode")
         );
         let cfg = json!({"fetch":{"playwright":{"http_credentials":{"username":"private","password":123}}}});
         let error = fetch("http://127.0.0.1/", &cfg, false)

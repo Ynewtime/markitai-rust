@@ -226,6 +226,7 @@ async fn convert_one(
     index: usize,
     cfg: Value,
     runtime: Arc<markitai_core::LlmRuntime>,
+    browser_runtime: Arc<markitai_core::BrowserRuntime>,
     explicit: Option<String>,
 ) {
     let item = job.data.lock().unwrap().items[index].clone();
@@ -277,6 +278,7 @@ async fn convert_one(
             markitai_core::ConvertContext {
                 explicit_fetch_strategy: explicit.as_deref(),
                 llm_runtime: Some(&runtime),
+                browser_runtime: Some(&browser_runtime),
             },
         )
     })
@@ -348,6 +350,8 @@ pub(super) fn start(state: Arc<State>, job: Arc<Job>, cfg: Value) -> ApiResult<(
     let concurrency = cfg["llm"]["concurrency"].as_u64().unwrap_or(10).max(1) as usize;
     let runtime =
         Arc::new(markitai_core::LlmRuntime::new(concurrency).map_err(ApiError::internal)?);
+    let browser_runtime =
+        Arc::new(markitai_core::BrowserRuntime::new(8).map_err(ApiError::internal)?);
     let _ = job.runtime.set(runtime.clone());
     let count = job.data.lock().unwrap().items.len();
     job.active.fetch_add(count, Ordering::SeqCst);
@@ -364,12 +368,15 @@ pub(super) fn start(state: Arc<State>, job: Arc<Job>, cfg: Value) -> ApiResult<(
                 index,
                 cfg.clone(),
                 runtime.clone(),
+                browser_runtime.clone(),
                 explicit.clone(),
             ));
         }
         while pending.next().await.is_some() {
             complete(&task_state, job.clone()).await;
         }
+        // History retains no Chromium processes or authenticated sessions.
+        let _ = tokio::task::spawn_blocking(move || browser_runtime.close()).await;
     });
     state.tasks.lock().unwrap().push(task);
     Ok(())

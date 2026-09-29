@@ -76,7 +76,7 @@ impl Running {
     fn spawn(root: &Path, cwd: &Path, args: &[&str]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_markitai"));
         command.env_clear();
-        for name in ["PATH", "SYSTEMROOT", "TMPDIR", "TEMP", "TMP"] {
+        for name in ["HOME", "PATH", "SYSTEMROOT", "TMPDIR", "TEMP", "TMP"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
@@ -1339,8 +1339,17 @@ fn legacy_failed_targets_without_receipts_use_the_selected_ordinary_conflict_pol
         let legacy = json!({
             "version":"1.0", "options":native["options"], "documents":{}, "urls":urls,
         });
-        std::fs::write(&state_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&state_file, &legacy_bytes).unwrap();
         assert!(journal(&out).is_empty());
+        let legacy_journal = format!(
+            "{{malformed old line\n{}\n",
+            json!({
+                "type":"url", "key":key, "data":{"status":"failed","error":"legacy journal failure"},
+            })
+        );
+        let journal_file = state_file.with_extension("jsonl");
+        std::fs::write(&journal_file, &legacy_journal).unwrap();
         let receipts = out.join(".markitai/ownership/records");
         assert!(receipts.is_dir());
         std::fs::remove_dir_all(&receipts).unwrap();
@@ -1360,6 +1369,35 @@ fn legacy_failed_targets_without_receipts_use_the_selected_ordinary_conflict_pol
         let saved = snapshot(&out);
         assert!(saved["_markitai"]["generation"].is_string());
         assert_eq!(saved["urls"][&key]["status"], "completed");
+        let backups = || {
+            std::fs::read_dir(out.join(".markitai/states"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .contains(".legacy.")
+                })
+                .collect::<Vec<_>>()
+        };
+        let preserved = backups();
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(
+            std::fs::read(preserved[0].join(state_file.file_name().unwrap())).unwrap(),
+            legacy_bytes
+        );
+        assert_eq!(
+            std::fs::read(preserved[0].join(journal_file.file_name().unwrap())).unwrap(),
+            legacy_journal.as_bytes()
+        );
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(preserved[0].join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["kind"], "legacy-recovery-pair");
+        assert_eq!(manifest["generation"], saved["_markitai"]["generation"]);
         match policy {
             "rename" => {
                 assert_eq!(result["items"][0]["status"], "completed");
@@ -1435,6 +1473,11 @@ fn legacy_failed_targets_without_receipts_use_the_selected_ordinary_conflict_pol
         );
         assert_eq!(server.count("GET", "/legacy-target"), requests);
         assert_eq!(server.count("POST", "MARKERXLEGACYXTARGET"), requests);
+        assert_eq!(
+            backups(),
+            preserved,
+            "native resume created another legacy backup"
+        );
     }
 }
 
@@ -1651,4 +1694,82 @@ fn model_content(request: &Value, markdown: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
+}
+
+#[test]
+fn legacy_directory_takeover_retains_completed_work_raw_pair_and_quiet_contract() {
+    for quiet in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let server = Server::start();
+        configure(root.path(), &server, true);
+        write(root.path(), "input/a.txt", "MARKERXLEGACYXDONE\n");
+        write(root.path(), "input/b.txt", "MARKERXLEGACYXRETRY\n");
+        server.fail_model("MARKERXLEGACYXRETRY", true);
+        envelope(invoke(root.path(), &["input", "-o", "out", "--json"]), 10);
+        let out = root.path().join("out");
+        let state_file = state_path(&out);
+        let mut legacy = snapshot(&out);
+        legacy.as_object_mut().unwrap().remove("_markitai");
+        legacy["future_unknown"] = json!({"text":"保留原文", "value":17});
+        let done = PathBuf::from(legacy["documents"]["a.txt"]["output"].as_str().unwrap());
+        let done_bytes = std::fs::read(&done).unwrap();
+        let original = format!(" {}\n\n", serde_json::to_string_pretty(&legacy).unwrap());
+        let journal_text = format!(
+            "{}\n",
+            json!({
+                "type":"file", "key":"b.txt", "data":{"status":"failed","error":"previous attempt"}
+            })
+        );
+        let journal_file = state_file.with_extension("jsonl");
+        std::fs::write(&state_file, &original).unwrap();
+        std::fs::write(&journal_file, &journal_text).unwrap();
+        server.fail_model("MARKERXLEGACYXRETRY", false);
+        let mut args = vec!["input", "-o", "out", "--resume", "--json"];
+        if quiet {
+            args.push("--quiet");
+        }
+        let output = invoke(root.path(), &args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.contains("Preserved original legacy recovery files"),
+            !quiet,
+            "{stderr}"
+        );
+        if quiet {
+            assert!(stderr.is_empty(), "{stderr}");
+        }
+        let result = envelope(output, 0);
+        assert_eq!(result["totals"]["failed"], 0);
+        assert_eq!(std::fs::read(&done).unwrap(), done_bytes);
+        assert_eq!(server.count("POST", "MARKERXLEGACYXDONE"), 1);
+        assert_eq!(server.count("POST", "MARKERXLEGACYXRETRY"), 2);
+        let backups: Vec<_> = std::fs::read_dir(out.join(".markitai/states"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.is_dir()
+                    && path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains(".legacy.")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read(backups[0].join(state_file.file_name().unwrap())).unwrap(),
+            original.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(backups[0].join(journal_file.file_name().unwrap())).unwrap(),
+            journal_text.as_bytes()
+        );
+        // The prior failed target still has no imported write authority.
+        assert!(out.join("b.txt.md").exists());
+        assert!(out.join("b.txt.v2.md").exists());
+        assert!(out.join("b.txt.v2.llm.md").exists());
+        envelope(invoke(root.path(), &args), 0);
+        assert_eq!(server.count("POST", "MARKERXLEGACYXDONE"), 1);
+        assert_eq!(server.count("POST", "MARKERXLEGACYXRETRY"), 2);
+    }
 }

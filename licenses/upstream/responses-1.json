@@ -1,0 +1,131 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+    "path": "upstream/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+    "purpose": "Known path linked by packaged README at exact VCS commit",
+    "retrieved_at": "2026-09-29T07:17:09.395319+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 10850,
+    "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+    "path": "upstream/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+    "purpose": "Known path linked by packaged README at exact VCS commit",
+    "retrieved_at": "2026-09-29T07:17:09.394886+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 1053,
+    "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+    "path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+    "purpose": "Known path linked by packaged README at exact VCS commit",
+    "retrieved_at": "2026-09-29T07:17:09.397370+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 1339,
+    "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+    "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+    "purpose": "Known path linked by packaged README at exact VCS commit",
+    "retrieved_at": "2026-09-29T07:17:09.399403+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 1339,
+    "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt",
+    "path": "upstream/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt",
+    "purpose": "Known path linked by packaged README at exact VCS commit",
+    "retrieved_at": "2026-09-29T07:17:09.864049+00:00",
+    "status": 404,
+    "error": "HTTP 404"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+    "path": "upstream/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+    "purpose": "Known path linked by packaged README at exact VCS commit",
+    "retrieved_at": "2026-09-29T07:17:09.869367+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 3693,
+    "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS",
+    "path": "upstream/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS",
+    "purpose": "Known path linked by packaged README at exact VCS commit",
+    "retrieved_at": "2026-09-29T07:17:09.926026+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 3733,
+    "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111"
+  },
+  {
+    "url": "https://github.com/dropbox/rust-alloc-no-stdlib/tree/ae42d22078b98549e987d2f03d12df7b984fde47",
+    "path": "directories/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47.html",
+    "purpose": "Locate actual license paths in exact commit directory",
+    "retrieved_at": "2026-09-29T07:17:09.986799+00:00",
+    "status": 200,
+    "final_url": "https://github.com/dropbox/rust-alloc-no-stdlib/tree/ae42d22078b98549e987d2f03d12df7b984fde47",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 356691,
+    "sha256": "d1cc6a235a64fdaa41b42d4682b0c3edbffa14ed392e9cecbdeac6b09e986cbc"
+  },
+  {
+    "url": "https://github.com/Michael-F-Bryan/include_dir/tree/d742c6fffce99ee89da91b934e7ce6fb2a82680c",
+    "path": "directories/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c.html",
+    "purpose": "Locate actual license paths in exact commit directory",
+    "retrieved_at": "2026-09-29T07:17:10.274778+00:00",
+    "status": 200,
+    "final_url": "https://github.com/Michael-F-Bryan/include_dir/tree/d742c6fffce99ee89da91b934e7ce6fb2a82680c",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 275838,
+    "sha256": "13273a5c91574b582153fee83f95156e0d54ff56e1654b43ae55dbb17db18996"
+  },
+  {
+    "url": "https://github.com/r-efi/r-efi/tree/97b55bed1c2c91dcbf787674849f05337ff80b33",
+    "path": "directories/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33.html",
+    "purpose": "Locate actual license paths in exact commit directory",
+    "retrieved_at": "2026-09-29T07:17:10.357612+00:00",
+    "status": 200,
+    "final_url": "https://github.com/r-efi/r-efi/tree/97b55bed1c2c91dcbf787674849f05337ff80b33",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 283718,
+    "sha256": "297819fa4135f6869b84ff852979b91650665b12cb8b32f2a62362845402deba"
+  },
+  {
+    "url": "https://github.com/r-efi/r-efi/tree/7e1b0322d31d625f81a5656096330934f9cd835d",
+    "path": "directories/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d.html",
+    "purpose": "Locate actual license paths in exact commit directory",
+    "retrieved_at": "2026-09-29T07:17:10.435514+00:00",
+    "status": 200,
+    "final_url": "https://github.com/r-efi/r-efi/tree/7e1b0322d31d625f81a5656096330934f9cd835d",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 283717,
+    "sha256": "d0f4b3c5f79d6aa3f3981058edcc620bbf74f669fd63a30f0bbf6693c551c337"
+  },
+  {
+    "url": "https://github.com/servo/stylo/tree/572ecba2d1600e7c3d490586692a209faf703baa",
+    "path": "directories/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa.html",
+    "purpose": "Locate actual license paths in exact commit directory",
+    "retrieved_at": "2026-09-29T07:17:11.216492+00:00",
+    "status": 200,
+    "final_url": "https://github.com/servo/stylo/tree/572ecba2d1600e7c3d490586692a209faf703baa",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 337073,
+    "sha256": "6a49731dc850a36489b6f6d5a0864d6d1a6fe0e3945b99e908b66b65b1d681dc"
+  }
+]

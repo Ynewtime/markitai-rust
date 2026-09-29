@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tarfile
 
+from license_overlay import stage_overlay
+
 HOST = "aarch64-apple-darwin"
 MAX_NOTICE = 16 * 1024 * 1024
 SOURCE_NAMES = ["go.mod", "markitai.go", "markitai_test.go", "link_dynamic.go",
@@ -153,7 +155,9 @@ def notice_candidates(directory, declared):
 
 def bundle_licenses(metadata, destination, root, sysroot):
     records, unresolved = [], []
-    for package in dependency_closure(metadata):
+    packages = dependency_closure(metadata)
+    overlay = stage_overlay(root / "licenses/upstream", destination / "upstream", packages)
+    for package in packages:
         directory = Path(package["manifest_path"]).parent
         if not directory.is_dir():
             raise RuntimeError("Dependency source directory is unavailable")
@@ -175,11 +179,18 @@ def bundle_licenses(metadata, destination, root, sysroot):
             target = destination / label / relative
             value = copy_verified(source, target)
             files.append({"source": str(source), "path": target.relative_to(destination.parent).as_posix(), **value})
+        source_texts = bool(files)
+        supplemental = overlay["packages"].get(package["id"])
+        if supplemental:
+            files.extend(supplemental["texts"])
         row = {"id": package["id"], "name": package["name"], "version": package["version"],
                "license_expression": package.get("license"), "manifest": str(directory / "Cargo.toml"),
                "source": package.get("source"), "texts": files}
-        if not files:
-            unresolved.append({"id": package["id"], "reason": "No license/copyright/notice text found in the available package source"})
+        if supplemental:
+            row["upstream_evidence"] = {key: supplemental[key] for key in ["content_kind", "commit", "full_text_gap"]}
+        if not source_texts and not (supplemental and supplemental["complete_text"]):
+            reason = supplemental["full_text_gap"] if supplemental else "No license/copyright/notice text found in the available package source"
+            unresolved.append({"id": package["id"], "reason": reason})
         records.append(row)
     rust_directory = sysroot / "share/doc/rust"
     standard = []
@@ -192,7 +203,7 @@ def bundle_licenses(metadata, destination, root, sysroot):
     if not standard:
         unresolved.append({"id": "rust-toolchain", "reason": "Toolchain license texts were not found under share/doc/rust"})
     return {"scope": "Conservative resolved Cargo closure, including non-runtime and other-target dependencies; toolchain notices are separate",
-            "legal_review": "not_performed", "dependencies": records,
+            "legal_review": "not_performed", "dependencies": records, "upstream_overlay": overlay["record"],
             "rust_toolchain_texts": standard, "unresolved": unresolved}
 
 
@@ -364,6 +375,14 @@ def main(argv=None):
         record["go_version"] = run("go-version", ["go", "version"]).strip()
         if run("go-platform", ["go", "env", "GOOS", "GOARCH", "CGO_ENABLED"]).split() != ["darwin", "arm64", "1"]:
             raise RuntimeError("Go host or cgo setting differs from the package target")
+        # Invoking Apple's selected clang by absolute path bypasses the system
+        # driver shim's SDK discovery. Preserve an explicit SDKROOT or resolve
+        # the selected macOS SDK before building cgo's runtime headers.
+        if not environment.get("SDKROOT"):
+            environment["SDKROOT"] = run("macos-sdk-path", ["xcrun", "--sdk", "macosx", "--show-sdk-path"]).strip()
+        if not (Path(environment["SDKROOT"]) / "usr/include/stdlib.h").is_file():
+            raise RuntimeError("The selected macOS SDK does not provide standard C headers")
+        record["macos_sdk_root"] = environment["SDKROOT"]
         environment["CC"] = run("c-compiler-path", ["xcrun", "--find", "clang"]).strip()
         record["c_compiler"] = run("c-compiler", [environment["CC"], "--version"])
         record["rust_compiler"] = run("rust-compiler", ["rustc", "-vV"])
@@ -379,6 +398,7 @@ def main(argv=None):
         license_record = bundle_licenses(json.loads(inputs["metadata"].read_text()), module / "licenses", root, sysroot)
         json_file(module / "licenses.json", license_record)
         record["unresolved_licenses"] = license_record["unresolved"]
+        record["license_overlay"] = license_record["upstream_overlay"]
         (module / "STATIC.md").write_text("# Go static package\n\nThis package requires native macOS arm64, Go with cgo and Xcode Command Line Tools.\nUse `go build -tags markitai_static` (or `go test -tags markitai_static`).\nThe archive is linked into your executable; do not ship a Markitai dynamic library.\nmacOS frameworks remain system dependencies. `licenses.json` records mechanical\nnotice collection and any missing texts; it is not a completed legal review.\n\nThe module name is currently markitai.local/go; consumers can use a local\n`replace markitai.local/go => /path/to/unpacked/module` in their go.mod.\n", encoding="utf-8")
         manifest = {"schema": 1, "source_revision": args.source_revision, "host": HOST,
                     "build_record": record["build_record"], "inputs": record["inputs"],

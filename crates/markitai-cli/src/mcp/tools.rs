@@ -177,6 +177,7 @@ pub(super) fn convert(
         },
         ConvertContext {
             llm_runtime: runtime,
+            browser_runtime: Some(&state.browser_runtime),
             ..Default::default()
         },
     )

@@ -30,6 +30,7 @@ struct Work {
 }
 
 struct State {
+    browser_runtime: markitai_core::BrowserRuntime,
     config_path: Option<PathBuf>,
     overrides: Option<Value>,
     jobs: Mutex<jobs::Table>,
@@ -83,6 +84,7 @@ impl State {
         for task in tasks {
             let _ = task.await;
         }
+        self.browser_runtime.close();
     }
 }
 
@@ -151,6 +153,8 @@ pub fn run(config_path: Option<PathBuf>, overrides: Option<Value>) -> Result<(),
         .build()
         .map_err(|_| "Cannot initialize MCP runtime".to_owned())?;
     let state = Arc::new(State {
+        browser_runtime: markitai_core::BrowserRuntime::new(8)
+            .map_err(|error| error.to_string())?,
         config_path,
         overrides,
         jobs: Mutex::new(jobs::Table::default()),

@@ -321,7 +321,14 @@ pub(super) fn run(
                 }
                 *snapshot
             }
-            LoadOutcome::Missing => Snapshot::default(),
+            LoadOutcome::Missing => {
+                if !cli.quiet {
+                    eprintln!(
+                        "No recovery state matches these paths and options; starting a fresh batch."
+                    );
+                }
+                Snapshot::default()
+            }
             LoadOutcome::Corrupt { reason } => {
                 eprintln!(
                     "Warning: recovery state could not be loaded ({reason}); preserving it before a fresh checkpoint"
@@ -490,6 +497,14 @@ pub(super) fn run(
         tasks[index] = planned;
     }
     store.begin(snapshot).map_err(runtime)?;
+    if !cli.quiet
+        && let Some(backup) = store.legacy_backup()
+    {
+        eprintln!(
+            "Preserved original legacy recovery files at {}. This backup does not undo output or model work.",
+            backup.display()
+        );
+    }
     let generation = store
         .snapshot()
         .unwrap()

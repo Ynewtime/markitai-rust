@@ -1,6 +1,7 @@
 mod asset_store;
 mod browser;
 mod browser_install;
+mod browser_runtime;
 pub mod config;
 mod fetch;
 pub mod fetch_cache;
@@ -22,6 +23,7 @@ pub mod provider_management;
 pub mod spa_domains;
 mod types;
 
+pub use browser_runtime::BrowserRuntime;
 pub use images::is_image_extension;
 pub use llm_runtime::LlmRuntime;
 pub use types::*;
@@ -281,11 +283,12 @@ fn convert_inner(
         vision = images;
         document
     } else if is_url {
-        let fetched = fetch::fetch_with_context(
+        let fetched = fetch::fetch_with_runtime(
             source,
             &cfg,
             context.explicit_fetch_strategy,
             output_dir.is_some(),
+            context.browser_runtime,
         )?;
         fetch_cache_hit = fetched.cache_hit;
         screenshots = fetched.screenshots;

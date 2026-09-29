@@ -101,6 +101,7 @@ pub struct ConvertOptions {
 pub struct ConvertContext<'a> {
     pub explicit_fetch_strategy: Option<&'a str>,
     pub llm_runtime: Option<&'a crate::LlmRuntime>,
+    pub browser_runtime: Option<&'a crate::BrowserRuntime>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -4,6 +4,11 @@
 
 ### Added
 
+- Caller-owned bounded browser reuse with isolated contexts or origin/identity-scoped domain sessions, shared within CLI runs, active REST jobs and MCP connections.
+- Shared-runtime usage and latency model routing based on provider observations, separate from paid usage accounting.
+- Exact-byte private backups before valid legacy recovery-state adoption, plus current CLI help and removed-option migration hints.
+- Offline exact-version upstream license evidence in static Go packages, preserving unresolved notice-only entries.
+
 - Shared-runtime least-busy model selection with atomic active-request reservation and bounded private deployment identities.
 - Bounded persistent learning of anonymous JavaScript-required domains, with compatible inspection and clearing commands.
 - Optional macOS arm64 Go static delivery with packaged native archive/header, isolated installed consumers and dependency notice inventory.
@@ -70,6 +75,9 @@
 - Bounded native model discovery with credential-scoped caching, plus single-model connection probes without document conversion.
 
 ### Fixed
+
+- Detect response-body timeouts when recording routing latency penalties.
+- Resolve the selected macOS SDK automatically for isolated Go static package consumers.
 
 - In-memory compatibility for legacy enhanced histories, consistent result/retry/delete families and preserved native filename ownership.
 

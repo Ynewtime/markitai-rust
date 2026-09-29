@@ -70,6 +70,57 @@ or invalid UTF-8 stop further replay and retain the valid prefix. Only after all
 replay does an in-progress entry become failed for retry. Missing/corrupt base
 state cannot be reconstructed solely from a sidecar.
 
+## Preserving a legacy pair before takeover
+
+Before replacing a valid untagged legacy base, `begin` preserves the original
+base and any journal in a private directory beside the current state:
+
+```text
+markitai.<hash>.state.json.legacy.<new-generation>/
+  markitai.<hash>.state.json
+  markitai.<hash>.state.jsonl   # only if the original existed
+  manifest.json
+```
+
+This applies to both `--resume` and a fresh run replacing an existing legacy
+checkpoint. A native tagged checkpoint does not trigger another legacy backup.
+The original file bytes are copied, including unknown fields, whitespace and
+journal lines skipped during replay. `manifest.json` records `version: 1`,
+`kind: "legacy-recovery-pair"`, the new generation, and a base/journal descriptor
+with `name`, byte count and SHA-256. A null journal descriptor means it did not
+exist; an empty journal is preserved as a real zero-byte file.
+
+Copies stream within the existing per-base/per-journal limits. The source must
+be a regular file without a symlink leaf, even when general output symlinks are
+allowed. The copy is checked against source identity and a second bounded digest
+before publication. On Unix the backup directory is 0700 and files are 0600.
+Files and the temporary directory are synced before the complete directory is
+renamed into place; its parent is then synced. Only after that acknowledgment may
+the current base be replaced and the old journal removed. Copy, verification or
+backup-sync failure leaves the current base/journal unchanged. A complete backup
+may remain after a later error, including failure to sync its final parent;
+unfinished staging is removed. Existing corrupt-state quarantine is separate.
+
+The non-quiet CLI reports the local backup path on stderr without dumping state
+contents; stdout JSON keeps its existing schema. A missing state for the exact
+paths/options can start a fresh run and is reported on non-quiet stderr. No other
+hash is automatically selected. Foreign scope and Numbers-package child records
+remain errors before native takeover.
+
+Rollback here means recovering the old **state pair**, not undoing a run. Stop
+all writers first. Preserve the current native base/journal and any new output,
+verify the complete backup manifest and file hashes, then restore both original
+basenames together (including journal absence). An older reader may need the
+original cwd for old relative paths. Keep the backup itself intact. No automatic
+rollback command deletes or overwrites the only native record.
+
+New outputs, receipts and paid provider requests are not undone by restoring old
+state. Work completed after the backup can be requested again, and the Python
+writer does not enforce native receipts or fences. Do not run Python and native
+writers concurrently against one output directory. Hostile directory replacement
+or a writer ignoring the native lock is outside this guarantee. This feature
+adds a reversible state-format boundary, not exactly-once execution.
+
 ## Native generation and sequence
 
 A native snapshot adds `_markitai` metadata containing a UUID generation, applied

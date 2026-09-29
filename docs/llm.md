@@ -49,15 +49,16 @@ Runtime clones share these counts. Independent runtimes, independent serialized
 binding calls and conversions without a caller-supplied shared runtime do not
 coordinate across calls. The CLI batch, REST job and MCP job already supply
 their own shared runtime. This is neither process-global nor distributed load
-balancing. Counts cover least-busy attempts; simultaneous conversions configured
+balancing. Counts cover adaptive-routing attempts; simultaneous conversions configured
 with `simple-shuffle` retain their separate selection behavior.
 
 Resolved endpoint, credentials, model, protocol, group and explicit
 `model_info.id` form a private per-runtime salted identity. Different credentials
 or deployment IDs do not share occupancy accidentally. Identical entries with
 the same identity share their actual occupancy. These fingerprints are not
-logged or persisted. Only active identities remain in the table, bounded by
-the runtime's existing concurrency limit.
+logged or persisted. Only active occupancy identities remain in the table, bounded by
+the runtime's existing concurrency limit. Metric strategies retain a separate
+bounded set of observations as described below.
 
 Without configured fallbacks, all model names share the `default` pool. With
 fallbacks, configured group names are preserved and requests enter `default`.
@@ -78,10 +79,55 @@ For example:
 Fallbacks are traversed in declared order, including nested fallback groups.
 Each reachable group is attempted once; cycles, malformed target lists and
 references to unavailable groups fail before requests begin. Each group gets
-its configured transport retry allowance. `usage-based-routing` and
-`latency-based-routing` still return an explicit unsupported error; their usage
-windows and latency observations are not implemented.
-There is no cross-document deployment cooldown or health-history database.
+its configured transport retry allowance. Adaptive strategies change deployment
+selection without adding another retry loop. There is no cross-document
+deployment cooldown or health-history database.
+
+### Usage and latency observations
+
+`usage-based-routing` selects the smallest successful provider token total in the
+current wall-clock minute. Known zero usage stays zero; missing token data stays
+unknown and does not create a sample. A provider's explicit `total_tokens` takes
+precedence. Otherwise a total is derived only when both protocol input and output
+counts are present. For Anthropic, known input counts include reported cache-read
+and cache-creation input tokens. Positive deployment weights do not scale scores.
+Ties prefer the first observed entry; deployments without an observation follow
+in candidate order. There is no TPM/RPM quota configuration in this interface.
+
+`latency-based-routing` compares the mean of each deployment's last ten samples.
+A successful sample measures HTTP send through complete bounded response decode,
+divided by output tokens when the known count is positive. Zero or missing
+output-token counts retain raw elapsed seconds. A timed-out attempt, including an explicit HTTP 408, contributes
+the reference's 1000-second penalty; other failed attempts do not add a latency
+sample. New deployments score zero. Equal minimum scores are selected randomly,
+without positive-weight scaling. This mode is not a promise of lower latency or
+fairness for every workload.
+
+Observations are scoped by the existing runtime, strategy, effective model group
+pool and text-versus-visual requests. Resolved credentials and endpoints remain
+part of private deployment identity. Cached answers and coalesced waiters have no
+HTTP attempt and contribute no metric sample. Valid provider envelopes are
+observed before the returned document data is validated: a paid response with an
+invalid document can affect routing once, while a paid HTTP error still affects
+reported usage without becoming a successful routing observation. Reporting and
+billing are independent of metric samples.
+
+Usage buckets use a full epoch minute and expire after 60 monotonic seconds without
+a qualifying sample, even if the wall clock moves. Each qualifying sample refreshes
+that group deadline. A minute change clears the previous bucket instead of
+reusing a repeating `HH-MM` key. Latency group state expires after 3,600 monotonic
+seconds without a sample; a new group sample refreshes that group deadline.
+Retained state allows at most 4,096 idle deployment observations plus currently
+active metric identities. Expired entries are removed first; least-recently-used
+idle entries are evicted next and return to a cold score. Active reservations are
+never evicted. Dropping the runtime discards everything; no metrics are written
+to disk or shared between independent binding calls.
+
+These defaults follow the reference's locked LiteLLM 1.100.1 usage-v1 and latency
+handlers. Native bounded retention, full-minute identity, explicit text/visual
+pool separation and atomic concurrent updates are documented implementation
+choices. They do not reproduce LiteLLM's Redis support, streaming TTFT routing,
+or optional quota settings that Markitai does not expose.
 
 ## Providers and request parameters
 

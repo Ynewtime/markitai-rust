@@ -8,9 +8,9 @@ The integrated workspace gate and frozen release pass real loopback Chrome
 fetching, capture, timeout, history and cleanup checks. Source and artifact
 identities are recorded in the [validation report](validation/native-backends-round16.md).
 
-Each fetch launches a new headless process with a temporary user-data directory,
+Each owned browser process uses a temporary user-data directory,
 a separate disk-cache directory, a loopback debugging endpoint on a dynamically
-selected port, and no reused browser profile. Extensions, synchronization,
+selected port, and no user browser profile. Caller-owned reuse is described below. Extensions, synchronization,
 background update services and password/keychain integration are disabled.
 The browser inherits only a small platform environment allowlist; provider keys
 are not forwarded. The implementation keeps the browser sandbox enabled.
@@ -172,11 +172,78 @@ the configured LLM fallback policy can retain captures and report a warning.
 Non-pure enhancement sends all captured tiles together, subject to the configured
 image-page and payload bounds. Pure LLM mode continues to use the text path.
 
+## Caller-owned browser runtime
+
+`BrowserRuntime::new(capacity)` accepts 1 through 8 process slots and starts no
+browser until needed. Native `ConvertContext` integration can lend one runtime
+across a conversion run; independent owners never share web sessions. The
+existing one-shot browser wrapper uses a temporary runtime. Calling it twice
+with `domain_persistent` therefore does not create cross-call or cross-process
+login persistence. Host JSON has no new implicit global session. REST owners belong to one active
+job execution, not the retained history object: completion closes the owner, and
+retry/enhance begins a fresh one. CLI ownership lasts one invocation; an MCP owner
+lasts one connection.
+
+The additive `ConvertContext.browser_runtime` field does not change conversion
+options or host JSON. Native callers constructing every context field explicitly
+must add it (or use `..Default::default()`); existing `convert` entrypoints stay
+unchanged.
+
+The pool counts starting, active, idle and retiring processes against capacity.
+An isolated request can reuse a process only after the preceding context has
+been disposed, then creates a fresh incognito context. A persistent identity
+keeps its context but closes all pages in that context after each request.
+Surviving context targets, including workers, prevent reuse and cause process
+discard; cleanup inspection has bounded target counts and a two-second deadline. HTML, screenshots and
+PDF download interception all use the same page lease and cleanup path.
+
+Persistent identity includes the initial scheme, hostname and effective port,
+resolved HTTP credentials and their origin scope, configured cookies, headers,
+user agent, TTL, executable selection and proxy/bypass settings. Private salted
+digests identify entries; identity values are not logged or serialized. Different
+accounts, origins and proxy settings do not reuse contexts. Redirects do not
+change the owner's identity or widen credential scope. Request-specific viewport,
+resource filters and waits are applied to each new page.
+
+`session_ttl_seconds` keeps the reference default of 600 and range of 60–7,200.
+A persistent idle context expires at the boundary; native idle time starts when
+the lease is returned. Active leases are never evicted. Isolated processes have a
+60-second idle lifetime. Expiry is checked at the next acquisition or explicit
+runtime close; there is no background expiration thread. Capacity pressure can
+evict the least recently used idle process earlier. No durable cookie or
+storage-state file is imported or exported.
+
+The first implementation exclusively leases one process/connection per request.
+The same persistent identity queues behind its active request; different
+identities can run concurrently up to capacity. This deliberately avoids
+multiplexing unrelated CDP messages through one connection. There are at most
+128 waiting callers, and each waits for at most its configured browser timeout.
+Acquisition waiting, process startup and normal page stages have separate bounds;
+this is not one end-to-end deadline or a bound on Chromium RSS.
+
+`close()` is idempotent, rejects new admission, wakes queued callers and closes
+idle processes. Already active work keeps its normal deadlines, then discards
+its process. Errors, protocol failure and unwinding never return a process as
+healthy. A cleanup failure after a complete response adds a fixed warning and
+discards the process; failed HTTP/PDF requests remain errors and are never
+silently downloaded a second time. Existing Unix process-group cleanup and
+other-platform limitations still apply.
+
+The reference already reused browsers for isolated requests and retained up to
+eight contexts for its process-local persistent mode. Native ownership is
+explicit and its persistent identity is narrower than reference netloc-only
+reuse; same-identity requests are serialized, and active contexts cannot be
+closed by TTL/LRU eviction. None of this implements disk-persistent login,
+browser-content caching, authenticated proxies or PAC. Actual installation,
+caller-surface coverage and measured performance require their own validation.
+
 ## Explicit limits
 
-- `session_mode=isolated` is implemented. `domain_persistent` returns an
-  unsupported error before browser launch. Scoped Server Basic authentication is
-  implemented as described above; browser contexts are not persisted.
+- `session_mode=isolated` creates a fresh private browser context for every
+  request. `domain_persistent` retains a matching context only within an explicit
+  caller-owned runtime, with a fresh page for each request. No session survives
+  runtime shutdown or a new process. Scoped Server Basic authentication retains
+  its exact-origin challenge policy.
 - Proxy configuration comes from scheme-appropriate `HTTP_PROXY`, `HTTPS_PROXY`
   or `ALL_PROXY` environment variables and their lowercase forms. `NO_PROXY`
   rules and loopback bypasses are passed to Chromium. Only unauthenticated
@@ -203,7 +270,8 @@ image-page and payload bounds. Pure LLM mode continues to use the text path.
   bound reports a browser/capture failure rather than silently truncating a page.
 - Rendered results are not written to the persistent fetch cache in this stage.
   Existing static cache behavior remains intact; personalized browser state is
-  never reused across conversions.
+  reused only by the explicitly selected persistent mode in the same runtime and
+  matching identity. Persistent mode bypasses anonymous auto/static-cache probes.
 - Unix cleanup terminates the browser's dedicated process group and waits for
   its direct child. Other platforms use direct child termination; descendant
   cleanup and executable discovery need platform-specific validation. No

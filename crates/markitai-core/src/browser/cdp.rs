@@ -155,6 +155,9 @@ pub(super) enum Navigation {
 }
 
 pub(super) struct Browser {
+    context: Option<String>,
+    target: Option<String>,
+    healthy: bool,
     socket: WebSocket<TcpStream>,
     _process: Option<Process>,
     session: String,
@@ -187,6 +190,12 @@ impl Drop for Browser {
 }
 impl Browser {
     pub fn launch(executable: &Path, options: &Options) -> Result<Self> {
+        let mut browser = Self::connect(executable, options)?;
+        browser.begin_page(options)?;
+        Ok(browser)
+    }
+
+    pub fn connect(executable: &Path, options: &Options) -> Result<Self> {
         let (process, port, path) = Process::launch(executable, options)?;
         let stream = TcpStream::connect_timeout(
             &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
@@ -204,7 +213,10 @@ impl Browser {
             Some(config),
         )
         .map_err(|_| failure("Cannot establish Chromium protocol connection"))?;
-        let mut browser = Self {
+        let browser = Self {
+            context: None,
+            target: None,
+            healthy: true,
             socket,
             _process: Some(process),
             session: String::new(),
@@ -222,44 +234,160 @@ impl Browser {
             document_response_seen: false,
             paused_document: None,
         };
-        let target = browser.call("Target.createTarget", json!({"url":"about:blank"}))?;
-        let target_id = target
-            .get("targetId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| failure("Chromium did not create a page"))?;
-        let attached = browser.call(
+        Ok(browser)
+    }
+
+    pub fn begin_page(&mut self, options: &Options) -> Result<()> {
+        if self.target.is_some() || !self.session.is_empty() || !self.healthy {
+            return Err(failure("Browser session is not ready for a new page"));
+        }
+        self.deadline = Instant::now() + Duration::from_millis(options.timeout);
+        self.blocked = options.blocked.clone();
+        self.auth = super::auth::State::new(options.credentials.clone());
+        self.in_flight.clear();
+        self.last_network_change = Instant::now();
+        self.main_frame = None;
+        self.status = None;
+        self.navigation_failed = false;
+        self.navigation_id = None;
+        self.navigation_reply = None;
+        self.document_response_seen = false;
+        self.paused_document = None;
+        if self.context.is_none() {
+            let context = self.call(
+                "Target.createBrowserContext",
+                json!({"disposeOnDetach":true}),
+            )?;
+            self.context = Some(
+                context["browserContextId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 4096)
+                    .ok_or_else(|| failure("Chromium did not create a private context"))?
+                    .to_owned(),
+            );
+        }
+        let target = self.call(
+            "Target.createTarget",
+            json!({"url":"about:blank", "browserContextId":self.context}),
+        )?;
+        let target_id = target["targetId"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 4096)
+            .ok_or_else(|| failure("Chromium did not create a page"))?
+            .to_owned();
+        self.target = Some(target_id.clone());
+        let attached = self.call(
             "Target.attachToTarget",
             json!({"targetId":target_id,"flatten":true}),
         )?;
-        browser.session = attached
-            .get("sessionId")
-            .and_then(Value::as_str)
+        self.session = attached["sessionId"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 4096)
             .ok_or_else(|| failure("Chromium did not attach a page"))?
             .to_owned();
         for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
-            browser.call(method, json!({}))?;
+            self.call(method, json!({}))?;
         }
-        browser.call("Network.setCacheDisabled", json!({"cacheDisabled":true}))?;
-        browser.call("Network.setBypassServiceWorker", json!({"bypass":true}))?;
-        browser.call("Browser.setDownloadBehavior", json!({"behavior":"deny"}))?;
-        browser.call(
-            "Fetch.enable",
-            json!({"patterns":[{"urlPattern":"*","requestStage":"Request"},{"urlPattern":"*","resourceType":"Document","requestStage":"Response"}],"handleAuthRequests":browser.auth.enabled()}),
+        self.call("Network.setCacheDisabled", json!({"cacheDisabled":true}))?;
+        self.call("Network.setBypassServiceWorker", json!({"bypass":true}))?;
+        self.call(
+            "Browser.setDownloadBehavior",
+            json!({"behavior":"deny","browserContextId":self.context}),
         )?;
-        browser.call("Emulation.setDeviceMetricsOverride", json!({"width":options.width,"height":options.height,"deviceScaleFactor":1,"mobile":false}))?;
+        self.call("Fetch.enable", json!({"patterns":[{"urlPattern":"*","requestStage":"Request"},{"urlPattern":"*","resourceType":"Document","requestStage":"Response"}],"handleAuthRequests":self.auth.enabled()}))?;
+        self.call("Emulation.setDeviceMetricsOverride", json!({"width":options.width,"height":options.height,"deviceScaleFactor":1,"mobile":false}))?;
         if !options.headers.is_empty() {
-            browser.call(
+            self.call(
                 "Network.setExtraHTTPHeaders",
                 json!({"headers":options.headers}),
             )?;
         }
         if let Some(agent) = &options.user_agent {
-            browser.call("Network.setUserAgentOverride", json!({"userAgent":agent}))?;
+            self.call("Network.setUserAgentOverride", json!({"userAgent":agent}))?;
         }
         if !options.cookies.is_empty() {
-            browser.call("Network.setCookies", json!({"cookies":options.cookies}))?;
+            self.call("Network.setCookies", json!({"cookies":options.cookies}))?;
         }
-        Ok(browser)
+        Ok(())
+    }
+
+    // Only a fully extracted page can be returned to the pool. A failed close
+    // leaves ownership with the lease, whose Drop terminates the whole process.
+    pub fn finish_page(&mut self, persistent: bool) -> Result<()> {
+        if !self.healthy || self.navigation_failed {
+            return Err(failure(
+                "Browser page cannot be reused after an operation failure",
+            ));
+        }
+        self.deadline = Instant::now() + Duration::from_secs(2);
+        self.navigation_id = None;
+        self.paused_document = None;
+        self.target
+            .take()
+            .ok_or_else(|| failure("Browser has no active page"))?;
+        let context = self
+            .context
+            .clone()
+            .ok_or_else(|| failure("Browser has no active context"))?;
+        if persistent {
+            // A document may open other pages in its context. Closing just the
+            // requested target would leave those scripts alive across leases.
+            let targets = self.context_targets(&context)?;
+            for (id, page) in targets {
+                if page {
+                    let response = self.call("Target.closeTarget", json!({"targetId":id}))?;
+                    if response["success"].as_bool() != Some(true) {
+                        return Err(failure("Browser could not close an owned page"));
+                    }
+                }
+            }
+            // Child frames disappear with their pages. Any surviving worker or
+            // newly opened page prevents reuse; the lease drops the process.
+            while !self.context_targets(&context)?.is_empty() {
+                if Instant::now() >= self.deadline {
+                    return Err(failure("Browser context retained active targets"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            // Disposing the whole isolated context closes popups as well and
+            // does not run beforeunload handlers.
+            self.call(
+                "Target.disposeBrowserContext",
+                json!({"browserContextId":context}),
+            )?;
+            self.context = None;
+        }
+        self.session.clear();
+        self.auth = super::auth::State::new(None);
+        self.blocked.clear();
+        self.in_flight.clear();
+        self.main_frame = None;
+        self.navigation_reply = None;
+        Ok(())
+    }
+
+    fn context_targets(&mut self, context: &str) -> Result<Vec<(String, bool)>> {
+        let response = self.call("Target.getTargets", json!({}))?;
+        let targets = response["targetInfos"]
+            .as_array()
+            .filter(|targets| targets.len() <= 256)
+            .ok_or_else(|| failure("Browser context target inventory is invalid or too large"))?;
+        let mut owned = Vec::new();
+        for target in targets {
+            if target["browserContextId"].as_str() != Some(context) {
+                continue;
+            }
+            if owned.len() >= 128 {
+                return Err(failure("Browser context target limit exceeded"));
+            }
+            let id = target["targetId"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 4096)
+                .ok_or_else(|| failure("Browser context target identity is invalid"))?;
+            owned.push((id.to_owned(), target["type"].as_str() == Some("page")));
+        }
+        Ok(owned)
     }
 
     fn send(&mut self, method: &str, params: Value) -> Result<u64> {
@@ -459,6 +587,14 @@ impl Browser {
     }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        let result = self.call_inner(method, params);
+        if result.is_err() {
+            self.healthy = false;
+        }
+        result
+    }
+
+    fn call_inner(&mut self, method: &str, params: Value) -> Result<Value> {
         let remaining = self
             .deadline
             .checked_duration_since(Instant::now())
@@ -501,6 +637,7 @@ impl Browser {
             .max(1);
         let result = self.call("Runtime.evaluate", json!({"expression":expression,"returnByValue":true,"awaitPromise":true,"timeout":timeout.min(u64::MAX as u128) as u64}))?;
         if result.get("exceptionDetails").is_some() {
+            self.healthy = false;
             return Err(failure("Browser page evaluation failed"));
         }
         Ok(result
@@ -508,6 +645,11 @@ impl Browser {
             .cloned()
             .unwrap_or(Value::Null))
     }
+    #[cfg(test)]
+    pub(super) fn test_context(&self) -> Option<&str> {
+        self.context.as_deref()
+    }
+
     #[cfg(test)]
     pub(super) fn test_process(&self) -> Option<(u32, std::path::PathBuf)> {
         self._process
@@ -567,6 +709,9 @@ mod tests {
         .unwrap();
         (
             Browser {
+                context: None,
+                target: None,
+                healthy: true,
                 socket,
                 _process: None,
                 session: "test-session".into(),

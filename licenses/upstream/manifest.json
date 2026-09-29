@@ -1,0 +1,886 @@
+{
+  "schema": 1,
+  "created_at": "2026-09-29T07:22:48.539823+00:00",
+  "scope": "Exact upstream text collection and provenance only; not legal review, redistribution approval or selection of a license alternative. No standard license templates were substituted.",
+  "input_manifest": {
+    "path": "input-manifest.json",
+    "bytes": 26236,
+    "sha256": "a8786e5d36dd22831adb77a4b2964d215f0f1fff6290052d8b65a69e259a4515"
+  },
+  "network": {
+    "requests": 50,
+    "successes": 49,
+    "http_errors": [
+      {
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt",
+        "status": 404,
+        "error": "HTTP 404"
+      }
+    ],
+    "github_api_used": false,
+    "authenticated_requests": false,
+    "per_request_timeout_seconds": 25,
+    "per_response_limit_bytes": 2097152,
+    "max_concurrency": 4
+  },
+  "summary": {
+    "requested_packages": 15,
+    "exact_commit_manifest_matches": 15,
+    "full_license_text_packages": 6,
+    "notice_only_packages": 9,
+    "overlay_files": 16
+  },
+  "packages": [
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#alloc-stdlib@0.2.4",
+      "name": "alloc-stdlib",
+      "version": "0.2.4",
+      "declared_license": "BSD-3-Clause",
+      "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+      "commit": "ae42d22078b98549e987d2f03d12df7b984fde47",
+      "path_in_vcs": "alloc-stdlib",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": false,
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "BSD-3-Clause"
+      ],
+      "applicability": "Package manifest declares BSD-3-Clause; same-commit repository root LICENSE is the Dropbox BSD-3-Clause text.",
+      "unresolved_full_text_reason": null,
+      "evidence": [
+        {
+          "path": "upstream/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/alloc-stdlib/Cargo.toml",
+          "bytes": 697,
+          "sha256": "77cff698112ee833c7c2e2b42c2b51677502ee04ca4a0c213155e3494a80fec3",
+          "source_url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/alloc-stdlib/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/alloc-stdlib-0.2.4/Cargo.toml.orig",
+          "bytes": 697,
+          "sha256": "77cff698112ee833c7c2e2b42c2b51677502ee04ca4a0c213155e3494a80fec3"
+        },
+        {
+          "path": "local-evidence/alloc-stdlib-0.2.4/.cargo_vcs_info.json",
+          "bytes": 106,
+          "sha256": "5d07554db80324e6f09a3074928e6ae0e7cea58248f4c1db3f32d9ce0ec85efb"
+        },
+        {
+          "path": "local-evidence/alloc-stdlib-0.2.4/README.md",
+          "bytes": 6776,
+          "sha256": "4857caaabcb6eb367687e6671d70fef3b8dcbab1276999612b71f9f4cd6190b0"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/alloc-stdlib-0.2.4/LICENSE",
+          "bytes": 1483,
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+          "destination": "licenses/alloc-stdlib-0.2.4/LICENSE",
+          "source_path": "upstream/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "source_url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "source_sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+          "content_kind": "full_license_text"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#defmt-parser@1.0.0",
+      "name": "defmt-parser",
+      "version": "1.0.0",
+      "declared_license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/knurling-rs/defmt",
+      "commit": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+      "path_in_vcs": "parser",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": false,
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "applicability": "Packaged parser README explicitly links both ../LICENSE-APACHE and ../LICENSE-MIT.",
+      "unresolved_full_text_reason": null,
+      "evidence": [
+        {
+          "path": "upstream/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/parser/Cargo.toml",
+          "bytes": 540,
+          "sha256": "5d5c0e139cf4076aad5d1f8b992a7b8c9095f5443dab0f9d1da020101adea245",
+          "source_url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/parser/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/defmt-parser-1.0.0/Cargo.toml.orig",
+          "bytes": 540,
+          "sha256": "5d5c0e139cf4076aad5d1f8b992a7b8c9095f5443dab0f9d1da020101adea245"
+        },
+        {
+          "path": "local-evidence/defmt-parser-1.0.0/.cargo_vcs_info.json",
+          "bytes": 100,
+          "sha256": "7ab8f01085721143c43db5db2528806f393df2058d03c5b8da20634e14886a05"
+        },
+        {
+          "path": "local-evidence/defmt-parser-1.0.0/README.md",
+          "bytes": 1497,
+          "sha256": "a40aae66ea32ccd2b2c30ea976d4ac02fab1025a8dece8bfae6aa83bdcfd9c0e"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/defmt-parser-1.0.0/LICENSE-APACHE",
+          "bytes": 10850,
+          "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+          "destination": "licenses/defmt-parser-1.0.0/LICENSE-APACHE",
+          "source_path": "upstream/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "source_url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "source_sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+          "content_kind": "full_license_text"
+        },
+        {
+          "path": "overlay/licenses/defmt-parser-1.0.0/LICENSE-MIT",
+          "bytes": 1053,
+          "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50",
+          "destination": "licenses/defmt-parser-1.0.0/LICENSE-MIT",
+          "source_path": "upstream/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "source_url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "source_sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50",
+          "content_kind": "full_license_text"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#dispatch2@0.3.1",
+      "name": "dispatch2",
+      "version": "0.3.1",
+      "declared_license": "Zlib OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+      "path_in_vcs": "crates/dispatch2",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": true,
+      "version_inherited_from_workspace": false,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/dispatch2/Cargo.toml",
+          "bytes": 1516,
+          "sha256": "f6aeef4bfe348b9e65e33db2bfb079be4149f9ab0f4b0b3bf3f5d04c144545af",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/dispatch2/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/dispatch2-0.3.1/Cargo.toml.orig",
+          "bytes": 1516,
+          "sha256": "f6aeef4bfe348b9e65e33db2bfb079be4149f9ab0f4b0b3bf3f5d04c144545af"
+        },
+        {
+          "path": "local-evidence/dispatch2-0.3.1/.cargo_vcs_info.json",
+          "bytes": 110,
+          "sha256": "26f5e6d699ba3ce13b8eea253ad7a7f7feb9345e9da3c01bb9b9bd911a6a7dba"
+        },
+        {
+          "path": "local-evidence/dispatch2-0.3.1/README.md",
+          "bytes": 748,
+          "sha256": "eba8f5b9bc021bfaaf84478017baf838a92d56a47e691a8b8989aae1210c05d7"
+        },
+        {
+          "path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/Cargo.toml",
+          "bytes": 38056,
+          "sha256": "f93fce3a2814c16597140137b109c53042c0ae74909fd123a8a4d1f7d35090da",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/dispatch2-0.3.1/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/dispatch2-0.3.1/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#include_dir@0.7.4",
+      "name": "include_dir",
+      "version": "0.7.4",
+      "declared_license": "MIT",
+      "repository": "https://github.com/Michael-F-Bryan/include_dir",
+      "commit": "d742c6fffce99ee89da91b934e7ce6fb2a82680c",
+      "path_in_vcs": "include_dir",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": true,
+      "version_inherited_from_workspace": true,
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MIT"
+      ],
+      "applicability": "Both exact package manifests inherit workspace.package.license=MIT; same-commit root LICENSE names Michael F Bryan.",
+      "unresolved_full_text_reason": null,
+      "evidence": [
+        {
+          "path": "upstream/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/include_dir/Cargo.toml",
+          "bytes": 713,
+          "sha256": "cc2a64f1763594620ffd45a3df83881e7e1ef72c219d316ebdda825376e1d877",
+          "source_url": "https://raw.githubusercontent.com/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/include_dir/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/include_dir-0.7.4/Cargo.toml.orig",
+          "bytes": 713,
+          "sha256": "cc2a64f1763594620ffd45a3df83881e7e1ef72c219d316ebdda825376e1d877"
+        },
+        {
+          "path": "local-evidence/include_dir-0.7.4/.cargo_vcs_info.json",
+          "bytes": 105,
+          "sha256": "3a6ff075567d97e7fe903e361b81a8bd7e7da77be01cf2495d85fb676b2d891a"
+        },
+        {
+          "path": "local-evidence/include_dir-0.7.4/README.md",
+          "bytes": 1822,
+          "sha256": "f95dde5560e0b9fe496271e72959d1ba1c0b4695afc8867fa2cf5dbee225325e"
+        },
+        {
+          "path": "upstream/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/Cargo.toml",
+          "bytes": 294,
+          "sha256": "2c1c7422dc435ac2fc06965c5dd9068b9539a6c36dca17ec0e581a785c0f68c0",
+          "source_url": "https://raw.githubusercontent.com/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/include_dir-0.7.4/LICENSE",
+          "bytes": 1070,
+          "sha256": "9369f62987b3a116111f2edfdc4cc72633e44ddc94d5d0c68659cf537b76a31f",
+          "destination": "licenses/include_dir-0.7.4/LICENSE",
+          "source_path": "upstream/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/LICENSE",
+          "source_url": "https://raw.githubusercontent.com/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/LICENSE",
+          "source_sha256": "9369f62987b3a116111f2edfdc4cc72633e44ddc94d5d0c68659cf537b76a31f",
+          "content_kind": "full_license_text"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#include_dir_macros@0.7.4",
+      "name": "include_dir_macros",
+      "version": "0.7.4",
+      "declared_license": "MIT",
+      "repository": "https://github.com/Michael-F-Bryan/include_dir",
+      "commit": "d742c6fffce99ee89da91b934e7ce6fb2a82680c",
+      "path_in_vcs": "macros",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": true,
+      "version_inherited_from_workspace": true,
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MIT"
+      ],
+      "applicability": "Both exact package manifests inherit workspace.package.license=MIT; same-commit root LICENSE names Michael F Bryan.",
+      "unresolved_full_text_reason": null,
+      "evidence": [
+        {
+          "path": "upstream/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/macros/Cargo.toml",
+          "bytes": 485,
+          "sha256": "97488346bfa63645747326c0f3ba7e96822868b9f72743090819a5b1a5ae519c",
+          "source_url": "https://raw.githubusercontent.com/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/macros/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/include_dir_macros-0.7.4/Cargo.toml.orig",
+          "bytes": 485,
+          "sha256": "97488346bfa63645747326c0f3ba7e96822868b9f72743090819a5b1a5ae519c"
+        },
+        {
+          "path": "local-evidence/include_dir_macros-0.7.4/.cargo_vcs_info.json",
+          "bytes": 100,
+          "sha256": "2e2e737a16585958124582fea4e43c51198d25d78f23c6fe0674a8f660dff584"
+        },
+        {
+          "path": "local-evidence/include_dir_macros-0.7.4/README.md",
+          "bytes": 1822,
+          "sha256": "f95dde5560e0b9fe496271e72959d1ba1c0b4695afc8867fa2cf5dbee225325e"
+        },
+        {
+          "path": "upstream/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/Cargo.toml",
+          "bytes": 294,
+          "sha256": "2c1c7422dc435ac2fc06965c5dd9068b9539a6c36dca17ec0e581a785c0f68c0",
+          "source_url": "https://raw.githubusercontent.com/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/include_dir_macros-0.7.4/LICENSE",
+          "bytes": 1070,
+          "sha256": "9369f62987b3a116111f2edfdc4cc72633e44ddc94d5d0c68659cf537b76a31f",
+          "destination": "licenses/include_dir_macros-0.7.4/LICENSE",
+          "source_path": "upstream/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/LICENSE",
+          "source_url": "https://raw.githubusercontent.com/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/LICENSE",
+          "source_sha256": "9369f62987b3a116111f2edfdc4cc72633e44ddc94d5d0c68659cf537b76a31f",
+          "content_kind": "full_license_text"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#objc2@0.6.4",
+      "name": "objc2",
+      "version": "0.6.4",
+      "declared_license": "MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+      "path_in_vcs": "crates/objc2",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": false,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/objc2/Cargo.toml",
+          "bytes": 7515,
+          "sha256": "edff06609a6f76ba4aa4ead2f6219826f6c4fd82075fa178029085f37f931536",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/objc2/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/objc2-0.6.4/Cargo.toml.orig",
+          "bytes": 7515,
+          "sha256": "edff06609a6f76ba4aa4ead2f6219826f6c4fd82075fa178029085f37f931536"
+        },
+        {
+          "path": "local-evidence/objc2-0.6.4/.cargo_vcs_info.json",
+          "bytes": 106,
+          "sha256": "45343a7cb8cebbb23c2804f99a14f01f6618ce0956dba62f387fb9ffaf00eff7"
+        },
+        {
+          "path": "local-evidence/objc2-0.6.4/README.md",
+          "bytes": 847,
+          "sha256": "5da56f1508a87b982a23e6bad2ff09b329f7fcf9181ea15eac17788f8d1c6824"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/objc2-0.6.4/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/objc2-0.6.4/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-core-foundation@0.3.2",
+      "name": "objc2-core-foundation",
+      "version": "0.3.2",
+      "declared_license": "Zlib OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "path_in_vcs": "framework-crates/objc2-core-foundation",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": true,
+      "version_inherited_from_workspace": true,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-foundation/Cargo.toml",
+          "bytes": 3362,
+          "sha256": "44cd6a4440c3ea1ba85df240ab9b9e7a95da3a5873ce623ac426ac5acfbe507f",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-foundation/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/objc2-core-foundation-0.3.2/Cargo.toml.orig",
+          "bytes": 3362,
+          "sha256": "44cd6a4440c3ea1ba85df240ab9b9e7a95da3a5873ce623ac426ac5acfbe507f"
+        },
+        {
+          "path": "local-evidence/objc2-core-foundation-0.3.2/.cargo_vcs_info.json",
+          "bytes": 132,
+          "sha256": "1c1a87985a2bd25015f5e2413f4041379bea0172b2fce88dae3e6482b50aab26"
+        },
+        {
+          "path": "local-evidence/objc2-core-foundation-0.3.2/README.md",
+          "bytes": 822,
+          "sha256": "c02a9b113d8855df956d9d854321c5bfef3c2921131070dc0c64870053b42459"
+        },
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml",
+          "bytes": 39519,
+          "sha256": "2a5d4807cb132ce1d3f5b591a760643db49ca835dedefddcbd3087ad962360cd",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/objc2-core-foundation-0.3.2/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/objc2-core-foundation-0.3.2/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-core-graphics@0.3.2",
+      "name": "objc2-core-graphics",
+      "version": "0.3.2",
+      "declared_license": "Zlib OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "path_in_vcs": "framework-crates/objc2-core-graphics",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": true,
+      "version_inherited_from_workspace": true,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-graphics/Cargo.toml",
+          "bytes": 6661,
+          "sha256": "8156455095991b7501f4fa30bdf29c5a541a41e3c479558e757932b07d0b16d1",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-graphics/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/objc2-core-graphics-0.3.2/Cargo.toml.orig",
+          "bytes": 6661,
+          "sha256": "8156455095991b7501f4fa30bdf29c5a541a41e3c479558e757932b07d0b16d1"
+        },
+        {
+          "path": "local-evidence/objc2-core-graphics-0.3.2/.cargo_vcs_info.json",
+          "bytes": 130,
+          "sha256": "264ea4e6453d508410c33c7e5c05ef71f067cac56efc06603862b36d1fe5dfc3"
+        },
+        {
+          "path": "local-evidence/objc2-core-graphics-0.3.2/README.md",
+          "bytes": 808,
+          "sha256": "6361def881598a3b6d19e7e0d45d77aa5f8c87980db0c36d895cc33bb83f10bf"
+        },
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml",
+          "bytes": 39519,
+          "sha256": "2a5d4807cb132ce1d3f5b591a760643db49ca835dedefddcbd3087ad962360cd",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/objc2-core-graphics-0.3.2/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/objc2-core-graphics-0.3.2/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-encode@4.1.0",
+      "name": "objc2-encode",
+      "version": "4.1.0",
+      "declared_license": "MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+      "path_in_vcs": "crates/objc2-encode",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": false,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/crates/objc2-encode/Cargo.toml",
+          "bytes": 1137,
+          "sha256": "12972b1faf213492f9e78226f23642c461284b739f7be5437d9401465a2869a6",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/crates/objc2-encode/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/objc2-encode-4.1.0/Cargo.toml.orig",
+          "bytes": 1137,
+          "sha256": "12972b1faf213492f9e78226f23642c461284b739f7be5437d9401465a2869a6"
+        },
+        {
+          "path": "local-evidence/objc2-encode-4.1.0/.cargo_vcs_info.json",
+          "bytes": 113,
+          "sha256": "b23c761215887d90ac44e18b18c8b386f93139c65a4a14f110e22405830cb3f1"
+        },
+        {
+          "path": "local-evidence/objc2-encode-4.1.0/README.md",
+          "bytes": 795,
+          "sha256": "e980a74b88a62193f7908df3c27e7915f38559870f5e033ddb77fbed65e024a5"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/objc2-encode-4.1.0/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/objc2-encode-4.1.0/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-foundation@0.3.2",
+      "name": "objc2-foundation",
+      "version": "0.3.2",
+      "declared_license": "MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "path_in_vcs": "framework-crates/objc2-foundation",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": true,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.toml",
+          "bytes": 10499,
+          "sha256": "71158540d55a9b5ce073c856347f0ed1e0e71f4210cfb48a82b1f0e505ba6a50",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/objc2-foundation-0.3.2/Cargo.toml.orig",
+          "bytes": 10499,
+          "sha256": "71158540d55a9b5ce073c856347f0ed1e0e71f4210cfb48a82b1f0e505ba6a50"
+        },
+        {
+          "path": "local-evidence/objc2-foundation-0.3.2/.cargo_vcs_info.json",
+          "bytes": 127,
+          "sha256": "de34f3c84d7cb1cafcedb4e83b7efdd64047872566827477b954f8a853536bb1"
+        },
+        {
+          "path": "local-evidence/objc2-foundation-0.3.2/README.md",
+          "bytes": 758,
+          "sha256": "50be6f8e1214bd644cdc32c9610278c004205cdddbe2aaed7887d8bad48dd6c5"
+        },
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml",
+          "bytes": 39519,
+          "sha256": "2a5d4807cb132ce1d3f5b591a760643db49ca835dedefddcbd3087ad962360cd",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/objc2-foundation-0.3.2/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/objc2-foundation-0.3.2/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-image-io@0.3.2",
+      "name": "objc2-image-io",
+      "version": "0.3.2",
+      "declared_license": "Zlib OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "path_in_vcs": "framework-crates/objc2-image-io",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": true,
+      "version_inherited_from_workspace": true,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-image-io/Cargo.toml",
+          "bytes": 2294,
+          "sha256": "250d26341e336c569ebefd4cc61efdde1fb3f519afec9764485ad4fc6b75bb2e",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-image-io/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/objc2-image-io-0.3.2/Cargo.toml.orig",
+          "bytes": 2294,
+          "sha256": "250d26341e336c569ebefd4cc61efdde1fb3f519afec9764485ad4fc6b75bb2e"
+        },
+        {
+          "path": "local-evidence/objc2-image-io-0.3.2/.cargo_vcs_info.json",
+          "bytes": 125,
+          "sha256": "583b666cbc15ad0671d5b1d819af352ac817f6e5293d019df09e45ad31dde6a7"
+        },
+        {
+          "path": "local-evidence/objc2-image-io-0.3.2/README.md",
+          "bytes": 773,
+          "sha256": "16a7defc511f07758599fa1a22176cb7f80dba7d57414b385bec30d4616e5558"
+        },
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml",
+          "bytes": 39519,
+          "sha256": "2a5d4807cb132ce1d3f5b591a760643db49ca835dedefddcbd3087ad962360cd",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/objc2-image-io-0.3.2/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/objc2-image-io-0.3.2/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-vision@0.3.2",
+      "name": "objc2-vision",
+      "version": "0.3.2",
+      "declared_license": "Zlib OR Apache-2.0 OR MIT",
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "path_in_vcs": "framework-crates/objc2-vision",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": true,
+      "version_inherited_from_workspace": true,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
+      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "evidence": [
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-vision/Cargo.toml",
+          "bytes": 11611,
+          "sha256": "52f2acd216b057c7905ce1d71ac08d05baa125df96fefc6492f3e0e5e68a6a5a",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-vision/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/objc2-vision-0.3.2/Cargo.toml.orig",
+          "bytes": 11611,
+          "sha256": "52f2acd216b057c7905ce1d71ac08d05baa125df96fefc6492f3e0e5e68a6a5a"
+        },
+        {
+          "path": "local-evidence/objc2-vision-0.3.2/.cargo_vcs_info.json",
+          "bytes": 123,
+          "sha256": "61fac1dc7e1ea63f2a153ba80353ec96a26ee5a278cbb5a321b57c5fe0636a22"
+        },
+        {
+          "path": "local-evidence/objc2-vision-0.3.2/README.md",
+          "bytes": 760,
+          "sha256": "9f7365ebd648c5ef1c23fe3cfd962bc7784b0316871cb7c2ebd4c9f6dc266e40"
+        },
+        {
+          "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml",
+          "bytes": 39519,
+          "sha256": "2a5d4807cb132ce1d3f5b591a760643db49ca835dedefddcbd3087ad962360cd",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/Cargo.toml"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/objc2-vision-0.3.2/LICENSE.md",
+          "bytes": 1339,
+          "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "destination": "licenses/objc2-vision-0.3.2/LICENSE.md",
+          "source_path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+          "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+          "content_kind": "notice_only"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#r-efi@5.3.0",
+      "name": "r-efi",
+      "version": "5.3.0",
+      "declared_license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "repository": "https://github.com/r-efi/r-efi",
+      "commit": "97b55bed1c2c91dcbf787674849f05337ff80b33",
+      "path_in_vcs": "",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": false,
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MIT"
+      ],
+      "applicability": "Packaged README directs licensing to AUTHORS; same-commit AUTHORS contains complete MIT terms, copyright and authors plus Apache/LGPL notices.",
+      "unresolved_full_text_reason": null,
+      "evidence": [
+        {
+          "path": "upstream/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/Cargo.toml",
+          "bytes": 1226,
+          "sha256": "57b6d9b9a1b6524f6b4dcc1dd24970ac03e6959786a6cfedaec9ba52878b4d3e",
+          "source_url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/r-efi-5.3.0/Cargo.toml.orig",
+          "bytes": 1226,
+          "sha256": "57b6d9b9a1b6524f6b4dcc1dd24970ac03e6959786a6cfedaec9ba52878b4d3e"
+        },
+        {
+          "path": "local-evidence/r-efi-5.3.0/.cargo_vcs_info.json",
+          "bytes": 94,
+          "sha256": "50e0c72ee0164f182d7b5db0213cdb1626bad950f2443b05d006c28c7f0641b5"
+        },
+        {
+          "path": "local-evidence/r-efi-5.3.0/README.md",
+          "bytes": 2919,
+          "sha256": "420f65fec3ba2e89d49da51b222d2881d26959037a7b7d3794143db4bd4627b1"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/r-efi-5.3.0/AUTHORS",
+          "bytes": 3693,
+          "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7",
+          "destination": "licenses/r-efi-5.3.0/AUTHORS",
+          "source_path": "upstream/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+          "source_url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+          "source_sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7",
+          "content_kind": "full_license_text"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#r-efi@6.0.0",
+      "name": "r-efi",
+      "version": "6.0.0",
+      "declared_license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "repository": "https://github.com/r-efi/r-efi",
+      "commit": "7e1b0322d31d625f81a5656096330934f9cd835d",
+      "path_in_vcs": "",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": false,
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MIT"
+      ],
+      "applicability": "Packaged README directs licensing to AUTHORS; same-commit AUTHORS contains complete MIT terms, copyright and authors plus Apache/LGPL notices.",
+      "unresolved_full_text_reason": null,
+      "evidence": [
+        {
+          "path": "upstream/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/Cargo.toml",
+          "bytes": 1107,
+          "sha256": "b8e89c393831c2161b6d390bd40422910ac34f02903ad39edd85ec38d4513fef",
+          "source_url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/r-efi-6.0.0/Cargo.toml.orig",
+          "bytes": 1107,
+          "sha256": "b8e89c393831c2161b6d390bd40422910ac34f02903ad39edd85ec38d4513fef"
+        },
+        {
+          "path": "local-evidence/r-efi-6.0.0/.cargo_vcs_info.json",
+          "bytes": 94,
+          "sha256": "d8d0d853429b028d5e3c7b969f7c6b77b04e17486c57fac0759eb8083a359f3f"
+        },
+        {
+          "path": "local-evidence/r-efi-6.0.0/README.md",
+          "bytes": 2919,
+          "sha256": "420f65fec3ba2e89d49da51b222d2881d26959037a7b7d3794143db4bd4627b1"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/r-efi-6.0.0/AUTHORS",
+          "bytes": 3733,
+          "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+          "destination": "licenses/r-efi-6.0.0/AUTHORS",
+          "source_path": "upstream/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS",
+          "source_url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS",
+          "source_sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+          "content_kind": "full_license_text"
+        }
+      ]
+    },
+    {
+      "id": "registry+https://github.com/rust-lang/crates.io-index#selectors@0.38.0",
+      "name": "selectors",
+      "version": "0.38.0",
+      "declared_license": "MPL-2.0",
+      "repository": "https://github.com/servo/stylo",
+      "commit": "572ecba2d1600e7c3d490586692a209faf703baa",
+      "path_in_vcs": "selectors",
+      "package_manifest_matches_published_original": true,
+      "license_inherited_from_workspace": false,
+      "version_inherited_from_workspace": false,
+      "content_kind": "notice_only",
+      "complete_license_options_present": [],
+      "applicability": "Exact package manifest declares MPL-2.0; retrieved selectors/lib.rs starts with the Mozilla Public License 2.0 notice.",
+      "unresolved_full_text_reason": "Exact-commit selectors/lib.rs contains an MPL-2.0 notice with an external license URL, not the complete MPL-2.0 license text. Inspected repository root and selectors directory have no independent license file.",
+      "evidence": [
+        {
+          "path": "upstream/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/Cargo.toml",
+          "bytes": 868,
+          "sha256": "26a19ba53c3dfff3f572e04f72ed224dca7b03a76a8e0593fc48b458ec6ab535",
+          "source_url": "https://raw.githubusercontent.com/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/Cargo.toml"
+        },
+        {
+          "path": "local-evidence/selectors-0.38.0/Cargo.toml.orig",
+          "bytes": 868,
+          "sha256": "26a19ba53c3dfff3f572e04f72ed224dca7b03a76a8e0593fc48b458ec6ab535"
+        },
+        {
+          "path": "local-evidence/selectors-0.38.0/.cargo_vcs_info.json",
+          "bytes": 103,
+          "sha256": "1ddc4845786a1b1ebc7fb2f940878d9b923c4385d7d66841f25c765d1312fe74"
+        },
+        {
+          "path": "local-evidence/selectors-0.38.0/README.md",
+          "bytes": 1170,
+          "sha256": "c0a9128170286f7c593f0c316f00d4a9c8671140bbd9d59f7e6c001d696b2810"
+        }
+      ],
+      "assets": [
+        {
+          "path": "overlay/licenses/selectors-0.38.0/NOTICE-MPL-2.0.txt",
+          "bytes": 206,
+          "sha256": "766674381e88a468d55e07de3596987391cf0e8beebe51baf4fddf11078785b3",
+          "destination": "licenses/selectors-0.38.0/NOTICE-MPL-2.0.txt",
+          "source_path": "upstream/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+          "source_url": "https://raw.githubusercontent.com/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+          "source_sha256": "d54c6e13e9e952dac17d209171df8657e3cae93beaddace4906150cdec8d02e9",
+          "content_kind": "notice_only",
+          "source_byte_range": {
+            "start_inclusive": 0,
+            "end_exclusive": 206
+          }
+        }
+      ]
+    }
+  ],
+  "unresolved_full_license_text": [
+    "registry+https://github.com/rust-lang/crates.io-index#dispatch2@0.3.1",
+    "registry+https://github.com/rust-lang/crates.io-index#objc2@0.6.4",
+    "registry+https://github.com/rust-lang/crates.io-index#objc2-core-foundation@0.3.2",
+    "registry+https://github.com/rust-lang/crates.io-index#objc2-core-graphics@0.3.2",
+    "registry+https://github.com/rust-lang/crates.io-index#objc2-encode@4.1.0",
+    "registry+https://github.com/rust-lang/crates.io-index#objc2-foundation@0.3.2",
+    "registry+https://github.com/rust-lang/crates.io-index#objc2-image-io@0.3.2",
+    "registry+https://github.com/rust-lang/crates.io-index#objc2-vision@0.3.2",
+    "registry+https://github.com/rust-lang/crates.io-index#selectors@0.38.0"
+  ]
+}

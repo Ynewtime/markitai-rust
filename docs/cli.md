@@ -22,6 +22,22 @@ markitai -I
 markitai -c isolated.json doctor --json
 ```
 
+## 参数帮助与移除提示
+
+`-h/--help` 说明输出、JSON、配置优先级、三类并发、缓存绕过、OCR/截图、
+恢复与日志的实际行为；provider Batch API 等未实现参数直接标明限制。
+没有输入时显示同一份帮助。帮助布局不要求与 Python Rich 输出逐字节一致。
+
+旧参数 `--playwright`、`--defuddle`、`--static`、`--jina`、`--cloudflare`
+已移除；使用时在 stderr 指向 `-s <策略>`，退出 2。这个提示只说明替代拼写，
+不承诺尚未实现的远端策略可用。`--kreuzberg` 没有替代开关，提示 RTF 已原生转换。
+这些名字不重新注册为兼容别名，不出现在帮助中；`--名字=value` 同样给出迁移提示。
+错误发生在读取配置或转换之前，`--json` 也不会因此输出 envelope。
+
+移除检查尊重 `--` 终止符、取值选项的参数及 attached value，避免把同名字面路径
+当作旧开关；例如 `--output=--static` 是路径值。原版简单扫描每个 argv token，
+原生这里有意保留正常参数/路径解析；其他无效用法仍由 Clap 拒绝。
+
 ## 已实现的命令行为
 
 - 单文件和 URL 未给 `-o` 时输出 Markdown 到 stdout；`--pure` 去除 frontmatter；提供 `-o chosen.md` 可选择准确文件名。
@@ -31,7 +47,7 @@ markitai -c isolated.json doctor --json
 - 目录/URL 列表普通转换项失败退出 10；单项失败退出 1，成功退出 0；状态存储致命错误退出 1，中断退出 130/143。`--quiet` 仍显示错误。
 - 四种输入模式支持持久 JSON 报告。`output.report` 为 null 或省略时，目录/URL 列表默认启用，单文件/URL 默认关闭；true/false 显式覆盖。报告写入输出目录的 `.markitai/reports/`，各模式的字段和计数差异见 [reports.md](reports.md)。
 - 报告发布失败保留已完成文件及 stdout JSON 条目，并退出非零；报告不替代 stdout envelope。stdout 转换、dry run、无可恢复状态的空目录和失败/跳过的单项不生成报告；批量部分失败仍可生成报告。报告的 skip 冲突策略保留已有报告。
-- Unix 目录/URL 列表每次保存恢复状态；`--resume` 合并新发现任务、保留完成项并重试未完成项。输出归属凭证保护隐式重试，旧状态按普通冲突策略升级。首次 Ctrl-C 停止派发、同步状态并等待在途转换，退出 130；再次中断立即退出。详见 [恢复状态](state-storage.md) 与 [输出归属](output-ownership.md)。
+- Unix 目录/URL 列表每次保存恢复状态；`--resume` 合并新发现任务、保留完成项并重试未完成项。输出归属凭证保护隐式重试，旧状态按普通冲突策略升级，升级前私有保存原始 base/journal 及存在性；备份仅是状态回退材料，不撤销输出或模型请求。首次 Ctrl-C 停止派发、同步状态并等待在途转换，退出 130；再次中断立即退出。详见 [恢复状态](state-storage.md) 与 [输出归属](output-ownership.md)。
 - `--record-history` 将本次实际处理项保存到隔离 home 下的 `serve/jobs/`，包含独立的最终文档、资产和兼容元数据；归档失败只警告，stdout/dry-run/中断不归档。开关覆盖环境和配置，详见 [历史归档](history.md)。
 - 配置优先级由核心解析；根级 `-c` 和 `--config-json` 对子命令同样生效。布尔参数支持显式否定；重复正反开关以最后一个为准，preset 名称按小写查找，应用后显式参数覆盖。没有 INPUT/子命令且未指定 `-I` 时显示帮助并退出 0，包括只给转换选项的情况；参数本身非法仍退出 2。
 - `config list/get/path/validate/set/edit` 可用；list 支持 JSON/YAML/table；默认隐藏凭据。set/edit 原子更新配置，保留未知字段，不写入临时 `--config-json` 内容。
@@ -58,7 +74,7 @@ markitai -c isolated.json doctor --json
 
 URL 抓取的其他策略、非 Unix 断点恢复、Batch API、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；文本、独立图片与分页视觉请求的缓存范围分别见 [LLM 处理](llm.md)，不能将一次命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 演示与文字文档可通过可选的独立 LibreOffice 安装获得全页截图和 OCR 补充，详见 [Office 渲染](office-rendering.md)；XLS/XLSX/ODS 支持每张完整工作表一页，包含隐藏和空表；Numbers 完整画布和其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
 
-持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
+持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。帮助使用原生 Clap 布局，不复刻 Rich 框线；非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 
 具体文件格式支持取决于核心当前实现，注册参考扩展名不意味着全部可用。性能与质量对比未完成前，不承诺生产替代、完整旧版兼容或具体加速比。
 

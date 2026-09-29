@@ -379,3 +379,10 @@ a relocated 24-call consumer pass. The mechanical notice inventory retains 15
 missing-text entries; this is not a completed release review. The current sample
 consumer retains Go debug information, so its measured size is not a minimal
 Go delivery size.
+
+The R29 source adds automatic selected-macOS-SDK discovery when SDKROOT is absent.
+Its offline static-package notice overlay checks exact upstream commits, published
+Cargo manifests and original text bytes. Six package versions have complete texts;
+nine have notices only and remain explicitly unresolved. Original evidence is
+tracked under `licenses/upstream`. Actual rebuilt package acceptance is separate
+from these source and helper tests, and no legal clearance is asserted.

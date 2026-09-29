@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use url::Url;
 
 pub(super) struct Options {
+    pub persistent: bool,
+    pub session_ttl: std::time::Duration,
     pub credentials: Option<super::auth::Credentials>,
     pub timeout: u64,
     pub wait_for: String,
@@ -193,6 +195,8 @@ impl Options {
     // Diagnostics do not load user configuration, cookies, credentials or proxies.
     pub(super) fn diagnostic() -> Self {
         Self {
+            persistent: false,
+            session_ttl: std::time::Duration::from_secs(600),
             credentials: None,
             timeout: 5000,
             wait_for: "domcontentloaded".into(),
@@ -227,14 +231,25 @@ impl Options {
             .pointer("/fetch/playwright")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        if settings
-            .get("session_mode")
-            .and_then(Value::as_str)
-            .unwrap_or("isolated")
-            != "isolated"
-        {
-            return Err(Error::Unsupported("Native browser domain_persistent sessions are not implemented; use session_mode=isolated".into()));
-        }
+        let persistent = match settings.get("session_mode") {
+            None => false,
+            Some(Value::String(mode)) if mode == "isolated" => false,
+            Some(Value::String(mode)) if mode == "domain_persistent" => true,
+            _ => {
+                return Err(Error::Config(
+                    "Browser session_mode must be isolated or domain_persistent".into(),
+                ));
+            }
+        };
+        let session_ttl = match settings.get("session_ttl_seconds") {
+            None => 600,
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (60..=7200).contains(value))
+                .ok_or_else(|| {
+                    Error::Config("Browser session_ttl_seconds must be between 60 and 7200".into())
+                })?,
+        };
         let credentials = super::auth::parse(settings.get("http_credentials"), url)?;
         let authority = match url.port() {
             Some(port) => format!("{}:{port}", url.host_str().unwrap()),
@@ -307,6 +322,8 @@ impl Options {
         let screenshot = cfg.get("screenshot").cloned().unwrap_or_else(|| json!({}));
         let (proxy, bypass) = proxy(&config::environment(), url)?;
         Ok(Self {
+            persistent,
+            session_ttl: std::time::Duration::from_secs(session_ttl),
             credentials,
             timeout,
             wait_for,

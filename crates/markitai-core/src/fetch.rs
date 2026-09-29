@@ -153,11 +153,22 @@ pub fn fetch(source: &str, cfg: &Value) -> Result<Document> {
 
 /// Explicit strategy provenance scopes page-cache keys and suppresses learned
 /// routing hints for explicitly selected auto, matching the reference caller.
-pub(crate) fn fetch_with_context(
+#[cfg(test)]
+fn fetch_with_context(
     source: &str,
     cfg: &Value,
     explicit_strategy: Option<&str>,
     output_available: bool,
+) -> Result<FetchOutcome> {
+    fetch_with_runtime(source, cfg, explicit_strategy, output_available, None)
+}
+
+pub(crate) fn fetch_with_runtime(
+    source: &str,
+    cfg: &Value,
+    explicit_strategy: Option<&str>,
+    output_available: bool,
+    runtime: Option<&crate::BrowserRuntime>,
 ) -> Result<FetchOutcome> {
     let url = Url::parse(source).map_err(|_| Error::InvalidInput("Invalid URL".into()))?;
     if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() {
@@ -195,17 +206,17 @@ pub(crate) fn fetch_with_context(
     let mut learning_unavailable = false;
     if learn && explicit_strategy.is_none() && browser::available() {
         match spa_domains::take_hint(cfg, &url) {
-            Ok(true) => return fetch_browser(source, cfg, capture, output_available),
+            Ok(true) => return fetch_browser(source, cfg, capture, output_available, runtime),
             Ok(false) => {}
             Err(_) => learning_unavailable = true,
         }
     }
     let mut result = match strategy {
-        "playwright" => fetch_browser(source, cfg, capture, output_available),
+        "playwright" => fetch_browser(source, cfg, capture, output_available, runtime),
         // A configured browser identity must not read an anonymous cache entry
         // or send an unauthenticated PDF probe before challenge authentication.
         "auto" if browser::identity_configured(cfg) => {
-            fetch_browser(source, cfg, capture, output_available)
+            fetch_browser(source, cfg, capture, output_available, runtime)
         }
         "auto" if capture => match probe_pdf(source, &url, cfg, explicit_strategy, learn)? {
             (Some(outcome), _) => Ok(outcome),
@@ -218,6 +229,7 @@ pub(crate) fn fetch_with_context(
                     true,
                     output_available,
                     learn && needs_javascript,
+                    runtime,
                 )
             }
         },
@@ -227,13 +239,13 @@ pub(crate) fn fetch_with_context(
             let mut outcome = match fetch_static(source, &url, cfg, explicit_strategy) {
                 Err(error) if visual_only(cfg) && browser_quality_failure(&error) => {
                     require_capture_output(cfg, output_available)?;
-                    return fetch_browser(source, cfg, true, output_available);
+                    return fetch_browser(source, cfg, true, output_available, runtime);
                 }
                 result => result?,
             };
             if matches!(&outcome.content, FetchContent::Document(_)) {
                 require_capture_output(cfg, output_available)?;
-                attach_screenshot(source, cfg, &mut outcome)?;
+                attach_screenshot(source, cfg, &mut outcome, runtime)?;
             }
             Ok(outcome)
         }
@@ -248,6 +260,7 @@ pub(crate) fn fetch_with_context(
                     false,
                     output_available,
                     learn && needs_javascript,
+                    runtime,
                 )
             }
             result => result,
@@ -313,7 +326,7 @@ pub(crate) fn fetch_with_context(
                 screenshots: Vec::new(),
             };
             if capture {
-                attach_screenshot(source, cfg, &mut outcome)?;
+                attach_screenshot(source, cfg, &mut outcome, runtime)?;
             }
             Ok(outcome)
         }
@@ -346,8 +359,9 @@ fn fetch_browser_and_learn(
     capture: bool,
     output_available: bool,
     learn: bool,
+    runtime: Option<&crate::BrowserRuntime>,
 ) -> Result<FetchOutcome> {
-    let response = browser::fetch(source, cfg, capture)?;
+    let response = browser::fetch_with_runtime(source, cfg, capture, runtime)?;
     // A challenge or still-unrendered shell is not evidence that this domain
     // has a usable browser representation. PDFs never teach HTML routing.
     let admissible = learn
@@ -389,8 +403,13 @@ fn browser_quality_failure(error: &Error) -> bool {
     }
 }
 
-fn attach_screenshot(source: &str, cfg: &Value, outcome: &mut FetchOutcome) -> Result<()> {
-    match browser::fetch(source, cfg, true) {
+fn attach_screenshot(
+    source: &str,
+    cfg: &Value,
+    outcome: &mut FetchOutcome,
+    runtime: Option<&crate::BrowserRuntime>,
+) -> Result<()> {
+    match browser::fetch_with_runtime(source, cfg, true, runtime) {
         Ok(browser::BrowserResponse::Page(page)) => {
             outcome.screenshots = page.screenshots;
             outcome.content.warnings_mut().extend(page.warnings);
@@ -415,8 +434,13 @@ fn fetch_browser(
     cfg: &Value,
     capture: bool,
     output_available: bool,
+    runtime: Option<&crate::BrowserRuntime>,
 ) -> Result<FetchOutcome> {
-    browser_response_outcome(browser::fetch(source, cfg, capture)?, cfg, output_available)
+    browser_response_outcome(
+        browser::fetch_with_runtime(source, cfg, capture, runtime)?,
+        cfg,
+        output_available,
+    )
 }
 
 fn browser_response_outcome(
@@ -1376,9 +1400,12 @@ mod cache_tests {
         assert_eq!(auto.document().markdown, "unscoped");
         cfg["fetch"]["strategy"] = json!("playwright");
         cfg["fetch"]["playwright"]["session_mode"] = json!("domain_persistent");
+        // Persistent sessions are supported; invalid browser settings must
+        // still fail before launch instead of reusing the anonymous cache.
+        cfg["fetch"]["playwright"]["session_ttl_seconds"] = json!(59);
         assert!(matches!(
             fetch_with_context(&server.url("/page"), &cfg, None, true),
-            Err(Error::Unsupported(message)) if message.contains("domain_persistent")
+            Err(Error::Config(message)) if message.contains("session_ttl_seconds")
         ));
         cfg["fetch"]["strategy"] = json!("jina");
         assert!(fetch_with_context(&server.url("/page"), &cfg, None, true).is_err());

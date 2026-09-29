@@ -1,3 +1,5 @@
+#[path = "legacy_backup.rs"]
+mod legacy_backup;
 use super::{
     Checkpoint, Error, Event, Fence, ItemKey, Limits, LoadOutcome, Result, Scope, Snapshot, codec,
 };
@@ -23,6 +25,7 @@ pub(crate) struct StateStore {
     durable_sequence: u64,
     begun: bool,
     poisoned: bool,
+    legacy_backup: Option<PathBuf>,
     #[cfg(test)]
     fault: Option<FaultPoint>,
 }
@@ -103,6 +106,7 @@ impl StateStore {
             durable_sequence: 0,
             begun: false,
             poisoned: false,
+            legacy_backup: None,
             #[cfg(test)]
             fault: None,
         })
@@ -282,6 +286,16 @@ impl StateStore {
         let bytes = codec::encode(&snapshot, &self.scope, self.allow_symlinks, self.limits)?;
         if matches!(disk, DiskBase::Corrupt(_)) {
             self.quarantine()?;
+        } else if matches!(&disk, DiskBase::Valid(previous) if previous.checkpoint.is_none()) {
+            self.check_paths()?;
+            let generation = &snapshot.checkpoint.as_ref().unwrap().generation;
+            self.legacy_backup = Some(legacy_backup::preserve(
+                &self.directory,
+                &self.base,
+                &self.journal,
+                generation,
+                self.limits,
+            )?);
         }
         self.snapshot = Some(snapshot);
         let result = self.replace_base(&bytes);
@@ -291,6 +305,10 @@ impl StateStore {
             self.begun = true;
         }
         result
+    }
+
+    pub(crate) fn legacy_backup(&self) -> Option<&Path> {
+        self.legacy_backup.as_deref()
     }
 
     pub(crate) fn snapshot(&self) -> Option<&Snapshot> {
@@ -707,6 +725,114 @@ mod tests {
 
     fn file_key() -> ItemKey {
         ItemKey::File("a.txt".into())
+    }
+
+    #[test]
+    fn legacy_takeover_preserves_raw_pair_before_replacing_it_and_only_once() {
+        let (_dir, scope, snapshot) = setup();
+        let mut store = open(&scope);
+        let mut value: Value = serde_json::from_slice(
+            &codec::encode(&snapshot, &scope, false, Limits::default()).unwrap(),
+        )
+        .unwrap();
+        value["unrecognized_private_field"] = json!({"keep":"原始"});
+        let original = format!("  {}\n\n", serde_json::to_string_pretty(&value).unwrap());
+        let journal = b"{broken JSON\n{\"type\":\"file\",\"key\":\"a.txt\",\"data\":{\"status\":\"completed\"}}\n";
+        fs::write(&store.base, &original).unwrap();
+        fs::write(&store.journal, journal).unwrap();
+        let (replayed, warnings) = loaded(&mut store);
+        assert_eq!(replayed.documents["a.txt"].status, Status::Completed);
+        assert!(!warnings.is_empty());
+        store.begin(replayed).unwrap();
+        let backup = store.legacy_backup().unwrap().to_owned();
+        assert_eq!(
+            fs::read(backup.join(store.base.file_name().unwrap())).unwrap(),
+            original.as_bytes()
+        );
+        assert_eq!(
+            fs::read(backup.join(store.journal.file_name().unwrap())).unwrap(),
+            journal
+        );
+        assert!(!store.journal.exists());
+        assert!(store.snapshot().unwrap().checkpoint.is_some());
+        let before = fs::read_dir(&store.directory).unwrap().count();
+        store.begin(store.snapshot().unwrap().clone()).unwrap();
+        assert_eq!(fs::read_dir(&store.directory).unwrap().count(), before);
+        drop(store);
+        let mut reopened = open(&scope);
+        let (saved, _) = loaded(&mut reopened);
+        reopened.begin(saved).unwrap();
+        assert!(reopened.legacy_backup().is_none());
+        assert_eq!(fs::read_dir(&reopened.directory).unwrap().count(), before);
+    }
+
+    #[test]
+    fn legacy_backup_survives_each_checkpoint_publication_failure_window() {
+        for point in [
+            FaultPoint::AfterTempSync,
+            FaultPoint::AfterBaseSync,
+            FaultPoint::AfterJournalRemove,
+        ] {
+            let (_dir, scope, snapshot) = setup();
+            let mut store = open(&scope);
+            let original = codec::encode(&snapshot, &scope, false, Limits::default()).unwrap();
+            let journal =
+                b"{\"type\":\"file\",\"key\":\"a.txt\",\"data\":{\"status\":\"completed\"}}\n";
+            fs::write(&store.base, &original).unwrap();
+            fs::write(&store.journal, journal).unwrap();
+            let (saved, _) = loaded(&mut store);
+            store.inject_fault(point);
+            assert!(store.begin(saved).is_err(), "{point:?}");
+            let backup = store.legacy_backup().unwrap().to_owned();
+            assert_eq!(
+                fs::read(backup.join(store.base.file_name().unwrap())).unwrap(),
+                original
+            );
+            assert_eq!(
+                fs::read(backup.join(store.journal.file_name().unwrap())).unwrap(),
+                journal
+            );
+            drop(store);
+            let (recovered, _) = loaded(&mut open(&scope));
+            assert_eq!(recovered.documents["a.txt"].status, Status::Completed);
+        }
+    }
+
+    #[test]
+    fn invalid_new_scope_is_rejected_before_preserving_or_replacing_legacy_state() {
+        let (_dir, scope, mut snapshot) = setup();
+        let mut store = open(&scope);
+        let original = codec::encode(&snapshot, &scope, false, Limits::default()).unwrap();
+        fs::write(&store.base, &original).unwrap();
+        fs::write(&store.journal, b"\n").unwrap();
+        snapshot
+            .options
+            .insert("output_dir".into(), json!(scope.output.join("different")));
+        assert!(matches!(store.begin(snapshot), Err(Error::ForeignScope(_))));
+        assert_eq!(fs::read(&store.base).unwrap(), original);
+        assert_eq!(fs::read(&store.journal).unwrap(), b"\n");
+        assert!(store.legacy_backup().is_none());
+        assert_eq!(fs::read_dir(&store.directory).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn refusing_oversized_legacy_backup_does_not_upgrade_or_truncate_state() {
+        let (_dir, scope, snapshot) = setup();
+        let limits = Limits {
+            journal_bytes: 8,
+            ..Limits::default()
+        };
+        let mut store = StateStore::open(scope.clone(), "abc123", false, limits).unwrap();
+        let original = codec::encode(&snapshot, &scope, false, limits).unwrap();
+        let journal = b"a journal larger than the configured limit\n";
+        fs::write(&store.base, &original).unwrap();
+        fs::write(&store.journal, journal).unwrap();
+        assert!(store.begin(snapshot).is_err());
+        assert_eq!(fs::read(&store.base).unwrap(), original);
+        assert_eq!(fs::read(&store.journal).unwrap(), journal);
+        assert!(store.legacy_backup().is_none());
+        assert!(store.snapshot().is_none());
+        assert_eq!(fs::read_dir(&store.directory).unwrap().count(), 3);
     }
 
     #[test]
