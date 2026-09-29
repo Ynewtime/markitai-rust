@@ -62,13 +62,15 @@ test('async native fetch leaves the JavaScript event loop available', async () =
 
 test('older producer errors and constructor preserve optional usage', async () => {
   const vm = require('node:vm');
+  const loadedWrapper = Object.values(require.cache).find((entry) => entry.exports === markitai);
+  assert.ok(loadedWrapper, 'test uses the actual loaded wrapper source');
   const paid = { cost_usd: 0, requests: 1, input_tokens: 0, output_tokens: 0, by_model: { fixture: { requests: 1 } } };
   for (const usage of [undefined, paid]) {
     const error = { message: 'original message', code: 'conversion_error' };
     if (usage !== undefined) error.usage = usage;
     const encoded = JSON.stringify({ ok: false, error });
     const module = { exports: {} };
-    vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'index.cjs'), 'utf8'), {
+    vm.runInNewContext(fs.readFileSync(loadedWrapper.filename, 'utf8'), {
       module, require: (name) => {
         assert.equal(name, './markitai.node');
         return { convertJson: async () => encoded, convertJsonSync: () => encoded, version: () => 'fixture' };
