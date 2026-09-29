@@ -386,3 +386,9 @@ Cargo manifests and original text bytes. Six package versions have complete text
 nine have notices only and remain explicitly unresolved. Original evidence is
 tracked under `licenses/upstream`. Actual rebuilt package acceptance is separate
 from these source and helper tests, and no legal clearance is asserted.
+
+[R29 installed evidence](validation/operations-runtime-round29.md) now verifies
+the rebuilt ABI3/Node/Go consumers and static package. With SDKROOT absent,
+automatic SDK selection passes all thirteen static stages; seven race tests and
+24 relocated concurrent calls succeed. The package retains 807 installed files
+and nine notice-only gaps. This remains a native macOS arm64 result.
