@@ -5,10 +5,10 @@ request and response contract. Neither an installed CLI nor a Python worker is
 used for conversion. Feature availability is therefore the same as the core;
 an installed binding does not add missing format, OCR, or browser capabilities.
 
-The latest [installed-package validation](validation/structured-media-round24.md)
-targets source `2d502b9ad4d46edf21fc854997543a79ab74c532` on macOS arm64.
-Python 3.13, Node 24 and Go 1.27.1 checks pass: 16 installed Python tests,
-three installed Node tests and Go source-package race tests. The earlier
+The latest [installed-package validation](validation/runtime-history-round25.md)
+targets source `ccf51ba8563a9066b14cf1fdee0aef6b1b7e05b3` on macOS arm64.
+Python 3.13, Node 24 and Go 1.27.1 checks pass: 18 installed Python tests,
+five installed Node tests and Go source-package race tests. The earlier
 [round-seventeen PDF comparison](validation/pdf-native-round17.md) remains its
 own recorded evidence. Native media backends are platform-specific; separate
 Rosetta testing retains an OCR failure and does not validate physical Intel,
