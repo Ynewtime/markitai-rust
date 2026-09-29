@@ -59,6 +59,30 @@ pub(crate) fn probe(request: &Value) -> Result<()> {
         .map(|_| ())
         .map_err(|failure| failure.error);
     }
+    if model.starts_with("chatgpt/") {
+        for name in ["api_key", "api_base"] {
+            if request
+                .get(name)
+                .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+            {
+                return Err(Error::InvalidInput("ChatGPT subscription probe uses official CLI authentication, not API credentials or a base URL".into()));
+            }
+        }
+        let config = crate::subscription::chatgpt::Config::from_env(&env)?;
+        return crate::subscription::chatgpt::complete(
+            &config,
+            crate::subscription::Request {
+                model,
+                system: "Reply briefly without tools.",
+                user: "Reply with exactly OK.",
+                images: &[],
+                timeout: Duration::from_secs(15),
+                cancel: None,
+            },
+        )
+        .map(|_| ())
+        .map_err(|failure| failure.error);
+    }
     let mut params = json!({"model":model,"max_tokens":16,"weight":1});
     for name in ["api_key", "api_base"] {
         if let Some(value) = request.get(name) {

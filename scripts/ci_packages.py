@@ -21,6 +21,7 @@ import tempfile
 import zipfile
 
 from pricing_attribution import pricing_files
+from codex_attribution import codex_files
 from license_overlay import upstream_files
 
 
@@ -138,6 +139,86 @@ def supplement_wheel_licenses(source, destination, licenses):
             "supplemented": identity(destination), "license_directory": directory + "/licenses"}
 
 
+def _cli_license_paths(licenses):
+    from pathlib import PurePosixPath
+    for name in licenses:
+        path = PurePosixPath(name)
+        if (not name or path.is_absolute() or path.as_posix() != name
+                or any(part in {"", ".", ".."} for part in path.parts)
+                or "\\" in name or path.parts[0] in {"markitai", "mkai", "markitai-mcp"}):
+            raise RuntimeError("Unsafe CLI attribution path")
+
+
+def write_single_binary_tar(binary, destination, licenses):
+    """Unix delivery: one regular executable, relative aliases, exact attribution."""
+    _cli_license_paths(licenses)
+    if binary.is_symlink() or not binary.is_file():
+        raise RuntimeError("CLI delivery requires a regular executable")
+    with tarfile.open(destination, "x:gz") as archive:
+        member = tarfile.TarInfo("markitai")
+        member.size = binary.stat().st_size
+        member.mode = 0o755
+        with binary.open("rb") as stream:
+            archive.addfile(member, stream)
+        for name in ["mkai", "markitai-mcp"]:
+            alias = tarfile.TarInfo(name)
+            alias.type = tarfile.SYMTYPE
+            alias.linkname = "markitai"
+            alias.mode = 0o777
+            archive.addfile(alias)
+        for name, content in licenses.items():
+            member = tarfile.TarInfo(name)
+            member.mode = 0o644
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+
+
+def extract_single_binary_tar(archive_path, destination, binary, licenses):
+    """Validate the complete inventory before extracting our narrowly shaped tar."""
+    _cli_license_paths(licenses)
+    with tarfile.open(archive_path, "r:gz") as archive:
+        members = archive.getmembers()
+        expected = {"markitai", "mkai", "markitai-mcp", *licenses}
+        if len(members) != len(expected) or {m.name for m in members} != expected:
+            raise RuntimeError("Single-binary CLI archive has an unexpected member inventory")
+        by_name = {member.name: member for member in members}
+        executable = by_name["markitai"]
+        if (not executable.isfile() or executable.size != binary.stat().st_size
+                or executable.mode != 0o755):
+            raise RuntimeError("Single-binary CLI archive has an invalid executable")
+        for name in ["mkai", "markitai-mcp"]:
+            alias = by_name[name]
+            if not alias.issym() or alias.linkname != "markitai":
+                raise RuntimeError("CLI aliases must be relative symlinks to markitai")
+        for name, content in licenses.items():
+            member = by_name[name]
+            if (not member.isfile() or member.mode != 0o644 or member.size != len(content)
+                    or archive.extractfile(member).read() != content):
+                raise RuntimeError("CLI attribution is missing or differs from source")
+        destination.mkdir(parents=True, exist_ok=False)
+        target = destination / "markitai"
+        with target.open("xb") as stream:
+            shutil.copyfileobj(archive.extractfile(executable), stream)
+        target.chmod(0o755)
+        if identity(target) != identity(binary):
+            raise RuntimeError("Archived CLI executable differs from the frozen binary")
+        for name, content in licenses.items():
+            target = destination / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as stream:
+                stream.write(content)
+            if target.read_bytes() != content:
+                raise RuntimeError("Extracted CLI attribution differs from source")
+        for name in ["mkai", "markitai-mcp"]:
+            (destination / name).symlink_to("markitai")
+            if os.readlink(destination / name) != "markitai" or identity(destination / name) != identity(binary):
+                raise RuntimeError("Extracted CLI alias does not address the frozen executable")
+    return {"archive": identity(archive_path), "executable": identity(destination / "markitai"),
+            "aliases": [{"path": name, "target": "markitai", "kind": "symlink"}
+                        for name in ["mkai", "markitai-mcp"]],
+            "attribution": {name: identity(destination / name) for name in licenses}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-host", required=True)
@@ -214,6 +295,7 @@ def main():
         record["source_before"] = snapshot()
         licenses = {name: (root / name).read_bytes() for name in ["LICENSE", "NOTICE"]}
         licenses.update(pricing_files(root))
+        licenses.update(codex_files(root))
         licenses.update(upstream_files(root))
         compiler = run("compiler", ["rustc", "-vV"])
         record["compiler"] = compiler
@@ -229,25 +311,66 @@ def main():
         binary = release / ("markitai" + extension)
         version = run("version", [binary, "--version"]).strip().split()[-1]
 
+        cli_licenses = dict(licenses)
+        for name in ["marked-LICENSE", "DOMPurify-LICENSE", "provenance.json"]:
+            relative = "vendor/web/" + name
+            cli_licenses[relative] = (root / relative).read_bytes()
         archive = output / f"markitai-{version}-{host}.zip"
         with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as bundle:
             for name in ["markitai", "mkai"]:
                 bundle.write(release / (name + extension), name + extension)
-            for name, content in licenses.items():
+            for name, content in cli_licenses.items():
                 bundle.writestr(name, content)
-            for name in ["marked-LICENSE", "DOMPurify-LICENSE", "provenance.json"]:
-                relative = "vendor/web/" + name
-                bundle.write(root / relative, relative)
+            if os.name == "nt":
+                bundle.writestr("markitai-mcp.cmd", b'@echo off\r\n"%~dp0markitai.exe" mcp %*\r\n')
+            else:
+                alias = zipfile.ZipInfo("markitai-mcp")
+                alias.create_system = 3
+                alias.external_attr = (0o120777 << 16)
+                bundle.writestr(alias, b"markitai")
         artifact(archive)
         extracted = work / "cli"
         with zipfile.ZipFile(archive) as bundle:
-            bundle.extractall(extracted)
-            if os.name != "nt":
+            if os.name == "nt":
+                bundle.extractall(extracted)
+                launcher = extracted / "markitai-mcp.cmd"
+                if launcher.read_bytes() != b'@echo off\r\n"%~dp0markitai.exe" mcp %*\r\n':
+                    raise RuntimeError("Windows MCP launcher differs from its declared forwarding command")
+                record["cli_mcp_alias"] = {"kind": "cmd_forwarder", "identity": identity(launcher), "executed": False}
+            else:
+                alias = bundle.getinfo("markitai-mcp")
+                if alias.external_attr >> 16 != 0o120777 or bundle.read(alias) != b"markitai":
+                    raise RuntimeError("ZIP MCP alias is not the declared relative symlink")
+                for member in bundle.infolist():
+                    if member.filename != "markitai-mcp":
+                        bundle.extract(member, extracted)
                 for name in ["markitai", "mkai"]:
                     (extracted / name).chmod(0o755)
+                (extracted / "markitai-mcp").symlink_to("markitai")
+                if identity(extracted / "markitai-mcp") != identity(binary):
+                    raise RuntimeError("ZIP MCP alias differs from the retained executable")
+                record["cli_mcp_alias"] = {"kind": "symlink", "target": "markitai", "identity": identity(extracted / "markitai-mcp")}
+                help_text = run("zip-mcp-alias-help", [extracted / "markitai-mcp", "--help"], cwd=extracted)
+                if "mcp" not in help_text.lower() or "Commands:" in help_text:
+                    raise RuntimeError("ZIP MCP alias did not select the MCP subcommand")
+                record["cli_mcp_alias"]["executed"] = True
         for name, content in licenses.items():
             if (extracted / name).read_bytes() != content:
                 raise RuntimeError(f"Archived CLI {name} differs from pricing/project attribution")
+        if os.name != "nt":
+            single = output / f"markitai-{version}-{host}-single-binary.tar.gz"
+            write_single_binary_tar(binary, single, cli_licenses)
+            artifact(single)
+            unpacked = work / "single-binary-cli"
+            record["single_binary_cli"] = extract_single_binary_tar(single, unpacked, binary, cli_licenses)
+            alias_version = run("single-binary-alias-version", [unpacked / "mkai", "--version"], cwd=unpacked).strip()
+            if alias_version.split()[-1] != version:
+                raise RuntimeError("Archived mkai alias reported a different version")
+            record["single_binary_cli"]["alias_version"] = alias_version
+            help_text = run("single-binary-mcp-alias-help", [unpacked / "markitai-mcp", "--help"], cwd=unpacked)
+            if "mcp" not in help_text.lower() or "Commands:" in help_text:
+                raise RuntimeError("Single-binary MCP alias did not select the MCP subcommand")
+            record["single_binary_cli"]["mcp_alias_executed"] = True
         source = work / "source.md"
         source.write_text("# Native package\n\nHello 世界.\n", encoding="utf-8")
         text = run("archived-cli", [extracted / ("markitai" + extension), source, "--pure"], cwd=work)

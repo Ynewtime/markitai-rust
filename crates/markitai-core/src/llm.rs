@@ -1,6 +1,7 @@
 //! Native text and image requests with a bounded routing and retry policy.
 mod accounting;
 pub(crate) mod batch;
+mod chatgpt;
 mod chunks;
 mod claude;
 mod copilot;
@@ -739,7 +740,7 @@ pub(crate) fn capabilities(cfg: &Value, env: &HashMap<String, String>) -> crate:
         entries.iter().any(|entry| {
             matches!(
                 entry.provider.as_str(),
-                "ollama" | "ollama_chat" | "copilot" | "claude-agent"
+                "ollama" | "ollama_chat" | "copilot" | "claude-agent" | "chatgpt"
             ) || entry.key.as_ref().is_some_and(|key| !key.is_empty())
         })
     });
@@ -767,7 +768,7 @@ pub(crate) fn vision_models(cfg: &Value, env: &HashMap<String, String>) -> Vec<S
                 && entry.supports_vision != Some(false)
                 && (matches!(
                     entry.provider.as_str(),
-                    "ollama" | "ollama_chat" | "copilot" | "claude-agent"
+                    "ollama" | "ollama_chat" | "copilot" | "claude-agent" | "chatgpt"
                 ) || entry.key.as_ref().is_some_and(|key| !key.is_empty()))
                 && seen.insert(entry.id.clone())
         })
@@ -807,11 +808,13 @@ fn deployments(cfg: &Value, env: &HashMap<String, String>) -> Result<Vec<Deploym
             continue;
         };
         let (provider, model_name) = model.split_once('/').unwrap_or(("openai", model));
-        if matches!(provider, "copilot" | "claude-agent") {
+        if matches!(provider, "copilot" | "claude-agent" | "chatgpt") {
             let deployment = if provider == "copilot" {
                 copilot::deployment(entry, env, grouped)
-            } else {
+            } else if provider == "claude-agent" {
                 claude::deployment(entry, env, grouped)
+            } else {
+                chatgpt::deployment(entry, env, grouped)
             };
             match deployment {
                 Ok(deployment) => result.push(deployment),
@@ -1297,6 +1300,16 @@ fn run_mode(
                     )
                 } else if entries[selected].provider == "claude-agent" {
                     claude::request(
+                        &entries[selected],
+                        prompts,
+                        env,
+                        Duration::from_secs(timeout),
+                        stop,
+                        &mut usage,
+                        strategy.measured().then_some(&mut observation),
+                    )
+                } else if entries[selected].provider == "chatgpt" {
+                    chatgpt::request(
                         &entries[selected],
                         prompts,
                         env,

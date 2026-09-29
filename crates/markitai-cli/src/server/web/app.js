@@ -1,11 +1,14 @@
 import {api, authenticatedURL, bootstrapToken, setToken, fileURL, element, button, errorText} from './api.js';
 import {preview} from './preview.js';
+import {markdownPair, compareLines, renderComparison, printPreview} from './result-tools.js';
 import {initSettings, loadSettings} from './settings.js';
 bootstrapToken();
 const $ = id => document.getElementById(id);
 let files = [], current = null, stream = null, poll = null, generation = 0, resultGeneration = 0;
 let result = null, raw = '', documentPath = '', historyRows = [], page = 0;
 let capabilities = null;
+let resultMode = 'preview', diffGeneration = 0, comparisonRequest = null, printSession = null, resultPending = 0;
+function cancelResultTools() { diffGeneration++; comparisonRequest?.abort(); comparisonRequest = null; printSession?.cancel(); printSession = null; if(resultMode==='diff')$('comparison').textContent='Choose Changes to compare the two versions.'; }
 const notice = (message, bad = false) => { $('notice').textContent = message; $('notice').hidden = !message; $('notice').classList.toggle('error', bad); };
 const run = async action => { try { return await action(); } catch (error) { notice(errorText(error), true); } };
 const terminal = item => ['done','error'].includes(item.status);
@@ -54,6 +57,7 @@ export async function confirmDelete(title, text) {
   return new Promise(resolve => { dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), {once:true}); dialog.showModal(); });
 }
 function view(name) {
+  if (name !== 'convert') cancelResultTools();
   for (const section of document.querySelectorAll('.view')) section.hidden = section.id !== `${name}-view`;
   for (const link of document.querySelectorAll('[data-view]')) link.classList.toggle('active', link.dataset.view === name);
   if (name === 'history') run(loadHistory);
@@ -102,7 +106,7 @@ $('convert-form').addEventListener('submit',async event => {
 });
 function closeStream() { stream?.close(); stream = null; clearTimeout(poll); poll = null; }
 async function openJob(id) {
-  generation++; closeStream(); resultGeneration++; result = null; $('result-panel').hidden = true;
+  generation++; closeStream(); cancelResultTools(); resultGeneration++; resultPending=0; $('print-result').disabled=false; result = null; $('result-panel').hidden = true;
   const expected = generation;
   const snapshot = await api(`/api/jobs/${encodeURIComponent(id)}`);
   if (expected !== generation) return;
@@ -141,7 +145,7 @@ function renderJob() {
     if (current.status !== 'running') actions.append(button('Delete',() => run(async () => {
       if (!await confirmDelete('Delete this item?',`“${item.name}” and its owned files will be removed. Shared assets remain available to other items.`)) return;
       const id = current.job_id; await api(`/api/jobs/${encodeURIComponent(id)}/items/${encodeURIComponent(item.item_id)}`,{method:'DELETE'});
-      if (current.items.length === 1) { current = null; closeStream(); $('job-items').replaceChildren(); $('job-empty').hidden = false; $('job-progress').hidden = true; $('job-archive').hidden = true; $('result-panel').hidden = true; const url=new URL(location.href);url.searchParams.delete('job');history.replaceState(null,'',url.pathname+url.search); }
+      if (current.items.length === 1) { cancelResultTools(); current = null; closeStream(); $('job-items').replaceChildren(); $('job-empty').hidden = false; $('job-progress').hidden = true; $('job-archive').hidden = true; $('result-panel').hidden = true; const url=new URL(location.href);url.searchParams.delete('job');history.replaceState(null,'',url.pathname+url.search); }
       else await openJob(id);
     }), 'quiet small delete'));
     row.append(icon,info,actions); $('job-items').append(row);
@@ -172,6 +176,7 @@ function subscribe(expected) {
 }
 async function retry(item, enhance) {
   const id = current.job_id;
+  cancelResultTools();
   const body = enhance ? {operation:'enhance',options:{...current.options,llm:true}} : {operation:'retry'};
   // History options can contain internal origin metadata; only public option keys travel back.
   if (enhance) for (const key of Object.keys(body.options)) if (!['preset','llm','ocr','profile','alt','desc','screenshot','screenshot_only','pure','no_cache','no_compress','strategy','backend'].includes(key)) delete body.options[key];
@@ -179,23 +184,74 @@ async function retry(item, enhance) {
   await openJob(id);
 }
 async function openResult(item) {
+  cancelResultTools();
   const expected = ++resultGeneration, job = current.job_id;
-  const value = await api(`/api/jobs/${encodeURIComponent(job)}/items/${encodeURIComponent(item.item_id)}/result`);
+  resultPending=expected; $('print-result').disabled=true;
+  let value;
+  try { value = await api(`/api/jobs/${encodeURIComponent(job)}/items/${encodeURIComponent(item.item_id)}/result`); }
+  finally { if(resultPending===expected){resultPending=0;$('print-result').disabled=!!printSession;} }
   if (expected !== resultGeneration || job !== current?.job_id) return;
-  result = {...value,job}; $('result-title').textContent = item.name; $('result-panel').hidden = false;
+  result = {...value,job,pair:markdownPair(value.artifacts)}; $('result-title').textContent = item.name; $('result-panel').hidden = false;
   const variants = value.artifacts.filter(asset => asset.relpath.endsWith('.md'));
-  const preferred = variants.find(asset => value.variant === 'llm' ? asset.relpath.endsWith('.llm.md') : !asset.relpath.endsWith('.llm.md')) || variants[0];
+  const preferred = variants.find(asset => result.pair ? asset.relpath === result.pair[value.variant === 'llm' ? 'enhanced' : 'base'] : asset.relpath === item.output) || variants[0];
   documentPath = preferred?.relpath || item.output;
   $('result-variant').replaceChildren();
-  for (const asset of variants) { const option = element('option','',asset.relpath.endsWith('.llm.md') ? 'Enhanced' : 'Base'); option.value = asset.relpath; $('result-variant').append(option); }
+  for (const asset of variants) { const option = element('option','',result.pair ? (asset.relpath === result.pair.enhanced ? 'Enhanced' : 'Base') : value.variant === 'llm' ? 'Enhanced' : 'Base'); option.value = asset.relpath; $('result-variant').append(option); }
   $('result-variant').value = documentPath;
   $('artifact-list').replaceChildren();
   for (const asset of value.artifacts) { const li = element('li'); const link = element('a','',asset.relpath); link.href = authenticatedURL(fileURL(job,asset.relpath)); link.download = ''; li.append(link,element('small','muted',size(asset.size))); $('artifact-list').append(li); }
-  renderResult(value.markdown); $('result-panel').scrollIntoView({behavior:'smooth',block:'start'});
+  $('mode-diff').hidden = !result.pair;
+  setResultMode('preview'); renderResult(value.markdown); $('result-panel').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function renderResult(markdown) { raw = markdown; $('source').textContent = raw; $('download-source').href = authenticatedURL(fileURL(result.job,documentPath)); $('download-source').download = ''; preview(raw,result.job,documentPath,result.artifacts,$('rendered')); }
-$('result-variant').addEventListener('change',() => run(async () => { const expected=++resultGeneration, path=$('result-variant').value, selected=result; const text=await api(fileURL(selected.job,path),{text:true}); if(expected===resultGeneration&&result===selected){documentPath=path;renderResult(text);} }));
-for (const mode of ['preview','source']) $(`mode-${mode}`).addEventListener('click',() => { $('rendered').hidden=mode!=='preview';$('source').hidden=mode!=='source';$('mode-preview').classList.toggle('active',mode==='preview');$('mode-source').classList.toggle('active',mode==='source'); });
+function setResultMode(mode) {
+  resultMode = mode;
+  for (const [name, panel] of [['preview','rendered'],['source','source'],['diff','comparison']]) {
+    $(panel).hidden = name !== mode; $(`mode-${name}`).classList.toggle('active', name === mode); $(`mode-${name}`).setAttribute('aria-pressed', String(name === mode));
+  }
+}
+async function showComparison() {
+  const selected = result, pair = selected?.pair;
+  if (!pair || resultPending) return;
+  const expected = ++diffGeneration; comparisonRequest?.abort(); const controller = new AbortController(); comparisonRequest = controller;
+  setResultMode('diff'); $('comparison').textContent = 'Loading both Markdown versions…';
+  const currentPath = documentPath, currentText = raw;
+  try {
+    const limit = 8 * 1024 * 1024;
+    if ([pair.base,pair.enhanced].some(path => selected.artifacts.find(asset => asset.relpath === path)?.size > limit)) {
+      renderComparison({kind:'too-large'}, $('comparison')); return;
+    }
+    const texts = await Promise.all([pair.base,pair.enhanced].map(path => path === currentPath ? currentText : api(fileURL(selected.job,path),{text:true,maxTextBytes:limit,signal:controller.signal})));
+    if (expected !== diffGeneration || selected !== result || resultMode !== 'diff') return;
+    renderComparison(compareLines(...texts), $('comparison'));
+  } catch (error) {
+    if (expected === diffGeneration && selected === result && error.name !== 'AbortError') $('comparison').textContent = `Comparison unavailable: ${errorText(error)}. Both versions remain available to download.`;
+  } finally { if (comparisonRequest === controller) comparisonRequest = null; }
+}
+$('result-variant').addEventListener('change',() => run(async () => {
+  cancelResultTools(); const expected=++resultGeneration, path=$('result-variant').value, selected=result;
+  resultPending=expected; $('print-result').disabled=true;
+  try {
+    const text=await api(fileURL(selected.job,path),{text:true});
+    if(expected===resultGeneration&&result===selected){documentPath=path;renderResult(text);}
+  } finally {
+    if(resultPending===expected){resultPending=0;$('print-result').disabled=!!printSession;$('result-variant').value=documentPath;}
+  }
+  if(expected===resultGeneration&&result===selected&&resultMode==='diff')await showComparison();
+}));
+for (const mode of ['preview','source']) $(`mode-${mode}`).addEventListener('click',() => { diffGeneration++; comparisonRequest?.abort(); setResultMode(mode); });
+$('mode-diff').addEventListener('click',() => run(showComparison));
+$('print-result').addEventListener('click',() => {
+  if (!result || printSession || resultPending) return;
+  const selected=result, path=documentPath, expected=resultGeneration;
+  $('print-result').disabled=true; $('print-result').textContent='Preparing print…';
+  const session=printPreview({preview:$('rendered'),title:path.split('/').pop().replace(/\.md$/, ''),isCurrent:()=>result===selected&&documentPath===path&&resultGeneration===expected&&!$('convert-view').hidden});
+  printSession=session;
+  session.done.catch(error=>{if(error.name!=='AbortError')notice(errorText(error),true);}).finally(()=>{
+    if(printSession===session)printSession=null;
+    if(!printSession){$('print-result').disabled=!!resultPending;$('print-result').textContent='Print / PDF';}
+  });
+});
 $('copy-source').addEventListener('click',() => run(async () => { await navigator.clipboard.writeText(raw); notice('Markdown copied.'); }));
 async function loadHistory() { historyRows=await api('/api/history');page=0;renderHistory();$('history-archive').href=authenticatedURL('/api/history/archive'); }
 function renderHistory() {

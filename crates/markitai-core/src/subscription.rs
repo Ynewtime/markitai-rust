@@ -174,3 +174,5 @@ pub struct Request<'a> {
 }
 
 pub mod claude;
+
+pub mod chatgpt;

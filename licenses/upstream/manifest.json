@@ -1078,17 +1078,7 @@
       ]
     }
   ],
-  "unresolved_full_license_text": [
-    "registry+https://github.com/rust-lang/crates.io-index#dispatch2@0.3.1",
-    "registry+https://github.com/rust-lang/crates.io-index#objc2@0.6.4",
-    "registry+https://github.com/rust-lang/crates.io-index#objc2-core-foundation@0.3.2",
-    "registry+https://github.com/rust-lang/crates.io-index#objc2-core-graphics@0.3.2",
-    "registry+https://github.com/rust-lang/crates.io-index#objc2-encode@4.1.0",
-    "registry+https://github.com/rust-lang/crates.io-index#objc2-foundation@0.3.2",
-    "registry+https://github.com/rust-lang/crates.io-index#objc2-image-io@0.3.2",
-    "registry+https://github.com/rust-lang/crates.io-index#objc2-vision@0.3.2",
-    "registry+https://github.com/rust-lang/crates.io-index#selectors@0.38.0"
-  ],
+  "unresolved_full_license_text": [],
   "source_archives": [
     {
       "path": "source-archives/selectors-0.38.0.crate",
@@ -1110,5 +1100,20 @@
     "scope": "Mechanical full-text supply and exact historical provenance; legal_review=not_performed.",
     "original_collection_evidence": "round30/provenance.json",
     "historical_original_is_not_a_current_commit_file": true
+  },
+  "historical_collection": {
+    "source": "input-manifest.json",
+    "scope": "Original collection-era unresolved list, superseded by current per-package validation; retained without rewriting the original input or round30 evidence.",
+    "unresolved_full_license_text": [
+      "registry+https://github.com/rust-lang/crates.io-index#dispatch2@0.3.1",
+      "registry+https://github.com/rust-lang/crates.io-index#objc2@0.6.4",
+      "registry+https://github.com/rust-lang/crates.io-index#objc2-core-foundation@0.3.2",
+      "registry+https://github.com/rust-lang/crates.io-index#objc2-core-graphics@0.3.2",
+      "registry+https://github.com/rust-lang/crates.io-index#objc2-encode@4.1.0",
+      "registry+https://github.com/rust-lang/crates.io-index#objc2-foundation@0.3.2",
+      "registry+https://github.com/rust-lang/crates.io-index#objc2-image-io@0.3.2",
+      "registry+https://github.com/rust-lang/crates.io-index#objc2-vision@0.3.2",
+      "registry+https://github.com/rust-lang/crates.io-index#selectors@0.38.0"
+    ]
   }
 }

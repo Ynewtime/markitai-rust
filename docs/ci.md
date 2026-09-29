@@ -50,9 +50,20 @@ not a filesystem monitor that can detect an edit reverted between snapshots.
 CLI archives and C-ABI artifacts carry the repository's LICENSE and NOTICE.
 CLI archives also carry the embedded Markdown renderer/sanitizer licenses and
 provenance under `vendor/web/`.
-The current ZIP carries both executable aliases, `markitai` and `mkai`; report
-its archive size separately from the size of one runnable executable.
-Node staging explicitly includes both in the package's `files` list, then checks
+The legacy ZIP retains both `markitai` and `mkai` executable files; report its
+size separately from one runnable executable. On Unix it also carries a relative
+`markitai-mcp` symlink. A separate `-single-binary.tar.gz` contains exactly one
+regular executable, `markitai`, with relative `mkai` and `markitai-mcp` symlinks.
+It includes the same project, web, pricing, upstream and Codex catalog attribution
+as the ZIP. Its complete member inventory, executable hash, symlink targets and
+license bytes are checked during private extraction; the extracted `mkai --version`
+and `markitai-mcp --help` are executed. The MCP alias must select the subcommand,
+not the main CLI help. Windows ZIPs instead contain a small `markitai-mcp.cmd`
+forwarder to the existing executable; byte validation is not Windows execution
+proof. A bare binary or a measurement-only tar without these notices is not the
+complete distribution archive described here.
+
+Node staging explicitly includes LICENSE and NOTICE in the package's `files` list, then checks
 their bytes inside the actual `.tgz` and after installation. Installed native
 Node bytes must match the staged library.
 
@@ -75,3 +86,13 @@ files; passing them does not substitute for actual installed-package acceptance.
 The first actual macOS arm64 execution and the separate Rosetta limitation are
 recorded in [round twenty](validation/media-cli-round20.md). No remote matrix
 run is implied by that local result.
+
+The compiled Codex capability catalog is Apache-2.0 data. `licenses/codex/`
+contains the complete original license/copyright, modification description,
+selected catalog and exact provenance. `scripts/codex_attribution.py` requires
+the packaged catalog to equal the compiled catalog, and rejects changed hashes,
+redirected source paths or missing files. The same verified bytes flow into CLI
+ZIP/tar, C-ABI delivery, the wheel supplement, Node package and Go static archive.
+The Go packager records its separate `codex_attribution` inventory alongside the
+existing pricing and dependency notices. These helpers do not download runtime
+executables, establish subscription entitlement or complete a legal review.

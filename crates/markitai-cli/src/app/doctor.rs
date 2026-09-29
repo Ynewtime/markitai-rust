@@ -251,23 +251,30 @@ fn checks(
             result.insert("claude-agent-auth", identity);
             continue;
         }
-        let rows: &[(&str, &str)] = match provider {
-            "claude-agent" => &[
-                ("claude-agent-sdk", "Claude Agent SDK"),
-                ("claude-agent-auth", "Claude Agent authentication"),
-            ],
-            _ => &[("chatgpt-auth", "ChatGPT authentication")],
-        };
-        for &(key, name) in rows {
-            let mut check = Check::new(
-                name,
+        if provider == "chatgpt" {
+            let auth = super::auth::chatgpt_status(env);
+            let verified = auth.details.get("cli_version").is_some();
+            let mut adapter = Check::new(
+                "Codex official runtime",
                 "Configured local provider",
-                "error",
-                "This native runtime does not implement the configured subscription provider",
-                "Choose a supported API model; local CLI presence does not provide native authentication",
+                if verified { "ok" } else { "error" },
+                if verified {
+                    "Installed Codex runtime matches the pinned adapter version"
+                } else {
+                    "Installed Codex runtime could not verify its supported version"
+                },
+                "Install official Codex 0.159.0; this adapter currently supports chatgpt/gpt-5.5",
             );
-            check.required = true;
-            result.insert(key, check);
+            adapter.required = true;
+            let mut identity = Check::new(
+                "ChatGPT subscription authentication", "Configured local provider",
+                if auth.authenticated { "ok" } else { "error" },
+                auth.error.unwrap_or_else(|| "Official runtime reports a ChatGPT login; model entitlement and inference were not probed".into()),
+                "Run markitai auth chatgpt login",
+            );
+            identity.required = true;
+            result.insert("chatgpt-runtime", adapter);
+            result.insert("chatgpt-auth", identity);
         }
     }
     let has_vision = !models.is_empty();

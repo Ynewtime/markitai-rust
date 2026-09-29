@@ -282,12 +282,23 @@ enum ConfigCommand {
 }
 
 pub fn run() -> i32 {
-    if std::env::args_os().len() == 1 {
+    let mut arguments: Vec<_> = std::env::args_os().collect();
+    // A distribution may expose this executable through the existing MCP name.
+    // Select the subcommand before the no-argument help path, so stdout remains
+    // the protocol stream even when a client starts the alias without flags.
+    if arguments.first().is_some_and(|name| {
+        matches!(
+            Path::new(name).file_name().and_then(|name| name.to_str()),
+            Some("markitai-mcp" | "markitai-mcp.exe")
+        )
+    }) {
+        arguments.insert(1, "mcp".into());
+    }
+    if arguments.len() == 1 {
         let _ = Cli::command().print_help();
         println!();
         return 0;
     }
-    let arguments: Vec<_> = std::env::args_os().collect();
     if let Some(message) = compat::removed_option(&arguments[1..]) {
         let _ = Cli::command()
             .error(clap::error::ErrorKind::UnknownArgument, message)

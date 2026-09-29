@@ -23,6 +23,7 @@ import tarfile
 
 from license_overlay import stage_overlay
 from pricing_attribution import stage_pricing_files
+from codex_attribution import stage_codex_files
 
 HOST = "aarch64-apple-darwin"
 MAX_NOTICE = 16 * 1024 * 1024
@@ -398,8 +399,11 @@ def main(argv=None):
             copy_verified(root / name, module / name)
         pricing_record = stage_pricing_files(root, module)
         record["pricing_attribution"] = pricing_record
+        codex_record = stage_codex_files(root, module)
+        record["codex_attribution"] = codex_record
         license_record = bundle_licenses(json.loads(inputs["metadata"].read_text()), module / "licenses", root, sysroot)
         license_record["pricing_attribution"] = pricing_record
+        license_record["codex_attribution"] = codex_record
         json_file(module / "licenses.json", license_record)
         record["unresolved_licenses"] = license_record["unresolved"]
         record["license_overlay"] = license_record["upstream_overlay"]

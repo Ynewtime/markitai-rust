@@ -13,9 +13,12 @@ markitai --config /absolute/path/config.json mcp
 
 Configure an MCP host to launch that command. Keep provider credentials in the
 host's environment or the isolated Markitai configuration. Normal tool results
-are MCP messages on stdout; diagnostics belong on stderr. The separate reference
-`markitai-mcp` launcher is not required by this command; distributions that do
-not supply that alias should use `markitai mcp`.
+are MCP messages on stdout; diagnostics belong on stderr. The existing public
+`markitai-mcp` launcher name selects the same service, including a no-argument
+client launch. Unix distributions expose it as a relative link to the one CLI
+executable. `markitai-mcp --config /absolute/path/config.json` accepts the same
+global configuration options. A direct Cargo build can use `markitai mcp` or
+create that link; it does not compile a third executable.
 
 ## Tools and results
 

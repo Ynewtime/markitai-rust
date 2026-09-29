@@ -57,6 +57,15 @@ pub(super) fn routes() -> Router<Arc<State>> {
             }),
         )
         .route(
+            "/ui/result-tools.js",
+            get(|| async {
+                asset(
+                    include_bytes!("web/result-tools.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
+        .route(
             "/ui/settings.js",
             get(|| async {
                 asset(

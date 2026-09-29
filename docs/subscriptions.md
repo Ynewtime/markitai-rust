@@ -136,6 +136,8 @@ without sending provider requests. Round 32 optimized CLI and installed dynamic/
 see [delivery evidence](validation/integration-round32.md). Completed-item resume
 preserves terminal diagnostics independently of the old minimal success aggregate.
 
-`auth chatgpt status` still reports unsupported readiness while the official-runtime
-adapter is developed. No private OAuth protocol or API-equivalent subscription
-price is imported from the reference project.
+The restricted `chatgpt/gpt-5.5` adapter targets official Codex 0.159.0. Its
+[contract and evidence boundaries](subscription-chatgpt.md) distinguish actual
+official offline request inspection from native fixture validation and real
+subscription inference. It imports no private OAuth protocol or invented dollar
+tariff. Models outside this validated capability allowlist fail explicitly.

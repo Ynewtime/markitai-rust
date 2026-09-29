@@ -202,6 +202,26 @@ pub fn discover(request: &Value) -> Result<Value> {
             }
         });
     }
+    if provider == "chatgpt" {
+        if field(request, "api_key")?.is_some_and(|value| !value.is_empty())
+            || field(request, "api_base")?.is_some_and(|value| !value.is_empty())
+        {
+            return Err(Error::InvalidInput("Codex discovery uses official CLI authentication, not API credentials or a base URL".into()));
+        }
+        // A stored subscription can change accounts independently of this process.
+        let result = crate::subscription::chatgpt::Config::from_env(&env).and_then(|config| {
+            crate::subscription::chatgpt::models(&config, std::time::Duration::from_secs(15))
+                .map_err(|failure| failure.error)
+        });
+        return Ok(match result {
+            Ok(models) => {
+                json!({"provider":"chatgpt","status":"ok","source":"adapter_allowlist","authoritative":false,"cached":false,"stale":false,"models":models,"detail":"Only the pinned gpt-5.5 adapter capability is listed; account entitlement is not discovered"})
+            }
+            Err(_) => {
+                json!({"provider":"chatgpt","status":"unavailable","source":"official_cli","authoritative":false,"cached":false,"stale":false,"models":[],"detail":"Official Codex runtime or subscription authentication is unavailable"})
+            }
+        });
+    }
     let variable = match provider.as_str() {
         "openai" => Some("OPENAI_API_KEY"),
         "anthropic" => Some("ANTHROPIC_API_KEY"),

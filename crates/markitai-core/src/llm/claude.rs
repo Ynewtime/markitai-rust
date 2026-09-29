@@ -16,7 +16,9 @@ pub(super) fn subscription_pool(entries: &[Value]) -> bool {
                 && entry
                     .pointer("/litellm_params/model")
                     .and_then(Value::as_str)
-                    .is_some_and(|model| model.starts_with("claude-agent/"))
+                    .is_some_and(|model| {
+                        model.starts_with("claude-agent/") || model.starts_with("chatgpt/")
+                    })
         })
 }
 pub(super) fn warning(cfg: &Value) -> &'static str {
@@ -29,7 +31,9 @@ pub(super) fn warning(cfg: &Value) -> &'static str {
                     entry
                         .pointer("/litellm_params/model")
                         .and_then(Value::as_str)
-                        .is_some_and(|model| model.starts_with("claude-agent/"))
+                        .is_some_and(|model| {
+                            model.starts_with("claude-agent/") || model.starts_with("chatgpt/")
+                        })
                 })
             })
     {

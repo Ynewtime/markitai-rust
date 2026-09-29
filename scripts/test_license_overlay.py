@@ -88,6 +88,37 @@ class LicenseOverlayTests(unittest.TestCase):
         unpack_verified(archive, self.root / "installed", expected)
         self.assertEqual(inventory(self.root / "installed/licenses/upstream"), inventory(self.vendor))
 
+    def test_current_summary_is_derived_while_collection_history_stays_separate(self):
+        self.assertEqual(self.manifest["unresolved_full_license_text"], [])
+        historical = self.manifest["historical_collection"]["unresolved_full_license_text"]
+        self.assertEqual(len(historical), 9)
+        self.assertEqual(self.manifest["historical_collection"]["source"], "input-manifest.json")
+        result = stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertEqual(result["record"]["complete_text_packages"], 15)
+        self.assertEqual(result["record"]["historical_text_packages"], 3)
+        self.assertEqual(result["record"]["legal_review"], "not_performed")
+        copied = json.loads((self.destination / "manifest.json").read_text())
+        self.assertEqual(copied["historical_collection"]["unresolved_full_license_text"], historical)
+        self.assertEqual(copied["unresolved_full_license_text"], [])
+
+    def test_resealed_stale_unresolved_or_count_summary_fails_before_copying(self):
+        original = json.loads(json.dumps(self.manifest))
+        variants = [("unresolved", None), ("historical_text_packages", 0),
+                    ("full_license_text_packages", 14), ("notice_only_packages", 3),
+                    ("requested_packages", 14), ("exact_commit_manifest_matches", 14),
+                    ("overlay_files", 24), ("source_archives", True)]
+        for field, value in variants:
+            with self.subTest(field=field):
+                self.manifest = json.loads(json.dumps(original))
+                if field == "unresolved":
+                    self.manifest["unresolved_full_license_text"] = self.manifest["historical_collection"]["unresolved_full_license_text"]
+                else:
+                    self.manifest["summary"][field] = value
+                self.save_manifest()
+                with self.assertRaisesRegex(RuntimeError, "summary differs"):
+                    stage_overlay(self.vendor, self.destination, self.packages)
+                self.assertFalse(self.destination.exists())
+
     def test_a_new_version_cannot_inherit_old_version_license_evidence(self):
         future = dict(self.packages[0], id="registry+fixture#alloc-stdlib@99.0", version="99.0")
         result = stage_overlay(self.vendor, self.destination, [future])

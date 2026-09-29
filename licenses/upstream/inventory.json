@@ -238,8 +238,8 @@
     },
     {
       "path": "manifest.json",
-      "bytes": 56825,
-      "sha256": "536ddba01eaebd97f87455284123a0dab15af29979fb86696ce1e86869e05cc5"
+      "bytes": 57125,
+      "sha256": "a5a8ed8cd9b62970c900cf1ba3a1159345f06d9488dd82425629d90bc5655a14"
     },
     {
       "path": "overlay/licenses/alloc-stdlib-0.2.4/LICENSE",

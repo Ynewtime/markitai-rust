@@ -37,7 +37,7 @@ export class ApiError extends Error {
     this.status = status; this.body = body;
   }
 }
-export async function api(path, {method = 'GET', body, signal, text = false} = {}) {
+export async function api(path, {method = 'GET', body, signal, text = false, maxTextBytes} = {}) {
   const url = serviceURL(path);
   const headers = new Headers();
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -51,7 +51,24 @@ export async function api(path, {method = 'GET', body, signal, text = false} = {
     if (response.status === 401) window.dispatchEvent(new CustomEvent('markitai:unauthorized'));
     throw error;
   }
-  return response.status === 204 ? null : text ? response.text() : response.json();
+  if (response.status === 204) return null;
+  if (text && maxTextBytes !== undefined) {
+    if (!Number.isSafeInteger(maxTextBytes) || maxTextBytes <= 0) throw new Error('Invalid preview size limit');
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxTextBytes) { await response.body?.cancel(); throw new Error('Markdown exceeds the comparison download limit'); }
+    if (!response.body) return '';
+    const reader = response.body.getReader(), decoder = new TextDecoder(); let total = 0, value = '';
+    try {
+      for (;;) {
+        const part = await reader.read(); if (part.done) break;
+        total += part.value.byteLength;
+        if (total > maxTextBytes) { await reader.cancel(); throw new Error('Markdown exceeds the comparison download limit'); }
+        value += decoder.decode(part.value, {stream:true});
+      }
+      return value + decoder.decode();
+    } finally { reader.releaseLock(); }
+  }
+  return text ? response.text() : response.json();
 }
 export function fileURL(job, path) {
   return `/api/jobs/${encodeURIComponent(job)}/files/${path.split('/').map(encodeURIComponent).join('/')}`;

@@ -91,6 +91,39 @@ each authored JS file on stdin.
 These tests and actual release-browser acceptance passed in
 [round twenty-one](validation/service-ui-round21.md), including mixed file/URL
 jobs, sanitization, downloads, two-tab revision conflicts and mobile layout.
-Current scope excludes OAuth login, print-to-PDF, source editing, embedded
+Current scope excludes OAuth login, source editing, embedded
 video/audio playback, external-image preview and the reference React UI's exact
 appearance. Model responses remain untrusted document content.
+
+
+## Compare and print a document
+
+When one item lists an exact base/enhanced Markdown pair, Changes compares those
+versions in source order, including final newline differences. It uses only the
+item's returned artifact paths. Ambiguous inventories do not enable the action.
+The view renders every line as text, including HTML/code examples. It does not
+execute source markup or save edits. Requests use the existing authenticated,
+same-service file endpoint and reject redirects.
+
+Comparison stops with a download suggestion beyond 6,000 lines, 2,097,152 UTF-16
+code units per side, or 1,000,000 middle-line comparison cells after equal edges
+are removed. Downloads are additionally bounded to 8 MiB per side. No partial
+comparison is presented as complete. Choosing another result or view invalidates
+pending comparisons; no source text is retained in browser storage.
+
+Print / PDF prints the currently selected version's existing safe rendered
+preview, even when Source or Changes is visible. The browser's own dialog can
+save a PDF. It uses a temporary clone, not an iframe, popup, new backend or relaxed
+CSP. Local manifest-approved raster images must finish loading within ten seconds;
+a broken or stalled image prevents printing with an explicit notice. Untrusted
+scripts, external images and embedded media remain blocked as in Preview. Link
+URLs are removed from the printed clone so authenticated download URLs are not
+embedded in generated PDFs. This also removes external clickable PDF links.
+
+Print styling includes wrapping code, repeating table headers and constrained
+images. It does not promise paginated Office fidelity or a deterministic PDF
+renderer. The selected title and document-only layout are restored after the
+print dialog, a thrown print error, selection/navigation cancellation, or a
+120-second fallback for browsers missing the completion event. Root's actual
+browser acceptance must separately verify pagination, image loading, sanitization
+and cancellation; the candidate's JS checks alone do not prove these outcomes.

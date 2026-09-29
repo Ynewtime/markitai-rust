@@ -55,6 +55,7 @@ if sys.argv[1:] == ['login']:
         command
             .env("MARKITAI_HOME", self.root.path().join("state"))
             .env("CLAUDE_CLI_PATH", self.root.path().join("missing claude"))
+            .env("CODEX_CLI_PATH", self.root.path().join("missing codex"))
             .env("COPILOT_CLI_PATH", &self.executable)
             .env("COPILOT_HOME", self.root.path())
             .env("COPILOT_CACHE_HOME", self.root.path().join("private cache"))
@@ -124,14 +125,7 @@ fn unavailable_runtime_and_other_adapters_remain_explicit() {
             .unwrap();
         assert!(result.status.success());
         let value: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(
-            value["details"]["verification"],
-            if provider == "claude" {
-                "unavailable"
-            } else {
-                "unsupported"
-            }
-        );
+        assert_eq!(value["details"]["verification"], "unavailable");
         if provider == "claude" {
             assert_eq!(value["sdk_installed"], false);
             assert!(value["cli_path"].is_null());

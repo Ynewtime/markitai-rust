@@ -350,6 +350,26 @@ def stage_overlay(source, destination, packages):
                         "full_text_gap": entry["unresolved_full_text_reason"],
                         "historical_provenance": bool(supplements)}
     source_archives = _source_archives(manifest, data, recorded)
+    entries = manifest["packages"]
+    current_unresolved = [entry["id"] for entry in entries
+                          if entry["content_kind"] != "full_license_text"
+                          or entry["unresolved_full_text_reason"] is not None]
+    if manifest.get("unresolved_full_license_text") != current_unresolved:
+        raise RuntimeError("Current license unresolved summary differs from its packages")
+    expected_summary = {
+        "requested_packages": len(entries),
+        "exact_commit_manifest_matches": len(entries),
+        "full_license_text_packages": sum(entry["content_kind"] == "full_license_text" for entry in entries),
+        "notice_only_packages": sum(entry["content_kind"] == "notice_only" for entry in entries),
+        "overlay_files": len(all_assets),
+        "source_archives": len(source_archives),
+        "historical_text_packages": sum(bool(entry.get("supplemental")) for entry in entries),
+    }
+    summary = manifest.get("summary")
+    if (type(summary) is not dict
+            or any(type(summary.get(key)) is not int or summary[key] != value
+                   for key, value in expected_summary.items())):
+        raise RuntimeError("Current license count summary differs from its packages")
     # All provenance and classification checks precede copying. The caller's
     # clean-source checks also bind the inventory itself to the build revision.
     data["inventory.json"] = raw_inventory

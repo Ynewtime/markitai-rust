@@ -4,6 +4,11 @@
 
 ### Added
 
+- Optional pinned official Codex CLI adapter for ChatGPT subscription conversion, authentication and Unix login, with bounded process cleanup and aggregate usage accounting.
+- Base/enhanced Markdown difference preview and printing of the sanitized selected document in the embedded Web UI.
+- Complete Unix CLI archive with one executable, relative command aliases and bundled project, dependency, pricing and model-catalog notices.
+- Compatible `markitai-mcp` executable alias for the existing stdio service, including bare client launches and global configuration options.
+
 - Optional official Claude CLI conversion, discovery, authentication and Unix login, preserving aggregate-only token usage without inventing request counts.
 
 - Native frozen Batch continuation and bounded remote reconciliation, including strict manual binding of uncertain submissions and output ownership checks before paid creation.
@@ -93,6 +98,8 @@
 - Bounded directory and URL-list publication groups retain durable receipts, recovery ordering and paid failure usage while sharing macOS full-cache flushes; dispatch admission is persisted in bounded windows.
 
 ### Fixed
+
+- Keep the current supplemental-license unresolved list consistent with verified package records, preserving the original collection list separately as history.
 
 - Synchronize newly created output ancestors before batch filename probing so later ownership checks cannot bypass their directory-entry durability.
 

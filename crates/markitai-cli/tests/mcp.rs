@@ -30,12 +30,30 @@ struct Client {
 
 impl Client {
     fn start(modern: bool) -> Self {
+        Self::start_with_launcher(modern, false, true)
+    }
+
+    fn start_with_launcher(modern: bool, alias: bool, explicit_config: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.json");
         std::fs::create_dir(directory.path().join("home")).unwrap();
         std::fs::create_dir(directory.path().join("tmp")).unwrap();
         std::fs::write(&config, Self::defaults().to_string()).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_markitai"));
+        let executable = if alias {
+            #[cfg(unix)]
+            {
+                let path = directory.path().join("markitai-mcp");
+                std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_markitai"), &path).unwrap();
+                path
+            }
+            #[cfg(not(unix))]
+            {
+                panic!("this fixture requires Unix symlinks");
+            }
+        } else {
+            PathBuf::from(env!("CARGO_BIN_EXE_markitai"))
+        };
+        let mut command = Command::new(executable);
         command
             .env_clear()
             .env("MARKITAI_HOME", directory.path().join("home"))
@@ -44,12 +62,15 @@ impl Client {
             .env("TEMP", directory.path().join("tmp"))
             .env("NO_PROXY", "127.0.0.1,localhost")
             .current_dir(directory.path())
-            .arg("--config")
-            .arg(&config)
-            .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if explicit_config {
+            command.arg("--config").arg(&config);
+        }
+        if !alias {
+            command.arg("mcp");
+        }
         for name in ["HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "PATH"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -196,6 +217,28 @@ impl Client {
         self.stdout.take().unwrap().join().unwrap();
         let stderr = self.stderr.take().unwrap().join().unwrap();
         assert!(status.success(), "MCP failed: {status}; {stderr}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_alias_accepts_bare_launch_and_global_configuration_without_stdout_help() {
+    for (modern, explicit_config) in [(false, false), (true, true)] {
+        let mut client = Client::start_with_launcher(modern, true, explicit_config);
+        let list = client.request("tools/list", json!({}));
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 4);
+        if explicit_config {
+            let source = client.file("alias.md", "# Alias\n\nOriginal content.\n");
+            let result = client.success("convert_document", json!({"path":source}));
+            assert!(
+                result["markdown"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Original content.")
+            );
+            assert!(Path::new(result["markdown_file"].as_str().unwrap()).is_file());
+        }
+        client.stop();
     }
 }
 impl Drop for Client {
