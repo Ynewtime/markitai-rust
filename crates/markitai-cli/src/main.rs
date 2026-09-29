@@ -1,5 +1,7 @@
 mod app;
 mod diagnostics;
+#[cfg(all(test, target_os = "linux"))]
+mod file_lock_test;
 mod history;
 mod mcp;
 mod output_claims;

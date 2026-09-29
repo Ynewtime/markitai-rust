@@ -723,8 +723,7 @@ mod tests {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-#[path = "../file_lock_test.rs"]
-mod fork_lock_test;
+use crate::file_lock_test as fork_lock_test;
 
 #[cfg(all(test, target_os = "linux"))]
 mod inherited_lock_tests {
