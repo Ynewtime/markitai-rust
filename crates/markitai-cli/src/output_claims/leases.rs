@@ -118,16 +118,7 @@ impl PreparedMembers {
             return Err(unsupported());
         }
         let original_parent = std::path::absolute(parent)?;
-        check_policy(&original_parent, allow_symlinks)?;
-        let planned_parent = crate::report_store::resolve_path(&original_parent)?;
-        create_output_directory(&planned_parent)?;
-        check_policy(&original_parent, allow_symlinks)?;
-        let parent = fs::canonicalize(&original_parent)?;
-        if parent != planned_parent {
-            return Err(Error::Invalid(
-                "output parent changed while acquiring a claim".into(),
-            ));
-        }
+        let parent = prepare_namespace_parent(&original_parent, allow_symlinks)?;
         let parent_metadata = directory_metadata(&parent, false)?;
         let parent_identity = identity(&parent_metadata)?;
         let mut directories = Vec::with_capacity(3);
@@ -351,6 +342,23 @@ fn validate_lock_metadata(metadata: &Metadata, device: u64) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Shared only with namespace preparation. Ancestor creation keeps the original
+// immediate synchronization path; the grouped path begins below this parent.
+pub(crate) fn prepare_namespace_parent(parent: &Path, allow_symlinks: bool) -> Result<PathBuf> {
+    let original_parent = std::path::absolute(parent)?;
+    check_policy(&original_parent, allow_symlinks)?;
+    let planned_parent = crate::report_store::resolve_path(&original_parent)?;
+    create_output_directory(&planned_parent)?;
+    check_policy(&original_parent, allow_symlinks)?;
+    let parent = fs::canonicalize(&original_parent)?;
+    if parent != planned_parent {
+        return Err(Error::Invalid(
+            "output parent changed while acquiring a claim".into(),
+        ));
+    }
+    Ok(parent)
 }
 
 fn create_metadata_directory(path: &Path) -> Result<()> {

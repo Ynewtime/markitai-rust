@@ -188,7 +188,7 @@ def bundle_licenses(metadata, destination, root, sysroot):
                "license_expression": package.get("license"), "manifest": str(directory / "Cargo.toml"),
                "source": package.get("source"), "texts": files}
         if supplemental:
-            row["upstream_evidence"] = {key: supplemental[key] for key in ["content_kind", "commit", "full_text_gap"]}
+            row["upstream_evidence"] = {key: supplemental[key] for key in ["content_kind", "commit", "full_text_gap", "historical_provenance"]}
         if not source_texts and not (supplemental and supplemental["complete_text"]):
             reason = supplemental["full_text_gap"] if supplemental else "No license/copyright/notice text found in the available package source"
             unresolved.append({"id": package["id"], "reason": reason})

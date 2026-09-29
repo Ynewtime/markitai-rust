@@ -86,9 +86,17 @@
 
 ### Changed
 
+- Verify and report three historical upstream MIT texts separately from legal review, preserving the original license bytes and exact-version notices.
+
+- Group controlled output metadata initialization in bounded admission windows while retaining directory identities, durability fences and the original skip path.
+
 - Bounded directory and URL-list publication groups retain durable receipts, recovery ordering and paid failure usage while sharing macOS full-cache flushes; dispatch admission is persisted in bounded windows.
 
 ### Fixed
+
+- Synchronize newly created output ancestors before batch filename probing so later ownership checks cannot bypass their directory-entry durability.
+
+- Keep available URL and file worker capacity supplied when the other class has an earlier-sorted backlog.
 
 - Explicitly release owned file locks before inherited child descriptors close, including partial acquisition and validation failures.
 

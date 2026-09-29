@@ -140,7 +140,10 @@ the journal and its directory before returning the durable sequence. The schedul
 recovery, including provider requests. A dropped writer does not pretend to flush.
 The admission window retains at most the greater of 16 and the configured worker
 count for the discovered task classes. A failed admission flush dispatches none
-of that window. Workers can release a conversion slot once exact output bytes
+of that window. Non-skip claims first require a checked and synchronized metadata
+namespace; a failed namespace fence likewise sends none of its new admission.
+Class-aware admission counts queued reservations and refills available file/URL
+capacity within the same total retained bound. Workers can release a conversion slot once exact output bytes
 are prepared; completion is recorded only after the separate
 [group publication protocol](grouped-publication.md) succeeds. Failed preparation
 or publication remains a failed result, including its observed model usage.

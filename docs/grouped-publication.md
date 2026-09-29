@@ -42,8 +42,8 @@ An error fails the group, without a weaker success fallback.
 
 The guarantee remains conditional on filesystem and hardware flush behavior.
 Injected fence failures and real process-kill/reopen tests exercise ordering and
-ownership; they cannot simulate physical loss of drive power. Existing directory
-and claim initialization fences are retained. The 64 MiB limit bounds staged
+ownership; they cannot simulate physical loss of drive power. Output-ancestor creation fences are retained. Controlled claim metadata
+initialization uses the separately checked admission protocol below. The 64 MiB limit bounds staged
 Markdown, not total process memory or active conversion memory.
 
 Admission persistence is separately batched before dispatch; see
@@ -51,3 +51,36 @@ Admission persistence is separately batched before dispatch; see
 including values above 16. Publication groups remain bounded independently.
 Performance gains require fresh equivalent-output measurements; the old directory
 regression is not closed by source-level syscall accounting.
+
+## Claim namespace admission
+
+Before non-skip admission, the coordinator prepares at most16 output parents per
+subwindow. It opens the parent plus the controlled `.markitai/ownership/members`
+and `records` chain, retaining directory identities and descriptors. Newly created
+and already existing directories receive the same synchronization: a concurrent
+initializer may have created an entry without completing its own fence. Each
+held directory is synchronized before the volume fence; the proof is checked
+before and after that fence and again around actual member-claim acquisition.
+There is no persistent initialization marker or process-wide proof cache.
+
+The extra descriptor bound is96 per subwindow (80 directories plus at most16
+volume anchors), or81 on one volume. This is an additional bound, not a bound on
+all process descriptors. The same per-object synchronization fallback applies off
+verified local macOS volumes. Name reservation now uses the same durable output-ancestor creation as claim
+acquisition before its case-sensitivity probe. Its previous create_dir_all could
+pre-create nested output paths without their parent-entry fences, causing later
+claim acquisition to see only already existing paths. Each newly created output
+directory and its containing parent now receive the original immediate fences. The skip policy retains its original path.
+
+Ordinary parent preparation failures fail only the affected items. A failed
+namespace fence stops new dispatch; earlier unsent reservations are restored.
+Several namespace subwindows may feed one durable admission journal flush, so a
+configured worker count above16 remains supported. Namespace preparation and
+claim acquisition never grant permission to dispatch before that journal flush.
+
+Admission fills available file and URL capacity before buffering excess tasks.
+Queued reservations count toward their class and the total retained window;
+completed publication frees room to refill either class even when the other
+class still has queued work. Thus a backlog of earlier-sorted files does not
+prevent later URLs from using their configured capacity. Reporting order and
+per-class concurrency limits remain unchanged.

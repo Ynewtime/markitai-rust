@@ -1,7 +1,8 @@
 """Validate and archive reviewed local upstream notices without network access.
 
-A full text and a license notice are deliberately different states. Hash checks
-establish byte provenance, not the sufficiency of a license for redistribution.
+A full text and a license notice are deliberately different states. Reviewed
+historical originals can supply full terms while retaining historical provenance.
+Hash checks do not establish the legal sufficiency of a distribution.
 """
 import hashlib
 import io
@@ -148,13 +149,30 @@ def _linked_terms(asset, entry, data, recorded, root, repo, commit):
     return raw
 
 
-def _historical_supplement(asset, entry, data, recorded, repo, commit):
+def _historical_terms(asset, entry, data, recorded, repo, commit):
     if (repo != "madsmtm/objc2" or _MIT_TARGETS.get((entry["name"], entry["version"])) != commit
-            or entry["declared_license"] != "MIT" or entry["content_kind"] != "notice_only"
-            or entry["complete_license_options_present"] != []
-            or asset.get("source_kind") != "historical_notice" or asset.get("review_needed") is not True
-            or asset.get("content_kind") != "supplemental_review_needed"):
-        raise RuntimeError("Historical license supplement must remain review-needed")
+            or entry["declared_license"] != "MIT" or entry["content_kind"] != "full_license_text"
+            or entry["complete_license_options_present"] != ["MIT"]
+            or asset.get("source_kind") != "historical_notice"
+            or asset.get("provenance_verified") is not True
+            or asset.get("legal_review") != "not_performed"
+            or asset.get("content_kind") != "full_license_text"):
+        raise RuntimeError("Historical license terms require their reviewed scope and provenance")
+    # The current pinned release still declares MIT. Keeping its whole original
+    # notice also preserves the upstream Apple SDK discussion without resolving it.
+    root = f"upstream/{repo}/{commit}/"
+    notices = [row for row in entry["assets"]
+               if row.get("source_kind", "same_commit") == "same_commit"
+               and row.get("content_kind") == "notice_only"]
+    if len(notices) != 1:
+        raise RuntimeError("Historical terms require their exact-version MIT notice")
+    notice = recorded(notices[0])
+    if (notice != _same_commit_source(notices[0], data, root, repo, commit)
+            or hashlib.sha256(notice).hexdigest() != "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"):
+        raise RuntimeError("Historical terms current-version MIT notice differs")
+    declared = data.get(root + entry["path_in_vcs"] + "/Cargo.toml", b"")
+    if re.search(rb'^license[ \t]*=[ \t]*"MIT"[ \t]*(?:#[^\r\n]*)?$', declared, re.MULTILINE) is None:
+        raise RuntimeError("Historical terms require the current package MIT declaration")
     source_path = str(_relative(asset["source_path"]))
     raw = data.get(source_path)
     if (asset["source_url"] != _MIT_ORIGINAL_URL or asset["source_sha256"] != _MIT_ORIGINAL_SHA
@@ -260,6 +278,9 @@ def stage_overlay(source, destination, packages):
         upstream_manifest = root + (path + "/" if path else "") + "Cargo.toml"
         for proof in entry["evidence"]:
             recorded(proof)
+        if any(name not in data for name in [original + ".cargo_vcs_info.json",
+                                              original + "Cargo.toml.orig", upstream_manifest]):
+            raise RuntimeError("Missing exact-version package evidence")
         vcs = _json(data[original + ".cargo_vcs_info.json"])
         if vcs.get("git", {}).get("sha1") != commit or vcs.get("path_in_vcs") != path:
             raise RuntimeError("License overlay VCS attribution differs")
@@ -294,7 +315,7 @@ def stage_overlay(source, destination, packages):
                           **identities[asset["path"]], "origin": "verified_upstream_overlay",
                           "source_url": asset["source_url"], "source_kind": source_kind,
                           "content_kind": asset_kind})
-        if not texts or has_full_text != (kind == "full_license_text"):
+        if not texts:
             raise RuntimeError("License classification differs from complete source texts")
         supplements = entry.get("supplemental", [])
         if type(supplements) is not list or len(supplements) > 1:
@@ -304,13 +325,17 @@ def stage_overlay(source, destination, packages):
             if asset["path"] in all_assets:
                 raise RuntimeError("Duplicate historical license supplement")
             all_assets.add(asset["path"])
-            if _historical_supplement(asset, entry, data, recorded, repo, commit) != raw:
+            if _historical_terms(asset, entry, data, recorded, repo, commit) != raw:
                 raise RuntimeError("Historical supplement differs from original source bytes")
             texts.append({"source": str(source / asset["path"]),
                           "path": (destination / asset["path"]).relative_to(destination.parent.parent).as_posix(),
-                          **identities[asset["path"]], "origin": "verified_historical_notice_supplement",
-                          "source_url": asset["source_url"], "content_kind": "supplemental_review_needed",
-                          "review_needed": True})
+                          **identities[asset["path"]], "origin": "verified_historical_license_text",
+                          "source_url": asset["source_url"], "source_kind": "historical_notice",
+                          "content_kind": "full_license_text", "provenance_verified": True,
+                          "legal_review": "not_performed"})
+            has_full_text = True
+        if has_full_text != (kind == "full_license_text"):
+            raise RuntimeError("License classification differs from complete source texts")
         package = available.get(key)
         if package is None:
             continue
@@ -323,7 +348,7 @@ def stage_overlay(source, destination, packages):
         matched[key] = {"texts": texts, "complete_text": kind == "full_license_text",
                         "content_kind": kind, "commit": commit,
                         "full_text_gap": entry["unresolved_full_text_reason"],
-                        "supplemental_review_needed": bool(supplements)}
+                        "historical_provenance": bool(supplements)}
     source_archives = _source_archives(manifest, data, recorded)
     # All provenance and classification checks precede copying. The caller's
     # clean-source checks also bind the inventory itself to the build revision.
@@ -338,10 +363,11 @@ def stage_overlay(source, destination, packages):
         "matched_packages": len(matched),
         "complete_text_packages": sum(value["complete_text"] for value in matched.values()),
         "notice_only_packages": sum(not value["complete_text"] for value in matched.values()),
-        "supplemental_review_needed_packages": sum(value["supplemental_review_needed"] for value in matched.values()),
+        "historical_text_packages": sum(value["historical_provenance"] for value in matched.values()),
+        "legal_review": "not_performed",
         "source_archives": [{**row, "path": (destination / row["path"]).relative_to(destination.parent.parent).as_posix()} for row in source_archives],
         "archived_evidence_files": len(data),
-        "scope": "Reviewed local exact-version texts and provenance; notices alone do not resolve full-license-text gaps; no legal review"}}
+        "scope": "Reviewed exact-version declarations and full terms, including explicitly identified historical originals; byte provenance and delivery checks only, no legal review"}}
 
 
 def upstream_files(root):

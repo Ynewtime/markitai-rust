@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "created_at": "2026-09-29T07:22:48.539823+00:00",
-  "scope": "Exact-version upstream notices and reviewed same-commit, linked-authority, and historical supplemental evidence; no legal review or election of a license alternative.",
+  "scope": "Exact-version declarations and complete same-commit, linked-authority or verified historical terms; historical source kinds retained; mechanical text/provenance/distribution checks, no legal review or license election.",
   "input_manifest": {
     "path": "input-manifest.json",
     "bytes": 26236,
@@ -26,11 +26,11 @@
   "summary": {
     "requested_packages": 15,
     "exact_commit_manifest_matches": 15,
-    "full_license_text_packages": 12,
-    "notice_only_packages": 3,
+    "full_license_text_packages": 15,
+    "notice_only_packages": 0,
     "overlay_files": 25,
-    "supplemental_review_needed_packages": 3,
-    "source_archives": 1
+    "source_archives": 1,
+    "historical_text_packages": 3
   },
   "packages": [
     {
@@ -351,10 +351,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": false,
       "version_inherited_from_workspace": false,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MIT"
+      ],
       "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-version repository contains the current MIT declaration and Apple SDK notice but no full MIT file. The historical original MIT text is supplied with an upstream provenance chain as review-needed; full-text/copyright restoration review remains unresolved.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/objc2/Cargo.toml",
@@ -400,8 +402,7 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
           "source_sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
           "source_kind": "historical_notice",
-          "content_kind": "supplemental_review_needed",
-          "review_needed": true,
+          "content_kind": "full_license_text",
           "proofs": [
             {
               "path": "round30/primary/objc2-original-license-history.html",
@@ -421,9 +422,12 @@
               "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb",
               "source_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch"
             }
-          ]
+          ],
+          "provenance_verified": true,
+          "legal_review": "not_performed"
         }
-      ]
+      ],
+      "historical_provenance_note": "The complete original MIT text and original notice are supplied unchanged from the reviewed upstream history; this file is historical, not present at the target commit. Current exact-version MIT declaration is retained; no legal review is claimed."
     },
     {
       "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-core-foundation@0.3.2",
@@ -580,10 +584,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": false,
       "version_inherited_from_workspace": false,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MIT"
+      ],
       "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-version repository contains the current MIT declaration and Apple SDK notice but no full MIT file. The historical original MIT text is supplied with an upstream provenance chain as review-needed; full-text/copyright restoration review remains unresolved.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/crates/objc2-encode/Cargo.toml",
@@ -629,8 +635,7 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
           "source_sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
           "source_kind": "historical_notice",
-          "content_kind": "supplemental_review_needed",
-          "review_needed": true,
+          "content_kind": "full_license_text",
           "proofs": [
             {
               "path": "round30/primary/objc2-encode-old-license-history.html",
@@ -650,9 +655,12 @@
               "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb",
               "source_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch"
             }
-          ]
+          ],
+          "provenance_verified": true,
+          "legal_review": "not_performed"
         }
-      ]
+      ],
+      "historical_provenance_note": "The complete original MIT text and original notice are supplied unchanged from the reviewed upstream history; this file is historical, not present at the target commit. Current exact-version MIT declaration is retained; no legal review is claimed."
     },
     {
       "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-foundation@0.3.2",
@@ -665,10 +673,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": false,
       "version_inherited_from_workspace": true,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MIT"
+      ],
       "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-version repository contains the current MIT declaration and Apple SDK notice but no full MIT file. The historical original MIT text is supplied with an upstream provenance chain as review-needed; full-text/copyright restoration review remains unresolved.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.toml",
@@ -720,8 +730,7 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
           "source_sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
           "source_kind": "historical_notice",
-          "content_kind": "supplemental_review_needed",
-          "review_needed": true,
+          "content_kind": "full_license_text",
           "proofs": [
             {
               "path": "round30/primary/foundation-original-license-history.html",
@@ -741,9 +750,12 @@
               "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb",
               "source_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch"
             }
-          ]
+          ],
+          "provenance_verified": true,
+          "legal_review": "not_performed"
         }
-      ]
+      ],
+      "historical_provenance_note": "The complete original MIT text and original notice are supplied unchanged from the reviewed upstream history; this file is historical, not present at the target commit. Current exact-version MIT declaration is retained; no legal review is claimed."
     },
     {
       "id": "registry+https://github.com/rust-lang/crates.io-index#objc2-image-io@0.3.2",
@@ -1093,5 +1105,10 @@
     "path": "round30/provenance.json",
     "bytes": 7235,
     "sha256": "0ac2eb222598babd45c7558d9bc4c56bd07d18426f696acc18465cc4f5c69924"
+  },
+  "classification_review": {
+    "scope": "Mechanical full-text supply and exact historical provenance; legal_review=not_performed.",
+    "original_collection_evidence": "round30/provenance.json",
+    "historical_original_is_not_a_current_commit_file": true
   }
 }

@@ -597,6 +597,7 @@ fn oversized_response_header_stops_before_body_read_or_protocol_retry() {
                 }
                 Err(error) => panic!("header fixture accept: {error}"),
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();

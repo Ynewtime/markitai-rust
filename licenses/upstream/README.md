@@ -4,21 +4,28 @@ Packaging validates this directory offline before copying it. Package manifests,
 published VCS records, original source notices and exact byte identities remain
 part of the payload. This is mechanical evidence collection, not legal review.
 
-Twelve of the fifteen supplemental crate versions now have at least one complete
-license text. Six were collected directly from their exact upstream commits in
-R29. R30 adds five Apache-2.0 options and selectors' MPL-2.0 terms from the official
-publishers expressly linked by each pinned source notice. The helper permits only
-these reviewed package/version/commit and URL/digest combinations; arbitrary URLs
-and later versions cannot inherit them. Original notices remain unchanged.
+All fifteen supplemental crate versions now carry complete license terms. Six
+were collected directly from their exact upstream commits in R29. R30 adds five
+Apache-2.0 options and selectors' MPL-2.0 terms from the official publishers
+expressly linked by each pinned source notice. Three complete MIT originals have
+separately verified historical provenance. The helper permits only the reviewed
+package/version/commit and URL/digest combinations; arbitrary URLs, later versions
+or unrelated historical licenses cannot inherit this classification.
 
-Three packages remain unresolved: objc2 0.6.4, objc2-encode 4.1.0 and
-objc2-foundation 0.3.2. Their original upstream MIT text, including Steven Sheldon’s
-notice, is retained as supplemental/review-needed. The original 2016 file exactly
-matches the file removed by the upstream 2025 licensing clarification. Target-
-anchored histories and both patches are included. Current manifests remain MIT
-and explicitly allow MIT for future contributions. This is a historical notice,
-not a file present in the target release; it does not close those three full-text
-and copyright-review flags. No author/year or license grant was fabricated.
+For objc2 0.6.4, objc2-encode 4.1.0 and objc2-foundation 0.3.2, the complete
+original upstream MIT text, including Steven Sheldon's notice, is retained
+unchanged. The 2016 original exactly matches the file removed by the 2025
+licensing clarification. Target-anchored histories and both patches accompany
+it. Each current pinned release still explicitly declares MIT; its original
+notice, including the Apple SDK discussion, remains beside the historical text.
+
+These three texts close the mechanical missing-text/source/copy gap. Their
+`source_kind` remains `historical_notice`; they are not relabeled as files present
+at the target commit. The collector reports `historical_text_packages: 3` and
+`legal_review: not_performed` separately. It does not establish an exhaustive
+contributor copyright inventory or resolve SDK licensing. No author, year or
+license grant was invented. Raw R30 provenance retains its earlier classification
+as a historical evidence record, not the current packaging decision.
 
 The complete original selectors 0.38.0 source archive is included at
 `source-archives/selectors-0.38.0.crate` (SHA-256

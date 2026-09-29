@@ -57,6 +57,8 @@ impl Server {
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 };
+                // macOS can inherit the listener's nonblocking socket flag.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
@@ -674,7 +676,12 @@ fn chunked_result_and_control_bodies_are_bounded_without_content_length() {
     let failure = client
         .download_results(&batch(BatchStatus::Completed), &ids())
         .unwrap_err();
-    assert!(matches!(failure.error, Error::Limit(_)));
+    assert!(
+        matches!(failure.error, Error::Limit(_)),
+        "unexpected chunked download error: {:?}; observed requests: {}",
+        failure.error,
+        server.requests().len()
+    );
     assert_eq!(failure.partial.items.len(), 1);
     assert_eq!(failure.partial.items[0].custom_id, "doc_a");
     assert!(matches!(

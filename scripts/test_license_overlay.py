@@ -68,11 +68,14 @@ class LicenseOverlayTests(unittest.TestCase):
         self.destination.parent.parent.mkdir(parents=True)
         record = bundle_licenses(metadata, self.destination.parent, self.repository, sysroot)
         self.assertEqual(record["legal_review"], "not_performed")
-        self.assertEqual(record["upstream_overlay"]["complete_text_packages"], 12)
-        self.assertEqual(record["upstream_overlay"]["notice_only_packages"], 3)
-        expected_missing = {p["id"] for p in self.manifest["packages"] if p["content_kind"] == "notice_only"}
-        self.assertEqual({p["id"] for p in record["unresolved"]}, expected_missing)
-        self.assertEqual(len(expected_missing), 3)
+        self.assertEqual(record["upstream_overlay"]["complete_text_packages"], 15)
+        self.assertEqual(record["upstream_overlay"]["notice_only_packages"], 0)
+        self.assertEqual(record["unresolved"], [])
+        self.assertEqual(record["upstream_overlay"]["historical_text_packages"], 3)
+        self.assertEqual(record["upstream_overlay"]["legal_review"], "not_performed")
+        historical = [p for p in record["dependencies"]
+                      if p.get("upstream_evidence", {}).get("historical_provenance")]
+        self.assertEqual({p["name"] for p in historical}, {"objc2", "objc2-encode", "objc2-foundation"})
         copied = [text for p in record["dependencies"] for text in p["texts"] if text.get("origin") == "verified_upstream_overlay"]
         self.assertEqual(len(copied), 22)
         for text in copied:
@@ -119,12 +122,12 @@ class LicenseOverlayTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
     def test_notice_classification_and_upstream_url_are_checked(self):
-        notice = next(p for p in self.manifest["packages"] if p["content_kind"] == "notice_only")
-        notice["content_kind"] = "full_license_text"
+        notice = next(p for p in self.manifest["packages"] if p["name"] == "objc2")
+        notice["complete_license_options_present"] = []
         self.save_manifest()
         with self.assertRaisesRegex(RuntimeError, "cannot claim"):
             stage_overlay(self.vendor, self.destination, self.packages)
-        notice["content_kind"] = "notice_only"
+        notice["complete_license_options_present"] = ["MIT"]
         notice["assets"][0]["source_url"] = "https://raw.githubusercontent.com/example/other/main/LICENSE"
         self.save_manifest()
         with self.assertRaisesRegex(RuntimeError, "URL or hash"):
@@ -226,22 +229,95 @@ class LicenseOverlayTests(unittest.TestCase):
             stage_overlay(self.vendor, self.destination, self.packages)
         self.assertFalse(self.destination.exists())
 
-    def test_historical_original_is_packaged_but_cannot_clear_unresolved_review(self):
+    def test_historical_original_closes_text_gap_without_claiming_legal_review(self):
         result = stage_overlay(self.vendor, self.destination, self.packages)
-        self.assertEqual(result["record"]["supplemental_review_needed_packages"], 3)
+        self.assertEqual(result["record"]["historical_text_packages"], 3)
+        self.assertEqual(result["record"]["legal_review"], "not_performed")
         for entry in self.manifest["packages"]:
             if not entry.get("supplemental"):
                 continue
             record = result["packages"][entry["id"]]
-            self.assertFalse(record["complete_text"])
-            self.assertTrue(record["supplemental_review_needed"])
-            supplemental = next(t for t in record["texts"] if t.get("review_needed"))
+            self.assertTrue(record["complete_text"])
+            self.assertTrue(record["historical_provenance"])
+            self.assertIsNone(record["full_text_gap"])
+            supplemental = next(t for t in record["texts"] if t.get("source_kind") == "historical_notice")
+            self.assertTrue(supplemental["provenance_verified"])
+            self.assertEqual(supplemental["legal_review"], "not_performed")
             self.assertIn(b"Copyright (c) Steven Sheldon", Path(supplemental["source"]).read_bytes())
         shutil.rmtree(self.destination)
         entry = next(p for p in self.manifest["packages"] if p.get("supplemental"))
-        entry["supplemental"][0]["review_needed"] = False
+        entry["supplemental"][0]["legal_review"] = "approved"
         self.save_manifest()
-        with self.assertRaisesRegex(RuntimeError, "remain review-needed"):
+        with self.assertRaisesRegex(RuntimeError, "reviewed scope"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_historical_scope_cannot_expand_to_other_versions_or_current_commit(self):
+        entry = next(p for p in self.manifest["packages"] if p.get("supplemental"))
+        asset = entry["supplemental"][0]
+        for target, field, value in [(entry, "version", "99.0"),
+                                     (entry, "declared_license", "Apache-2.0"),
+                                     (asset, "source_kind", "same_commit"),
+                                     (asset, "provenance_verified", False),
+                                     (asset, "proofs", asset["proofs"][:-1])]:
+            with self.subTest(field=field):
+                old = target[field]
+                target[field] = value
+                self.save_manifest()
+                with self.assertRaises(RuntimeError):
+                    stage_overlay(self.vendor, self.destination, self.packages)
+                self.assertFalse(self.destination.exists())
+                target[field] = old
+        self.save_manifest()
+
+    def test_resealed_historical_terms_cannot_replace_original_copyright(self):
+        entry = next(p for p in self.manifest["packages"] if p.get("supplemental"))
+        asset = entry["supplemental"][0]
+        raw = (self.vendor / asset["source_path"]).read_bytes().replace(
+            b"Copyright (c) Steven Sheldon", b"Copyright (c) <year> <copyright holders>")
+        for name in [asset["source_path"], asset["path"]]:
+            (self.vendor / name).write_bytes(raw)
+            self.seal(name)
+        asset.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                     source_sha256=hashlib.sha256(raw).hexdigest())
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "Historical original URL or reviewed text hash"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_resealed_current_notice_cannot_drop_apple_sdk_discussion(self):
+        entry = next(p for p in self.manifest["packages"] if p.get("supplemental"))
+        notice = entry["assets"][0]
+        raw = (self.vendor / notice["source_path"]).read_bytes().split(b"## Apple SDKs")[0]
+        # The pinned root notice is shared by dispatch2 and objc2. Reseal all
+        # references so rejection tests the reviewed historical notice, not a
+        # stale digest in an earlier package.
+        (self.vendor / notice["source_path"]).write_bytes(raw)
+        self.seal(notice["source_path"])
+        for package in self.manifest["packages"]:
+            for asset in package["assets"]:
+                if asset.get("source_path") == notice["source_path"]:
+                    (self.vendor / asset["path"]).write_bytes(raw)
+                    self.seal(asset["path"])
+                    asset.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                                 source_sha256=hashlib.sha256(raw).hexdigest())
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "current-version MIT notice differs"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_current_package_mit_declaration_is_required_even_with_historical_text(self):
+        entry = next(p for p in self.manifest["packages"] if p.get("supplemental"))
+        suffix = entry["path_in_vcs"] + "/Cargo.toml"
+        upstream = next(p for p in entry["evidence"] if p["path"].startswith("upstream/") and p["path"].endswith(suffix))
+        original = next(p for p in entry["evidence"] if p["path"].endswith("/Cargo.toml.orig"))
+        raw = (self.vendor / upstream["path"]).read_bytes().replace(b'license = "MIT"', b'license = "Apache-2.0"')
+        for proof in [upstream, original]:
+            (self.vendor / proof["path"]).write_bytes(raw)
+            proof.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+            self.seal(proof["path"])
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "current package MIT declaration"):
             stage_overlay(self.vendor, self.destination, self.packages)
         self.assertFalse(self.destination.exists())
 

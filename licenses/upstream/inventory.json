@@ -3,8 +3,8 @@
   "files": [
     {
       "path": "README.md",
-      "bytes": 2881,
-      "sha256": "c3e9f6eed8f2d68f370cbe18162e70dbe59efff8956287a6af6605845d64c39d"
+      "bytes": 3313,
+      "sha256": "956828c5de2b4e3640ce3f898aad149a8ad98e00fb95beaae3710dc2eedeeca1"
     },
     {
       "path": "input-manifest.json",
@@ -238,8 +238,8 @@
     },
     {
       "path": "manifest.json",
-      "bytes": 56233,
-      "sha256": "22972bc5dca6f54b8111cd36da94137cce3b2a7739ce2de8a0e8266014df2547"
+      "bytes": 56825,
+      "sha256": "536ddba01eaebd97f87455284123a0dab15af29979fb86696ce1e86869e05cc5"
     },
     {
       "path": "overlay/licenses/alloc-stdlib-0.2.4/LICENSE",

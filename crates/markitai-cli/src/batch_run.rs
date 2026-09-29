@@ -1,8 +1,9 @@
 //! The coordinator owns recovery mutations and admits work only after durable claims.
 use super::*;
 use crate::output_claims::{
-    Claim, Error as ClaimError, MemberLeases, Owner, Policy, PreparedDocument, PublicationGroup,
-    RenderedMember, adopt_owner, reservation_members, reserve_keys,
+    Claim, Error as ClaimError, MAX_NAMESPACE_PARENTS, MemberLeases, NamespaceBatch, Owner, Policy,
+    PreparedDocument, PreparedNamespaces, PublicationGroup, RenderedMember, adopt_owner,
+    reservation_members, reserve_keys,
 };
 use crate::run_state::{
     self, Entry, ItemKey, Limits, LoadOutcome, Mode, Scope, Snapshot, StateStore, Status, codec,
@@ -483,15 +484,147 @@ fn reject_package_members(snapshot: &Snapshot, scope: &Scope) -> CliResult<()> {
     Ok(())
 }
 
+struct NamespaceExecution<'a, Commit> {
+    context: ConvertContext<'a>,
+    commit: Commit,
+}
+
+#[derive(Clone, Copy)]
+struct AdmissionSlots {
+    files: usize,
+    urls: usize,
+    file_limit: usize,
+    url_limit: usize,
+}
+
+fn select_admission_indices(
+    files: &mut VecDeque<usize>,
+    urls: &mut VecDeque<usize>,
+    mut slots: AdmissionSlots,
+    limit: usize,
+) -> Vec<usize> {
+    let mut selected = Vec::with_capacity(limit);
+    while selected.len() < limit && crate::signals::interrupted().is_none() {
+        let file = files.front().copied();
+        let url = urls.front().copied();
+        let file_available = file.is_some() && slots.files < slots.file_limit;
+        let url_available = url.is_some() && slots.urls < slots.url_limit;
+        // Fill available class capacity before buffering extra work from an
+        // earlier-sorted class. Compare fractions without floating-point ties.
+        let prefer_file = match (file_available, url_available) {
+            (true, true) => {
+                let file_load = slots.files as u128 * slots.url_limit as u128;
+                let url_load = slots.urls as u128 * slots.file_limit as u128;
+                file_load < url_load || (file_load == url_load && file < url)
+            }
+            (true, false) => true,
+            (false, true) => false,
+            (false, false) => match (file, url) {
+                (Some(file), Some(url)) => file < url,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            },
+        };
+        let index = if prefer_file {
+            slots.files += 1;
+            files.pop_front().expect("selected pending file exists")
+        } else {
+            slots.urls += 1;
+            urls.pop_front().expect("selected pending URL exists")
+        };
+        selected.push(index);
+    }
+    selected
+}
+
+struct NamespaceWindow {
+    indices: Vec<usize>,
+    failures: Vec<(usize, ClaimError)>,
+    ready: Result<Option<PreparedNamespaces>, ClaimError>,
+}
+
+fn prepare_namespace_window(
+    tasks: &[Task],
+    indices: &[usize],
+    cfg: &Value,
+    commit: &mut impl FnMut(NamespaceBatch) -> Result<PreparedNamespaces, ClaimError>,
+) -> NamespaceWindow {
+    // An occupied skip historically does not need the receipt namespace at all.
+    // Keep the entire policy, including resume retries, on the immediate path.
+    if cfg["output"]["on_conflict"].as_str() == Some("skip") {
+        return NamespaceWindow {
+            indices: indices.to_vec(),
+            failures: Vec::new(),
+            ready: Ok(None),
+        };
+    }
+    let mut batch = NamespaceBatch::new();
+    let mut eligible = Vec::new();
+    let mut failures = Vec::new();
+    let allow = config::enabled(cfg, "/output/allow_symlinks");
+    for &index in indices {
+        let prepared = tasks[index]
+            .output
+            .as_deref()
+            .ok_or_else(|| ClaimError::Invalid("batch task has no output parent".into()))
+            .and_then(|parent| batch.prepare(parent, allow));
+        match prepared {
+            Ok(()) => eligible.push(index),
+            Err(error) => failures.push((index, error)),
+        }
+    }
+    let ready = if eligible.is_empty() {
+        Ok(None)
+    } else {
+        commit(batch).map(Some)
+    };
+    NamespaceWindow {
+        indices: eligible,
+        failures,
+        ready,
+    }
+}
+
 pub(super) fn run(
+    cli: &Cli,
+    cfg: &Value,
+    tasks: Vec<Task>,
+    destination: BatchDestination<'_>,
+    report_plan: Option<&report::ReportPlan>,
+    clock: Instant,
+    context: ConvertContext<'_>,
+) -> CliResult<i32> {
+    run_with_namespace(
+        cli,
+        cfg,
+        tasks,
+        destination,
+        report_plan,
+        clock,
+        NamespaceExecution {
+            context,
+            commit: NamespaceBatch::commit,
+        },
+    )
+}
+
+fn run_with_namespace(
     cli: &Cli,
     cfg: &Value,
     mut tasks: Vec<Task>,
     destination: BatchDestination<'_>,
     report_plan: Option<&report::ReportPlan>,
     clock: Instant,
-    context: ConvertContext<'_>,
+    execution: NamespaceExecution<
+        '_,
+        impl FnMut(NamespaceBatch) -> Result<PreparedNamespaces, ClaimError>,
+    >,
 ) -> CliResult<i32> {
+    let NamespaceExecution {
+        context,
+        mut commit,
+    } = execution;
     let BatchDestination {
         mode,
         output,
@@ -851,92 +984,154 @@ pub(super) fn run(
                 }
             }
             let mut admitted = Vec::new();
-            if signal.is_none() && fatal.is_none() && queued.is_empty() {
-                loop {
-                    if crate::signals::interrupted().is_some()
-                        || active_files
-                            + active_urls
-                            + publications.len()
-                            + queued.len()
-                            + admitted.len()
-                            >= admission_window
-                    {
+            if signal.is_none() && fatal.is_none() {
+                // Already-reserved work occupies its class even before dispatch.
+                // Refill the other class when completed publication frees space,
+                // rather than waiting for a long queued class to empty first.
+                let queued_urls = queued
+                    .iter()
+                    .filter(|work| is_url(&work.task.source))
+                    .count();
+                let mut slots = AdmissionSlots {
+                    files: active_files + queued.len() - queued_urls,
+                    urls: active_urls + queued_urls,
+                    file_limit,
+                    url_limit,
+                };
+                'admission: loop {
+                    let occupied = active_files
+                        + active_urls
+                        + publications.len()
+                        + queued.len()
+                        + admitted.len();
+                    if crate::signals::interrupted().is_some() || occupied >= admission_window {
                         break;
                     }
-                    let file = pending_files.front().copied();
-                    let url = pending_urls.front().copied();
-                    let index = match (file, url) {
-                        (Some(file), Some(url)) if file < url => pending_files.pop_front().unwrap(),
-                        (Some(_), Some(_)) | (None, Some(_)) => pending_urls.pop_front().unwrap(),
-                        (Some(_), None) => pending_files.pop_front().unwrap(),
-                        (None, None) => break,
-                    };
-                    let previous = entry(store.snapshot().unwrap(), &item_key(&tasks[index]))
-                        .unwrap()
-                        .clone();
-                    let identity = owner(&scope, &generation, &tasks[index]);
-                    let claim = match claim(
-                        &mut tasks[index],
-                        cfg,
-                        Some(identity),
-                        retries[index].as_deref(),
-                        &reserved,
-                    ) {
-                        Ok(Some(claim)) => claim,
-                        Ok(None) => unreachable!("batch always writes"),
-                        Err(error) => {
-                            let record = failure(&tasks[index], index, error.to_string());
-                            if let Err(error) = terminal(&mut store, &tasks[index], &record) {
-                                fatal = Some(error.to_string());
-                            }
-                            records.push(record);
-                            if fatal.is_some() {
-                                break;
-                            }
-                            continue;
-                        }
-                    };
-                    let target = claim.parent().join(format!(
-                        "{}.md",
-                        tasks[index].reserved_stem.as_ref().unwrap()
-                    ));
-                    if let Err(error) = store.record(
-                        item_key(&tasks[index]),
-                        json!({"status":"in_progress","target":target,"output":null,"error":null,"diagnostics":null}),
-                    ) {
-                        fatal = Some(error.to_string());
+                    // This subwindow bounds namespace descriptors, not worker count.
+                    // Several subwindows can share the one durable admission flush.
+                    let selected = select_admission_indices(
+                        &mut pending_files,
+                        &mut pending_urls,
+                        slots,
+                        (admission_window - occupied).min(MAX_NAMESPACE_PARENTS),
+                    );
+                    if selected.is_empty() {
                         break;
                     }
-                    if claim.is_skip() {
-                        // A skip performs no provider work and owns no output name after its short check.
-                        if let Err(error) = store.flush() {
-                            fatal = Some(error.to_string());
-                            break;
-                        }
-                        last_flush = Instant::now();
-                        let record =
-                            convert_item(&tasks[index], index, cfg, context, Some(&claim)).0;
+                    let NamespaceWindow {
+                        indices,
+                        failures,
+                        ready,
+                    } = prepare_namespace_window(&tasks, &selected, cfg, &mut commit);
+                    for (index, error) in failures {
+                        let record = failure(&tasks[index], index, error.to_string());
                         if let Err(error) = terminal(&mut store, &tasks[index], &record) {
                             fatal = Some(error.to_string());
                         }
                         records.push(record);
                         if fatal.is_some() {
-                            break;
+                            break 'admission;
                         }
-                        continue;
                     }
-                    for key in claim.keys() {
-                        reserved
-                            .entry(key)
-                            .or_default()
-                            .insert(item_key(&tasks[index]));
+                    let ready = match ready {
+                        Ok(ready) => ready,
+                        Err(error) => {
+                            fatal = Some(error.to_string());
+                            break 'admission;
+                        }
+                    };
+                    for index in indices {
+                        if crate::signals::interrupted().is_some() {
+                            break 'admission;
+                        }
+                        let previous = entry(store.snapshot().unwrap(), &item_key(&tasks[index]))
+                            .unwrap()
+                            .clone();
+                        let identity = owner(&scope, &generation, &tasks[index]);
+                        let claimed: Result<Option<Claim>, ClaimError> = (|| {
+                            let parent =
+                                tasks[index].output.as_deref().expect("batch output parent");
+                            if let Some(ready) = &ready {
+                                ready.validate(parent, allow)?;
+                            }
+                            let claim = claim(
+                                &mut tasks[index],
+                                cfg,
+                                Some(identity),
+                                retries[index].as_deref(),
+                                &reserved,
+                            )?;
+                            if let Some(ready) = &ready {
+                                ready.validate(
+                                    tasks[index].output.as_deref().expect("batch output parent"),
+                                    allow,
+                                )?;
+                            }
+                            Ok(claim)
+                        })(
+                        );
+                        let claim = match claimed {
+                            Ok(Some(claim)) => claim,
+                            Ok(None) => unreachable!("batch always writes"),
+                            Err(error) => {
+                                let record = failure(&tasks[index], index, error.to_string());
+                                if let Err(error) = terminal(&mut store, &tasks[index], &record) {
+                                    fatal = Some(error.to_string());
+                                }
+                                records.push(record);
+                                if fatal.is_some() {
+                                    break 'admission;
+                                }
+                                continue;
+                            }
+                        };
+                        let target = claim.parent().join(format!(
+                            "{}.md",
+                            tasks[index].reserved_stem.as_ref().unwrap()
+                        ));
+                        if let Err(error) = store.record(
+                            item_key(&tasks[index]),
+                            json!({"status":"in_progress","target":target,"output":null,"error":null,"diagnostics":null}),
+                        ) {
+                            fatal = Some(error.to_string());
+                            break 'admission;
+                        }
+                        if claim.is_skip() {
+                            // A skip performs no provider work and owns no output name after its short check.
+                            if let Err(error) = store.flush() {
+                                fatal = Some(error.to_string());
+                                break 'admission;
+                            }
+                            last_flush = Instant::now();
+                            let record =
+                                convert_item(&tasks[index], index, cfg, context, Some(&claim)).0;
+                            if let Err(error) = terminal(&mut store, &tasks[index], &record) {
+                                fatal = Some(error.to_string());
+                            }
+                            records.push(record);
+                            if fatal.is_some() {
+                                break 'admission;
+                            }
+                            continue;
+                        }
+                        for key in claim.keys() {
+                            reserved
+                                .entry(key)
+                                .or_default()
+                                .insert(item_key(&tasks[index]));
+                        }
+                        if is_url(&tasks[index].source) {
+                            slots.urls += 1;
+                        } else {
+                            slots.files += 1;
+                        }
+                        admitted.push(Work {
+                            index,
+                            task: tasks[index].clone(),
+                            claim: Arc::new(claim),
+                            previous,
+                        });
                     }
-                    admitted.push(Work {
-                        index,
-                        task: tasks[index].clone(),
-                        claim: Arc::new(claim),
-                        previous,
-                    });
                 }
             }
             if !admitted.is_empty() {
@@ -1525,5 +1720,676 @@ mod publication_tests {
         );
         assert!(weak.upgrade().is_none());
         assert!(!fixture.scope.output.join("a.txt.md").exists());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod namespace_coordination_tests {
+    use super::*;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    mod bounded_fixture_io {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/support/bounded_read.rs"
+        ));
+    }
+
+    fn child_case(case: &str) {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("private-home")).unwrap();
+        fs::create_dir(root.path().join("tmp")).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "app::batch_run::namespace_coordination_tests::namespace_coordinator_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear();
+        for key in ["HOME", "PATH", "LANG", "LC_ALL", "TZ"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        let mut child = command
+            .env("MARKITAI_NAMESPACE_COORDINATOR_ROOT", root.path())
+            .env("MARKITAI_NAMESPACE_COORDINATOR_CASE", case)
+            .env("MARKITAI_HOME", root.path().join("private-home"))
+            .env("TMPDIR", root.path().join("tmp"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "namespace coordinator subprocess failed: {case}"
+                );
+                assert_eq!(
+                    fs::read_to_string(root.path().join("passed")).unwrap(),
+                    case
+                );
+                return;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("namespace coordinator subprocess timed out: {case}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn invalid_parent_fails_only_its_item_and_the_good_item_publishes() {
+        child_case("partial");
+    }
+
+    #[test]
+    fn skip_keeps_its_existing_shortcut_even_with_an_invalid_records_path() {
+        child_case("skip");
+    }
+
+    #[test]
+    fn failed_namespace_or_admission_flush_never_sends_a_provider_get() {
+        child_case("zero-requests");
+    }
+
+    #[test]
+    fn earlier_file_backlog_allows_continued_url_admission_before_release() {
+        child_case("mixed-backlog");
+    }
+
+    fn cfg(root: &Path, policy: &str) -> Value {
+        config::normalize(&json!({
+            "llm":{"enabled":false},"ocr":{"enabled":false},"screenshot":{"enabled":false},
+            "image":{"alt_enabled":false,"desc_enabled":false},
+            "batch":{"concurrency":1,"url_concurrency":20,"state_flush_interval_seconds":3600},
+            "fetch":{"strategy":"static","remote_consent":"never"},
+            "cache":{"enabled":false,"global_dir":root.join("cache")},
+            "prompts":{"dir":root.join("prompts")},"history":{"record":false},
+            "output":{"on_conflict":policy,"report":false},"log":{"dir":null}
+        }))
+        .unwrap()
+    }
+
+    fn task(source: &Path, key: &str, output: &Path) -> Task {
+        Task {
+            source: source.to_string_lossy().into_owned(),
+            display: key.into(),
+            report_key: key.into(),
+            output: Some(output.to_owned()),
+            filename: None,
+            reserved_stem: None,
+            source_file: None,
+        }
+    }
+
+    fn cli(input: &Path, output: &Path) -> Cli {
+        Cli::try_parse_from([
+            "markitai".to_owned(),
+            input.to_string_lossy().into_owned(),
+            "-o".into(),
+            output.to_string_lossy().into_owned(),
+            "--quiet".into(),
+        ])
+        .unwrap()
+    }
+
+    fn execute(
+        cli: &Cli,
+        cfg: &Value,
+        tasks: Vec<Task>,
+        output: &Path,
+        mode: RunMode,
+        commit: impl FnMut(NamespaceBatch) -> Result<PreparedNamespaces, ClaimError>,
+    ) -> i32 {
+        run_with_namespace(
+            cli,
+            cfg,
+            tasks,
+            BatchDestination {
+                mode,
+                output,
+                history: None,
+            },
+            None,
+            Instant::now(),
+            NamespaceExecution {
+                context: ConvertContext::default(),
+                commit,
+            },
+        )
+        .unwrap()
+    }
+
+    fn checkpoint(output: &Path) -> Value {
+        let paths: Vec<_> = fs::read_dir(output.join(".markitai/states"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with(".state.json")
+            })
+            .collect();
+        assert_eq!(paths.len(), 1);
+        serde_json::from_slice(&fs::read(&paths[0]).unwrap()).unwrap()
+    }
+
+    fn bad_records(parent: &Path) -> PathBuf {
+        let ownership = parent.join(".markitai/ownership");
+        fs::create_dir_all(&ownership).unwrap();
+        fs::set_permissions(&ownership, fs::Permissions::from_mode(0o700)).unwrap();
+        let records = ownership.join("records");
+        fs::write(&records, "foreign records file").unwrap();
+        records
+    }
+
+    struct Observer {
+        address: String,
+        requests: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Observer {
+        fn new() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let count = Arc::clone(&requests);
+            let stopping = Arc::clone(&stop);
+            let worker = std::thread::spawn(move || {
+                loop {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let _ = stream.set_nonblocking(false);
+                            let mut reader = bounded_fixture_io::Reader::new(
+                                &stream,
+                                Instant::now() + Duration::from_secs(1),
+                            );
+                            let mut head = [0_u8; 8192];
+                            let _ = reader.read(&mut head);
+                            let body = b"<article><h1>Unexpected request</h1><p>A complete authored response allows an incorrectly dispatched conversion to finish.</p></article>";
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(body);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if stopping.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("observer accept failed: {error}"),
+                    }
+                }
+            });
+            Self {
+                address,
+                requests,
+                stop,
+                worker: Some(worker),
+            }
+        }
+        fn finish(&mut self) -> usize {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(worker) = self.worker.take() {
+                worker.join().unwrap();
+            }
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+    impl Drop for Observer {
+        fn drop(&mut self) {
+            self.finish();
+        }
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        files_started: usize,
+        urls_started: usize,
+        released: bool,
+        mixed_observed: bool,
+        errors: Vec<String>,
+    }
+
+    struct MixedGate {
+        address: String,
+        state: Arc<(Mutex<GateState>, std::sync::Condvar)>,
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+    impl MixedGate {
+        fn new() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = format!("http://{}", listener.local_addr().unwrap());
+            let state = Arc::new((Mutex::new(GateState::default()), std::sync::Condvar::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let shared = Arc::clone(&state);
+            let stopping = Arc::clone(&stop);
+            let worker = std::thread::spawn(move || {
+                let mut handlers = Vec::new();
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let shared = Arc::clone(&shared);
+                            handlers.push(std::thread::spawn(move || {
+                                if let Err(error) = Self::respond(stream, &shared) {
+                                    let (lock, changed) = &*shared;
+                                    let mut state = lock.lock().unwrap();
+                                    state.errors.push(error.to_string());
+                                    changed.notify_all();
+                                }
+                            }));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if stopping.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("mixed observer accept failed: {error}"),
+                    }
+                }
+                for handler in handlers {
+                    handler.join().unwrap();
+                }
+            });
+            Self {
+                address,
+                state,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn respond(
+            mut stream: std::net::TcpStream,
+            shared: &Arc<(Mutex<GateState>, std::sync::Condvar)>,
+        ) -> io::Result<()> {
+            // Accepted sockets can inherit the listener's nonblocking mode.
+            stream.set_nonblocking(false)?;
+            let mut reader =
+                bounded_fixture_io::Reader::new(&stream, Instant::now() + Duration::from_secs(10));
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+                if bytes.len() > 64 * 1024 {
+                    return Err(io::Error::other("fixture request headers too large"));
+                }
+                let mut buffer = [0_u8; 4096];
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    return Err(io::Error::other("fixture request closed before headers"));
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            };
+            let head = String::from_utf8_lossy(&bytes[..header_end]);
+            let get = head.starts_with("GET ");
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if length > 1024 * 1024 {
+                return Err(io::Error::other("fixture request body too large"));
+            }
+            while bytes.len() < header_end + length {
+                let mut buffer = [0_u8; 4096];
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    return Err(io::Error::other("fixture request body incomplete"));
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            let (mime, body) = if get {
+                let (lock, changed) = &**shared;
+                let mut state = lock.lock().unwrap();
+                state.urls_started += 1;
+                changed.notify_all();
+                drop(state);
+                ("text/html", b"<article><h1>URLDOC</h1><p>URLDOC complete readable text for mixed class admission.</p></article>".to_vec())
+            } else {
+                let request: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + length])
+                        .map_err(io::Error::other)?;
+                let source = request["messages"]
+                    .as_array()
+                    .ok_or_else(|| io::Error::other("missing messages"))?
+                    .iter()
+                    .filter(|message| message["role"] == "user")
+                    .filter_map(|message| message["content"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if source.contains("FILEPREFIX") {
+                    let (lock, changed) = &**shared;
+                    let mut state = lock.lock().unwrap();
+                    state.files_started += 1;
+                    changed.notify_all();
+                    let (mut state, _) = changed
+                        .wait_timeout_while(state, Duration::from_secs(15), |state| !state.released)
+                        .unwrap();
+                    if !state.released {
+                        state.errors.push("file model gate timed out".into());
+                        state.released = true;
+                        changed.notify_all();
+                    }
+                }
+                let answer = json!({"cleaned_markdown":source,"frontmatter":{"description":"Authored gate fixture","tags":["fixture"]}});
+                ("application/json", serde_json::to_vec(&json!({"choices":[{"message":{"content":answer.to_string()},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":5}})).unwrap())
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            stream.write_all(&body)?;
+            Ok(())
+        }
+
+        fn observe_then_release(&self) -> std::thread::JoinHandle<()> {
+            let shared = Arc::clone(&self.state);
+            std::thread::spawn(move || {
+                let (lock, changed) = &*shared;
+                let state = lock.lock().unwrap();
+                let (mut state, _) = changed
+                    .wait_timeout_while(state, Duration::from_secs(10), |state| {
+                        state.errors.is_empty()
+                            && (state.files_started < 1 || state.urls_started < 6)
+                    })
+                    .unwrap();
+                state.mixed_observed = !state.released
+                    && state.errors.is_empty()
+                    && state.files_started == 1
+                    && state.urls_started == 6;
+                state.released = true;
+                changed.notify_all();
+            })
+        }
+
+        fn finish(&mut self) {
+            let (lock, changed) = &*self.state;
+            lock.lock().unwrap().released = true;
+            changed.notify_all();
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(worker) = self.worker.take() {
+                worker.join().unwrap();
+            }
+        }
+    }
+    impl Drop for MixedGate {
+        fn drop(&mut self) {
+            self.finish();
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture with a private configuration/state root"]
+    fn namespace_coordinator_helper() {
+        let Some(root) = std::env::var_os("MARKITAI_NAMESPACE_COORDINATOR_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let case = std::env::var("MARKITAI_NAMESPACE_COORDINATOR_CASE").unwrap();
+        match case.as_str() {
+            "partial" => {
+                let input = root.join("input");
+                let output = root.join("out");
+                let mut tasks = Vec::new();
+                for name in ["bad", "good"] {
+                    fs::create_dir_all(input.join(name)).unwrap();
+                    let source = input.join(name).join("a.txt");
+                    fs::write(&source, format!("Complete {name} content.\n")).unwrap();
+                    tasks.push(task(&source, &format!("{name}/a.txt"), &output.join(name)));
+                }
+                let foreign = bad_records(&output.join("bad"));
+                let cfg = cfg(&root, "rename");
+                assert_eq!(
+                    execute(
+                        &cli(&input, &output),
+                        &cfg,
+                        tasks,
+                        &output,
+                        RunMode::Directory,
+                        NamespaceBatch::commit
+                    ),
+                    10
+                );
+                let saved = checkpoint(&output);
+                assert_eq!(saved["documents"]["bad/a.txt"]["status"], "failed");
+                assert_eq!(saved["documents"]["good/a.txt"]["status"], "completed");
+                assert!(
+                    fs::read_to_string(output.join("good/a.txt.md"))
+                        .unwrap()
+                        .contains("Complete good content.")
+                );
+                assert!(!output.join("bad/a.txt.md").exists());
+                assert_eq!(fs::read_to_string(foreign).unwrap(), "foreign records file");
+            }
+            "skip" => {
+                let input = root.join("input");
+                let output = root.join("out");
+                fs::create_dir(&input).unwrap();
+                let source = input.join("a.txt");
+                fs::write(&source, "original input\n").unwrap();
+                let foreign = bad_records(&output);
+                let saved_output = output.join("a.txt.md");
+                fs::write(&saved_output, "preserve existing output\n").unwrap();
+                let cfg = cfg(&root, "skip");
+                let mut namespace_calls = 0;
+                assert_eq!(
+                    execute(
+                        &cli(&input, &output),
+                        &cfg,
+                        vec![task(&source, "a.txt", &output)],
+                        &output,
+                        RunMode::Directory,
+                        |batch| {
+                            namespace_calls += 1;
+                            batch.commit()
+                        }
+                    ),
+                    0
+                );
+                assert_eq!(namespace_calls, 0);
+                assert_eq!(
+                    fs::read_to_string(saved_output).unwrap(),
+                    "preserve existing output\n"
+                );
+                assert_eq!(fs::read_to_string(foreign).unwrap(), "foreign records file");
+                assert_eq!(
+                    checkpoint(&output)["documents"]["a.txt"]["status"],
+                    "completed"
+                );
+            }
+            "mixed-backlog" => {
+                let input = root.join("input");
+                let output = root.join("out");
+                fs::create_dir(&input).unwrap();
+                let mut server = MixedGate::new();
+                let mut tasks = Vec::new();
+                for index in 0..20 {
+                    let name = format!("a{index:02}.txt");
+                    let source = input.join(&name);
+                    fs::write(
+                        &source,
+                        format!("FILEPREFIX {index} complete authored input.\n"),
+                    )
+                    .unwrap();
+                    tasks.push(task(&source, &name, &output));
+                }
+                let list = input.join("z.urls");
+                let mut urls = String::new();
+                for index in 0..6 {
+                    let source = format!("{}/url{index}", server.address);
+                    urls.push_str(&format!("{source} page{index}\n"));
+                    tasks.push(Task {
+                        display: source.clone(),
+                        report_key: format!("{source} page{index}"),
+                        source,
+                        output: Some(output.clone()),
+                        filename: Some(format!("page{index}.md")),
+                        reserved_stem: None,
+                        source_file: Some(list.to_string_lossy().into_owned()),
+                    });
+                }
+                fs::write(&list, urls).unwrap();
+                let mut cfg = cfg(&root, "rename");
+                cfg["batch"]["url_concurrency"] = json!(2);
+                cfg["llm"]["enabled"] = json!(true);
+                cfg["llm"]["router_settings"] = json!({"num_retries":0,"timeout":20});
+                cfg["llm"]["model_list"] = json!([{ "model_name":"default", "litellm_params":{
+                    "model":"openai/namespace-fixture", "api_key":"authored-fixture", "api_base":format!("{}/v1", server.address) }}]);
+                let monitor = server.observe_then_release();
+                let code = execute(
+                    &cli(&input, &output),
+                    &cfg,
+                    tasks,
+                    &output,
+                    RunMode::Directory,
+                    NamespaceBatch::commit,
+                );
+                monitor.join().unwrap();
+                server.finish();
+                assert_eq!(code, 0);
+                let (observed, errors, files_started, urls_started) = {
+                    let state = server.state.0.lock().unwrap();
+                    (
+                        state.mixed_observed,
+                        state.errors.clone(),
+                        state.files_started,
+                        state.urls_started,
+                    )
+                };
+                assert!(
+                    observed,
+                    "all six URLs must start while the first file request remains held, including refills beyond the two URL slots; files={files_started}, URLs={urls_started}, fixture errors={errors:?}"
+                );
+                assert!(errors.is_empty(), "{errors:?}");
+                assert_eq!(files_started, 20);
+                assert_eq!(urls_started, 6);
+                let saved = checkpoint(&output);
+                assert_eq!(saved["documents"].as_object().unwrap().len(), 20);
+                assert_eq!(saved["urls"].as_object().unwrap().len(), 6);
+                for collection in ["documents", "urls"] {
+                    for item in saved[collection].as_object().unwrap().values() {
+                        assert_eq!(item["status"], "completed");
+                        let body = fs::read_to_string(item["output"].as_str().unwrap()).unwrap();
+                        assert!(body.contains(if collection == "documents" {
+                            "FILEPREFIX"
+                        } else {
+                            "URLDOC"
+                        }));
+                    }
+                }
+            }
+            "zero-requests" => {
+                for fault in ["namespace", "journal"] {
+                    let directory = root.join(fault);
+                    fs::create_dir(&directory).unwrap();
+                    let input = directory.join("sources.urls");
+                    let output = directory.join("out");
+                    let mut observer = Observer::new();
+                    let tasks: Vec<_> = (0..17)
+                        .map(|index| {
+                            let source = format!("{}/page{index}", observer.address);
+                            Task {
+                                display: source.clone(),
+                                report_key: format!("{source} page{index}"),
+                                source,
+                                output: Some(output.clone()),
+                                filename: Some(format!("page{index}.md")),
+                                reserved_stem: None,
+                                source_file: Some(input.to_string_lossy().into_owned()),
+                            }
+                        })
+                        .collect();
+                    fs::write(
+                        &input,
+                        tasks
+                            .iter()
+                            .map(|task| format!("{}\n", task.report_key))
+                            .collect::<String>(),
+                    )
+                    .unwrap();
+                    let cfg = cfg(&directory, "rename");
+                    let cli = cli(&input, &output);
+                    let scope = Scope::new(Mode::UrlList, &input, &output).unwrap();
+                    let hash = codec::task_hash(&scope, &options(&cli, &cfg, &scope)).unwrap();
+                    let journal =
+                        output.join(format!(".markitai/states/markitai.{hash}.state.jsonl"));
+                    let mut commits = 0;
+                    let code = execute(&cli, &cfg, tasks, &output, RunMode::UrlList, |batch| {
+                        commits += 1;
+                        if fault == "namespace" && commits == 2 {
+                            return Err(ClaimError::Io(io::Error::other(
+                                "injected namespace media-fence failure",
+                            )));
+                        }
+                        let ready = batch.commit()?;
+                        if fault == "journal" && commits == 2 {
+                            fs::create_dir(&journal)?;
+                        }
+                        Ok(ready)
+                    });
+                    assert_eq!(code, 1);
+                    assert_eq!(
+                        commits, 2,
+                        "seventeen configured slots span both bounded namespace windows"
+                    );
+                    assert_eq!(
+                        observer.finish(),
+                        0,
+                        "no URL request can precede both namespace and journal fences"
+                    );
+                    assert!(!output.join("page0.md").exists());
+                    assert!(!output.join("page16.md").exists());
+                    let saved = checkpoint(&output);
+                    assert_eq!(saved["urls"].as_object().unwrap().len(), 17);
+                    for entry in saved["urls"].as_object().unwrap().values() {
+                        assert_eq!(entry["status"], "pending");
+                        assert!(entry.get("target").is_none_or(Value::is_null));
+                        assert!(entry.get("diagnostics").is_none_or(Value::is_null));
+                    }
+                    let _released = MemberLeases::acquire(
+                        &output,
+                        &["page0.md".into(), "page0.llm.md".into()],
+                        false,
+                    )
+                    .unwrap();
+                    if fault == "journal" {
+                        assert!(journal.is_dir());
+                    }
+                }
+            }
+            _ => panic!("unknown namespace coordinator case"),
+        }
+        fs::write(root.join("passed"), case).unwrap();
     }
 }

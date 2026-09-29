@@ -819,13 +819,13 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
         let Some(directory) = task.output.as_deref() else {
             continue;
         };
-        markitai_core::output::check_path(
+        // Name probing must not create unsynchronized output ancestors that
+        // later claim acquisition would mistake for an established directory.
+        let directory = crate::output_claims::prepare_namespace_parent(
             directory,
             config::enabled(cfg, "/output/allow_symlinks"),
         )
         .map_err(runtime)?;
-        std::fs::create_dir_all(directory).map_err(runtime)?;
-        let directory = crate::report_store::resolve_path(directory).map_err(runtime)?;
         let folds = *case_rules.entry(directory.clone()).or_insert_with(|| {
             tempfile::Builder::new()
                 .prefix(".MarkitaiCaseProbe-")
