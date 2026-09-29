@@ -338,3 +338,110 @@ fn model_content(request: &Value, markdown: &str) -> String {
         .join("\n");
     json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
 }
+
+fn invoke_spa(root: &Path, args: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_markitai"));
+    cmd.env_clear();
+    for name in [
+        "HOME",
+        "PATH",
+        "USERPROFILE",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TMPDIR",
+        "LANG",
+        "TZ",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            cmd.env(name, value);
+        }
+    }
+    cmd.current_dir(root)
+        .env("MARKITAI_HOME", root.join("home"))
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .stdin(Stdio::null())
+        .args(["--config", "markitai.json"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn learned_domain_commands_keep_empty_json_and_clear_contracts_without_creating_a_database() {
+    let dir = tempfile::tempdir().unwrap();
+    save(
+        dir.path(),
+        &json!({"cache":{"enabled":false},"log":{"dir":null},
+        "prompts":{"dir":dir.path().join("prompts")}}),
+    );
+    assert_eq!(
+        json_output(invoke_spa(dir.path(), &["cache", "spa-domains", "--json"])),
+        json!([])
+    );
+    assert_eq!(
+        json_output(invoke_spa(
+            dir.path(),
+            &["cache", "spa-domains", "--clear", "--json"]
+        )),
+        json!({"cleared":0})
+    );
+    let cleared = invoke_spa(
+        dir.path(),
+        &["cache", "clear", "--yes", "--include-spa-domains"],
+    );
+    assert!(
+        cleared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleared.stderr)
+    );
+    assert!(String::from_utf8_lossy(&cleared.stdout).contains("Cleared 0 learned SPA domains"));
+    assert!(!dir.path().join("home/learned_spa_domains.db").exists());
+}
+
+#[test]
+fn combined_clear_preflights_learned_domains_before_removing_cached_model_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = ModelServer::start();
+    let mut cfg = setup(dir.path(), &server);
+    cfg["prompts"] = json!({"dir":dir.path().join("prompts")});
+    cfg["log"] = json!({"dir":null});
+    save(dir.path(), &cfg);
+    let first = json_output(invoke_spa(
+        dir.path(),
+        &["source.md", "-o", "out", "--json"],
+    ));
+    assert_eq!(first["items"][0]["status"], "completed");
+    assert_eq!(server.count(), 1);
+    let cache = dir.path().join("home/cache.db");
+    let before = std::fs::read(&cache).unwrap();
+    let domains = dir.path().join("home/learned_spa_domains.db");
+    let invalid = b"PRIVATE_DOMAIN_FIXTURE_CONTENT: not a SQLite database";
+    std::fs::write(&domains, invalid).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&domains, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    for args in [
+        vec!["cache", "spa-domains", "--json"],
+        vec!["cache", "spa-domains", "--clear", "--json"],
+        vec!["cache", "clear", "--yes", "--include-spa-domains"],
+    ] {
+        let output = invoke_spa(dir.path(), &args);
+        assert!(!output.status.success());
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("PRIVATE_DOMAIN_FIXTURE_CONTENT")
+        );
+        assert_eq!(std::fs::read(&domains).unwrap(), invalid);
+        assert_eq!(std::fs::read(&cache).unwrap(), before);
+    }
+    let cleared = invoke_spa(dir.path(), &["cache", "clear", "--yes"]);
+    assert!(
+        cleared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleared.stderr)
+    );
+    let stats = json_output(invoke_spa(dir.path(), &["cache", "stats", "--json"]));
+    assert_eq!(stats["cache"]["count"], 0);
+    assert_eq!(std::fs::read(&domains).unwrap(), invalid);
+}

@@ -30,6 +30,35 @@ without a runtime random-number dependency. The selection calculation uses a
 while another eligible deployment remains; after every candidate has failed,
 retries may revisit the pool.
 
+`least-busy` chooses the eligible deployment with the fewest active HTTP
+attempts in the same `LlmRuntime`. Equal counts use configured candidate order;
+positive weights do not change the comparison, while weight zero still disables
+a deployment. Selection and reservation happen atomically after acquiring the
+runtime's shared request capacity and passing cancellation and document-budget
+checks. The reservation lasts through response reading and decoding, and is
+released on success, error or unwind. Backoff, queueing, cached answers and
+coalesced waiters do not reserve a deployment.
+
+Ties preserve candidate order. This follows the normal healthy-pool path in the
+reference checkout's locked LiteLLM 1.100.1:
+`litellm/router_strategy/least_busy.py::_get_available_deployments` updates its
+choice only for a strictly smaller count. Its random choice handles a missing
+or unhealthy selected ID; it does not randomize ordinary equal-count ties.
+
+Runtime clones share these counts. Independent runtimes, independent serialized
+binding calls and conversions without a caller-supplied shared runtime do not
+coordinate across calls. The CLI batch, REST job and MCP job already supply
+their own shared runtime. This is neither process-global nor distributed load
+balancing. Counts cover least-busy attempts; simultaneous conversions configured
+with `simple-shuffle` retain their separate selection behavior.
+
+Resolved endpoint, credentials, model, protocol, group and explicit
+`model_info.id` form a private per-runtime salted identity. Different credentials
+or deployment IDs do not share occupancy accidentally. Identical entries with
+the same identity share their actual occupancy. These fingerprints are not
+logged or persisted. Only active identities remain in the table, bounded by
+the runtime's existing concurrency limit.
+
 Without configured fallbacks, all model names share the `default` pool. With
 fallbacks, configured group names are preserved and requests enter `default`.
 For example:
@@ -49,9 +78,9 @@ For example:
 Fallbacks are traversed in declared order, including nested fallback groups.
 Each reachable group is attempted once; cycles, malformed target lists and
 references to unavailable groups fail before requests begin. Each group gets
-its configured transport retry allowance. `least-busy`, `usage-based-routing`
-and `latency-based-routing` return an explicit unsupported error: the native
-core does not yet maintain the persistent measurements those strategies need.
+its configured transport retry allowance. `usage-based-routing` and
+`latency-based-routing` still return an explicit unsupported error; their usage
+windows and latency observations are not implemented.
 There is no cross-document deployment cooldown or health-history database.
 
 ## Providers and request parameters

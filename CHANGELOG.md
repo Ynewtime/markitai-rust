@@ -4,6 +4,10 @@
 
 ### Added
 
+- Shared-runtime least-busy model selection with atomic active-request reservation and bounded private deployment identities.
+- Bounded persistent learning of anonymous JavaScript-required domains, with compatible inspection and clearing commands.
+- Optional macOS arm64 Go static delivery with packaged native archive/header, isolated installed consumers and dependency notice inventory.
+
 - Modern Numbers directory packages as atomic documents in the core, CLI discovery, wizard, history and recovery, using the existing bounded Rust table decoder.
 
 - Optional last-attempt diagnostics across CLI JSON, reports, recovery/history, REST events/retries and MCP, preserving observed failure usage without changing existing success totals.

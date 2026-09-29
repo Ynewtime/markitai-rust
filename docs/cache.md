@@ -174,15 +174,36 @@ Previews are intentional user-requested content display, not error diagnostics.
 
 The storage clear operation deletes LLM table entries transactionally and returns
 the deleted count; an absent database returns zero without creating it. The CLI
-rejects unsupported SPA operations first, then checks both LLM and fetch stores
-before clearing either one. Statistics include the independent fetch store.
+checks both LLM and fetch stores before clearing either one. With
+`--include-spa-domains`, it also preflights the learned-domain store before any
+deletion. Statistics include the independent fetch store.
 A later deletion failure can still leave one store cleared; the CLI reports the
 completed portion and exits unsuccessfully. Two WAL databases are not one atomic
-transaction, and partial clearing is never reported as complete success.
+transaction, and partial clearing is never reported as complete success. The
+optional routing store is also independently transactional.
 
 A cache hit reaches the existing CLI `cache_hit` and `llm_cache_hit` fields through
 internal conversion state. It does not add fields to the JSON conversion protocol
 used by Node.js, Python or Go bindings.
+
+## Learned-domain management
+
+`cache spa-domains` lists learned browser-routing authorities. JSON output keeps
+the reference fields `domain`, `learned_at`, `hits`, `last_hit` and `expired`,
+ordered by descending hits with a deterministic domain tie-break. Timestamps are
+UTC RFC 3339 strings. `cache spa-domains --clear --json` returns the removed count
+as `{"cleared": N}`; an absent store yields zero without creating a directory or
+database. Ordinary listing is read-only and neither increments hits nor prunes
+expired records.
+
+`cache clear --include-spa-domains` includes this independent store in the
+existing preflight and clear sequence. Separate stores cannot provide a single
+atomic clear transaction; a later failure reports the already completed portion.
+Neither `cache.enabled=false`, `--no-cache`, nor bypass patterns disable learned
+routing. These controls govern cached document/page content, while the learned
+store only records browser-routing experience. Its private native SQLite file
+does not import or rewrite the reference's learned-domain JSON file. See
+[fetching](fetch.md#learned-browser-routing) for identity, expiry and capacity.
 
 ## Verification
 

@@ -197,11 +197,13 @@ MARKITAI_HOME="$PWD/../../.local/test-home" go test -race ./...
 The development module name is `markitai.local/go`; use a local `replace`
 directive while the release repository/module path is being decided. The
 default cgo linker searches `target/release` and embeds its path as an rpath on
-macOS/Linux. Deployment must package `libmarkitai_ffi` and configure the loader
-path for the destination. `CGO_LDFLAGS` can supply additional library paths;
+macOS/Linux. With this default dynamic mode, deployment must package
+`libmarkitai_ffi` and configure the loader path for the destination.
+`CGO_LDFLAGS` can supply additional library paths;
 `DYLD_LIBRARY_PATH` on macOS or `LD_LIBRARY_PATH` on Linux can select a test
-build. A portable static-link recipe and Windows cgo distribution are not yet
-validated. Go consumers need cgo enabled and a C linker at build time.
+build. The optional static package described below is initially limited to
+macOS arm64. Windows cgo distribution and other-platform static delivery remain
+unvalidated. Go consumers need cgo enabled and a C linker at build time.
 
 ```go
 out, err := markitai.Convert("report.md", &markitai.Options{
@@ -216,6 +218,55 @@ Go result optional text/path fields are pointers so null and empty string stay
 distinct. `ConvertJSON` returns a raw envelope for callers that need the
 language-neutral protocol. Go calls can run concurrently. Cancellation is not
 currently propagated into native work.
+
+### Static Go package
+
+The `markitai_static` build tag selects an explicit
+`native/darwin_arm64/libmarkitai_ffi.a` inside the Go module. It cannot silently
+select the adjacent dynamic library. Without that tag, the original development
+linkage remains unchanged. Other operating systems and architectures explicitly
+reject this static mode; adding a target requires its own archive, system-link
+parameters and real consumer validation.
+
+`scripts/package_go_static.py` stages a self-contained module with the Go source,
+tests, C header, native archive, license texts and a hash manifest. It does not
+build Rust or download a toolchain. The coordinator supplies the frozen static
+archive, full Cargo metadata, compiler `native-static-libs` output and a build
+record containing the exact source and input hashes. The script independently
+checks the current clean source revision and all tracked bytes before and after
+execution. It rejects an old output directory.
+
+The staged archive is unpacked into a separate module for the existing Go race
+tests. A separate consumer then builds with the static tag and is copied to a
+new directory for concurrent Unicode conversions and the JSON error contract.
+The driver requires only system dynamic dependencies and no rpath in the final
+consumer. `HOME` is retained; Markitai state, temporary files and Go caches are
+private. No dynamic-library search override is inherited. Fixture paths are
+provided only to the package tests, not the independent consumer.
+
+An unpacked module currently uses the development name `markitai.local/go`:
+
+```go
+require markitai.local/go v0.0.0
+replace markitai.local/go => /absolute/path/to/unpacked/markitai-go
+```
+
+Build the consuming program with `go build -tags markitai_static`. Only the final
+executable needs distribution; a Markitai dynamic library, CLI or Rust toolchain
+is not required at runtime. macOS system libraries/frameworks remain dynamic,
+and optional Chromium/LibreOffice backends still require their separate runtime.
+The initial linkage names Vision, Foundation, ImageIO, CoreGraphics,
+CoreFoundation, Objective-C, iconv and the system C/math libraries. The packaging
+driver verifies these against the actual Rust compiler dependency note.
+
+The package's `licenses.json` records original source paths and byte hashes for
+collected texts, including separate Rust toolchain notices. Its Cargo closure
+conservatively includes build/dev/other-target dependencies; it is not a precise
+list of code reachable in the final binary. Missing texts are reported explicitly
+as `unresolved`, and a successful technical consumer test does not complete the
+redistribution review. This workflow's host results must be recorded separately;
+the earlier dynamic-binding checkpoints do not establish static-link success or
+minimum-macOS compatibility.
 
 The C ABI is version 1:
 

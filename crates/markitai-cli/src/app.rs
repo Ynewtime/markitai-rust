@@ -194,7 +194,7 @@ enum CacheCommand {
         #[arg(long)]
         include_spa_domains: bool,
     },
-    /// Learned browser domains (not yet implemented).
+    /// Inspect or clear learned browser-domain routing.
     SpaDomains {
         #[arg(long)]
         json: bool,
@@ -1489,13 +1489,13 @@ fn cache_command(command: &CacheCommand, cfg: &Value) -> CliResult<i32> {
             let dir = config::state_path(Path::new(
                 cfg["cache"]["global_dir"].as_str().unwrap_or("~/.markitai"),
             ));
-            // Check unsupported stores before changing any cache. A partially
-            // completed clear must not be reported as a complete clear.
-            if *include_spa_domains {
-                return Err(unsupported("Learned browser-domain cache management"));
-            }
             if !yes {
-                print!("Clear LLM + URL fetch caches ({})? [y/N]: ", dir.display());
+                let stores = if *include_spa_domains {
+                    "LLM + URL fetch caches + learned browser domains"
+                } else {
+                    "LLM + URL fetch caches"
+                };
+                print!("Clear {stores} ({})? [y/N]: ", dir.display());
                 io::stdout().flush().map_err(runtime)?;
                 let mut answer = String::new();
                 io::stdin().read_line(&mut answer).map_err(runtime)?;
@@ -1506,20 +1506,69 @@ fn cache_command(command: &CacheCommand, cfg: &Value) -> CliResult<i32> {
             }
             markitai_core::llm_cache::preflight_clear(cfg).map_err(runtime)?;
             markitai_core::fetch_cache::preflight_clear(cfg).map_err(runtime)?;
+            if *include_spa_domains {
+                markitai_core::spa_domains::preflight_clear(cfg).map_err(runtime)?;
+            }
             let llm_count = markitai_core::llm_cache::clear(cfg).map_err(runtime)?;
             let fetch_count = markitai_core::fetch_cache::clear(cfg).map_err(|error| {
                 runtime(format!(
                     "LLM cache cleared ({llm_count} entries); URL fetch cache clear failed: {error}"
                 ))
             })?;
+            let spa_count = if *include_spa_domains {
+                Some(markitai_core::spa_domains::clear(cfg).map_err(|error| {
+                    runtime(format!(
+                        "LLM and URL fetch caches cleared ({} entries); learned browser-domain clear failed: {error}",
+                        llm_count.saturating_add(fetch_count)
+                    ))
+                })?)
+            } else {
+                None
+            };
             println!(
                 "Cleared {} cache entries",
                 llm_count.saturating_add(fetch_count)
             );
+            if let Some(count) = spa_count {
+                println!("Cleared {count} learned SPA domains");
+            }
             Ok(0)
         }
-        CacheCommand::SpaDomains { .. } => {
-            Err(unsupported("Learned browser-domain cache management"))
+        CacheCommand::SpaDomains {
+            json: as_json,
+            clear,
+        } => {
+            if *clear {
+                let count = markitai_core::spa_domains::clear(cfg).map_err(runtime)?;
+                if *as_json {
+                    println!("{}", json!({"cleared":count}));
+                } else {
+                    println!("Cleared {count} learned SPA domains");
+                }
+            } else {
+                let entries = markitai_core::spa_domains::list(cfg).map_err(runtime)?;
+                if *as_json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&entries).map_err(runtime)?
+                    );
+                } else if entries.is_empty() {
+                    println!("No learned SPA domains.");
+                } else {
+                    println!("Domain\tHits\tLearned at\tLast hit\tExpired");
+                    for entry in entries {
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            entry.domain,
+                            entry.hits,
+                            entry.learned_at,
+                            entry.last_hit,
+                            entry.expired
+                        );
+                    }
+                }
+            }
+            Ok(0)
         }
     }
 }

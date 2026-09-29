@@ -301,20 +301,16 @@ fn validators_stats_and_combined_clear_work_across_processes() {
     let abort = invoke(root.path(), &["cache", "clear"]);
     assert!(abort.status.success());
     assert!(String::from_utf8_lossy(&abort.stdout).contains("Aborted"));
-    assert!(
-        !invoke(
-            root.path(),
-            &["cache", "clear", "-y", "--include-spa-domains"]
-        )
-        .status
-        .success()
-    );
     let stats = success(invoke(root.path(), &["cache", "stats", "--json"]));
     assert_eq!(stats["cache"]["count"], 1);
     assert_eq!(stats["fetch_cache"]["count"], 1);
-    let cleared = invoke(root.path(), &["cache", "clear", "-y"]);
+    let cleared = invoke(
+        root.path(),
+        &["cache", "clear", "-y", "--include-spa-domains"],
+    );
     assert!(cleared.status.success());
     assert!(String::from_utf8_lossy(&cleared.stdout).contains("Cleared 2 cache entries"));
+    assert!(String::from_utf8_lossy(&cleared.stdout).contains("Cleared 0 learned SPA domains"));
     let stats = success(invoke(root.path(), &["cache", "stats", "--json"]));
     assert_eq!(stats["cache"]["count"], 0);
     assert_eq!(stats["fetch_cache"]["count"], 0);

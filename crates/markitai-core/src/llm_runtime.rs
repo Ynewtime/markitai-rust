@@ -1,6 +1,9 @@
 //! Shared, blocking request capacity for one caller-controlled conversion run.
 
-use crate::{Error, Result, llm::flight};
+use crate::{
+    Error, Result,
+    llm::{flight, routing},
+};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// Share this runtime between conversions that should obey one LLM request cap.
@@ -16,6 +19,7 @@ pub struct LlmRuntime {
 struct Inner {
     limit: usize,
     flights: Arc<flight::Table>,
+    routing: routing::Table,
     state: Mutex<State>,
     changed: Condvar,
 }
@@ -46,6 +50,7 @@ impl LlmRuntime {
             inner: Arc::new(Inner {
                 limit: concurrency,
                 flights: Arc::new(flight::Table::new()),
+                routing: routing::Table::new(),
                 state: Mutex::new(State::default()),
                 changed: Condvar::new(),
             }),
@@ -54,6 +59,10 @@ impl LlmRuntime {
 
     pub(crate) fn flights(&self) -> &Arc<flight::Table> {
         &self.inner.flights
+    }
+
+    pub(crate) fn routing(&self) -> &routing::Table {
+        &self.inner.routing
     }
 
     pub fn concurrency(&self) -> usize {

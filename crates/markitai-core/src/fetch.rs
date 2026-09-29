@@ -1,4 +1,6 @@
-use crate::{Asset, Document, Error, Result, browser, config, fetch_cache, formats, output};
+use crate::{
+    Asset, Document, Error, Result, browser, config, fetch_cache, formats, output, spa_domains,
+};
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -149,7 +151,8 @@ pub fn fetch(source: &str, cfg: &Value) -> Result<Document> {
     }
 }
 
-/// Explicit strategy provenance affects the cache key, not strategy selection.
+/// Explicit strategy provenance scopes page-cache keys and suppresses learned
+/// routing hints for explicitly selected auto, matching the reference caller.
 pub(crate) fn fetch_with_context(
     source: &str,
     cfg: &Value,
@@ -168,18 +171,54 @@ pub(crate) fn fetch_with_context(
         .unwrap_or("auto");
     let capture = config::enabled(cfg, "/screenshot/enabled")
         || config::enabled(cfg, "/screenshot/screenshot_only");
-    match strategy {
+    let anonymous = !browser::identity_configured(cfg)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && cfg
+            .pointer("/fetch/playwright/session_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("isolated")
+            == "isolated"
+        && !url.query_pairs().any(|(key, _)| {
+            [
+                "token",
+                "secret",
+                "password",
+                "signature",
+                "credential",
+                "api_key",
+            ]
+            .iter()
+            .any(|part| key.to_ascii_lowercase().contains(part))
+        });
+    let learn = strategy == "auto" && anonymous;
+    let mut learning_unavailable = false;
+    if learn && explicit_strategy.is_none() && browser::available() {
+        match spa_domains::take_hint(cfg, &url) {
+            Ok(true) => return fetch_browser(source, cfg, capture, output_available),
+            Ok(false) => {}
+            Err(_) => learning_unavailable = true,
+        }
+    }
+    let mut result = match strategy {
         "playwright" => fetch_browser(source, cfg, capture, output_available),
         // A configured browser identity must not read an anonymous cache entry
         // or send an unauthenticated PDF probe before challenge authentication.
         "auto" if browser::identity_configured(cfg) => {
             fetch_browser(source, cfg, capture, output_available)
         }
-        "auto" if capture => match probe_pdf(source, &url, cfg, explicit_strategy)? {
-            Some(outcome) => Ok(outcome),
-            None => {
+        "auto" if capture => match probe_pdf(source, &url, cfg, explicit_strategy, learn)? {
+            (Some(outcome), _) => Ok(outcome),
+            (None, needs_javascript) => {
                 require_capture_output(cfg, output_available)?;
-                fetch_browser(source, cfg, true, output_available)
+                fetch_browser_and_learn(
+                    source,
+                    &url,
+                    cfg,
+                    true,
+                    output_available,
+                    learn && needs_javascript,
+                )
             }
         },
         "static" if capture => {
@@ -200,7 +239,16 @@ pub(crate) fn fetch_with_context(
         }
         "auto" => match fetch_static(source, &url, cfg, explicit_strategy) {
             Err(error) if browser_quality_failure(&error) && browser::available() => {
-                fetch_browser(source, cfg, false, output_available)
+                let needs_javascript =
+                    matches!(&error, Error::Fetch(reason) if reason == JS_REQUIRED);
+                fetch_browser_and_learn(
+                    source,
+                    &url,
+                    cfg,
+                    false,
+                    output_available,
+                    learn && needs_javascript,
+                )
             }
             result => result,
         },
@@ -272,7 +320,46 @@ pub(crate) fn fetch_with_context(
         _ => Err(Error::Unsupported(format!(
             "Fetch strategy '{strategy}' is not implemented in this development build"
         ))),
+    };
+    if learning_unavailable && let Ok(outcome) = &mut result {
+        add_learning_warning(outcome);
     }
+    result
+}
+
+const LEARNING_WARNING: &str =
+    "Learned browser-domain store is unavailable; routing knowledge could not be used or saved.";
+const JS_REQUIRED: &str =
+    "HTML page requires JavaScript; browser rendering fallback is not implemented";
+
+fn add_learning_warning(outcome: &mut FetchOutcome) {
+    let warnings = outcome.content.warnings_mut();
+    if !warnings.iter().any(|warning| warning == LEARNING_WARNING) {
+        warnings.push(LEARNING_WARNING.into());
+    }
+}
+
+fn fetch_browser_and_learn(
+    source: &str,
+    url: &Url,
+    cfg: &Value,
+    capture: bool,
+    output_available: bool,
+    learn: bool,
+) -> Result<FetchOutcome> {
+    let response = browser::fetch(source, cfg, capture)?;
+    // A challenge or still-unrendered shell is not evidence that this domain
+    // has a usable browser representation. PDFs never teach HTML routing.
+    let admissible = learn
+        && matches!(&response, browser::BrowserResponse::Page(page) if html_rejection(&page.html).is_none());
+    let mut outcome = browser_response_outcome(response, cfg, output_available)?;
+    if admissible
+        && matches!(&outcome.content, FetchContent::Document(document) if !document.markdown.trim().is_empty())
+        && spa_domains::record_success(cfg, url).is_err()
+    {
+        add_learning_warning(&mut outcome);
+    }
+    Ok(outcome)
 }
 
 fn require_capture_output(cfg: &Value, output_available: bool) -> Result<()> {
@@ -656,9 +743,7 @@ fn html_rejection(html: &str) -> Option<&'static str> {
         .iter()
         .any(|phrase| text.starts_with(phrase))
     {
-        return Some(
-            "HTML page requires JavaScript; browser rendering fallback is not implemented",
-        );
+        return Some(JS_REQUIRED);
     }
     None
 }
@@ -781,7 +866,8 @@ fn probe_pdf(
     url: &Url,
     cfg: &Value,
     explicit_strategy: Option<&str>,
-) -> Result<Option<FetchOutcome>> {
+    inspect_learning: bool,
+) -> Result<(Option<FetchOutcome>, bool)> {
     let response = StaticResponse::read(
         client(30)?
             .get(url.clone())
@@ -790,7 +876,11 @@ fn probe_pdf(
             .map_err(|error| Error::Fetch(error.without_url().to_string()))?,
     )?;
     if !response.is_pdf() {
-        return Ok(None);
+        let needs_javascript = inspect_learning
+            && response.kind() == StaticKind::Html
+            && html_rejection(&decode_text(&response.bytes, &response.content_type))
+                == Some(JS_REQUIRED);
+        return Ok((None, needs_javascript));
     }
     let mut content = FetchContent::Pdf(response.into_pdf());
     if let Some(cache) = fetch_cache::Cache::from_config(cfg) {
@@ -799,11 +889,14 @@ fn probe_pdf(
             cache.remove(source, explicit_strategy).is_err(),
         );
     }
-    Ok(Some(FetchOutcome {
-        content,
-        cache_hit: false,
-        screenshots: Vec::new(),
-    }))
+    Ok((
+        Some(FetchOutcome {
+            content,
+            cache_hit: false,
+            screenshots: Vec::new(),
+        }),
+        false,
+    ))
 }
 
 fn decode_static(response: Response, defer_pdf: bool) -> Result<StaticPage> {

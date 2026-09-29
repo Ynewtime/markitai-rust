@@ -12,7 +12,7 @@ and heuristic encoding detection are not implemented. Explicit plain-text and
 Markdown MIME types keep literal HTML examples as text rather than triggering
 HTML challenge detection.
 
-`auto` starts with the static path when screenshots are not requested, with
+For an unknown anonymous authority, `auto` starts with the static path when screenshots are not requested, with
 local browser fallback for recognized JavaScript/challenge or empty-HTML quality
 failures. Capture requests first perform one bounded, unconditional static GET
 to distinguish PDF downloads from browser pages. A PDF is handed directly to
@@ -22,13 +22,58 @@ capture therefore adds a static request. Probe transport, HTTP-status, body-read
 and size-limit failures propagate instead of being hidden by browser fallback.
 The probe does not reuse or admit HTML cache entries, so a fresh cached HTML row
 cannot conceal a URL that now downloads a PDF. The `playwright` strategy uses
-[native Chromium CDP](browser.md) for JavaScript and captures; the complete
-reference fallback policy and SPA-domain learning remain unfinished. `jina` and
+[native Chromium CDP](browser.md) for JavaScript and captures. Learned routing is
+described below; the complete reference fallback policy remains unfinished. `jina` and
 `defuddle` keep explicit remote-consent and target checks and do not use this
 cache. Explicit browser retrieval also hands initial PDF document responses
 to the native reader using bytes streamed from the same CDP session. Remote
 strategies retain their selected extraction service and do not use that handoff. Unsupported strategies fail before cache lookup, so an old page cannot
 make an unsupported strategy appear to work.
+
+## Learned browser routing
+
+An anonymous automatic request can remember that an authority serves a short
+JavaScript shell. Learning requires both that static classification and a
+successful browser response containing useful extracted text. Empty pages,
+challenges, failed navigation, PDF downloads and capture-only empty output do
+not teach a route. Unlike the reference's early recording, native learning waits
+for the browser result so a failed fallback cannot make the routing decision
+persistent.
+
+Later automatic requests to that authority start with the available browser,
+avoiding another static request or anonymous page-cache lookup. Once selected,
+browser HTTP, timeout and resource failures remain errors. If no browser is
+available, ordinary static retrieval remains available. Explicit `static`,
+`playwright` and remote strategies keep their selected behavior. The CLI treats
+`-s auto` as automatic intent, exactly like its default, and both use learned
+hints (reference `cli/main.py` also clears explicit provenance for auto). A
+low-level caller supplying `ConvertContext.explicit_fetch_strategy=Some("auto")`
+can suppress hints while still recording a successful fallback; this matches the
+reference fetch function's separate explicit-intent argument.
+
+Authorities are normalized host plus nondefault port, including IPv6 brackets;
+different ports remain separate. Following the reference, scheme is not part of
+this routing identity. URL paths and queries are not persisted. Configured
+browser credentials, cookies, extra headers and non-isolated session mode bypass
+anonymous learning and decisions. URLs with userinfo or recognizable credential
+query keys also bypass learning; query-key screening is not a universal secret
+detector. No cookies, HTML, Markdown, screenshots or authenticated sessions are
+saved in this store.
+
+The independent `learned_spa_domains.db` uses the configured state root and honors
+`MARKITAI_HOME` for the default path. Document-cache disabling, read bypass and
+patterns do not disable route knowledge. A hit advances its count and last-use
+time; an entry expires only after more than 30 days without a hit. Listing shows
+expired entries until a lookup or successful learning prunes them. Storage is
+limited to 4,096 authorities of at most 1,024 UTF-8 bytes each and a 16 MiB SQLite
+database; this is not a bound on process memory or all temporary filesystem
+overhead. New files are private, and symlink or multiply linked database files
+are rejected. There is no migration from the reference JSON store.
+
+Unavailable storage leaves successful fetching intact with a fixed warning.
+Management failures are explicit and sanitized. [Cache commands](cache.md#learned-domain-management)
+inspect and clear routing knowledge independently. This implementation adds no
+browser session pool or browser-document cache.
 
 ## Downloaded PDF media
 

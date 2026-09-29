@@ -2,6 +2,7 @@
 mod chunks;
 mod document;
 pub(crate) mod flight;
+pub(crate) mod routing;
 mod service_probe;
 mod structured;
 mod vision;
@@ -47,6 +48,7 @@ enum Protocol {
 #[derive(Clone, Debug)]
 struct Deployment {
     id: String,
+    explicit_id: Option<String>,
     group: String,
     model: String,
     provider: String,
@@ -929,6 +931,7 @@ fn deployments(cfg: &Value, env: &HashMap<String, String>) -> Result<Vec<Deploym
             });
         result.push(Deployment {
             id: model.into(),
+            explicit_id: nonempty(entry.pointer("/model_info/id")).map(str::to_owned),
             group: if grouped {
                 entry
                     .get("model_name")
@@ -1157,7 +1160,7 @@ fn run_mode(
         .pointer("/llm/router_settings/routing_strategy")
         .and_then(Value::as_str)
         .unwrap_or("simple-shuffle");
-    if strategy != "simple-shuffle" {
+    if !matches!(strategy, "simple-shuffle" | "least-busy") {
         return Err(Error::Unsupported(format!(
             "LLM routing strategy '{strategy}' requires persistent routing metrics and is not implemented"
         )).into());
@@ -1189,6 +1192,14 @@ fn run_mode(
             local_runtime = LlmRuntime::new(concurrency)?;
             &local_runtime
         }
+    };
+    let routing_keys: Vec<_> = if strategy == "least-busy" {
+        entries
+            .iter()
+            .map(|entry| runtime.routing().key(entry))
+            .collect()
+    } else {
+        Vec::new()
     };
     let client = Client::builder()
         .timeout(Duration::from_secs(timeout))
@@ -1226,16 +1237,12 @@ fn run_mode(
                 .copied()
                 .filter(|index| !failed.contains(index))
                 .collect();
-            let selected = weighted_index(
-                &entries,
-                if remaining.is_empty() {
-                    &candidates
-                } else {
-                    &remaining
-                },
-                random_ticket(),
-            );
-            let result = {
+            let eligible = if remaining.is_empty() {
+                &candidates
+            } else {
+                &remaining
+            };
+            let (selected, result) = {
                 let _permit = runtime.acquire();
                 if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
                     return Err(VisionFailure::blocked(Error::Conversion(
@@ -1248,6 +1255,15 @@ fn run_mode(
                     }
                     return Err(VisionFailure::blocked(error));
                 }
+                // Selection happens after queueing and budget admission. In
+                // least-busy mode reservation and selection share one lock;
+                // queued callers cannot reserve a stale deployment choice.
+                let (selected, _routing) = if strategy == "least-busy" {
+                    let (index, lease) = runtime.routing().reserve(&routing_keys, eligible);
+                    (index, Some(lease))
+                } else {
+                    (weighted_index(&entries, eligible, random_ticket()), None)
+                };
                 attempts = attempts.saturating_add(1);
                 let response =
                     request_with_mode(&client, &entries[selected], prompts, &mut usage, structured);
@@ -1273,7 +1289,7 @@ fn run_mode(
                         stop.store(true, Ordering::Release);
                     }
                 }
-                response
+                (selected, response)
             };
             match result {
                 Ok(text) => return Ok((text, usage)),
@@ -2558,10 +2574,80 @@ mod tests {
             request["messages"][1]["content"][1]["image_url"]["url"],
             "data:image/jpeg;base64,aW1hZ2U="
         );
-        cfg["llm"]["router_settings"]["routing_strategy"] = json!("least-busy");
+        cfg["llm"]["router_settings"]["routing_strategy"] = json!("usage-based-routing");
         assert!(matches!(
             run(&plain(), &cfg, &HashMap::new(), &mut |_| {}),
             Err(Error::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn least_busy_keeps_disabled_vision_and_failed_candidate_filters() {
+        let failed = Mock::new(vec![(503, json!({"error":{"message":"authored failure"}}))]);
+        let good = Mock::new(vec![(200, success("Complete image result"))]);
+        let mut cfg = cfg("openai/routing-test", &failed.base);
+        let first = cfg["llm"]["model_list"][0].clone();
+        let mut disabled = first.clone();
+        disabled["litellm_params"]["weight"] = json!(0);
+        disabled["litellm_params"]["api_base"] = json!("http://127.0.0.1:9");
+        let mut text_only = disabled.clone();
+        text_only["litellm_params"]["weight"] = json!(1);
+        text_only["model_info"] = json!({"supports_vision":false});
+        let mut last = first.clone();
+        last["litellm_params"]["api_base"] = json!(good.base);
+        cfg["llm"]["model_list"] = json!([disabled, text_only, first, last]);
+        cfg["llm"]["router_settings"]["routing_strategy"] = json!("least-busy");
+        cfg["llm"]["router_settings"]["num_retries"] = json!(1);
+        let mut prompts = plain();
+        prompts.image = Some(vec![("image/png".into(), "aW1hZ2U=".into())]);
+        let runtime = LlmRuntime::new(2).unwrap();
+        let (body, usage) =
+            run_with_runtime(&prompts, &cfg, &HashMap::new(), &mut |_| {}, Some(&runtime)).unwrap();
+        assert_eq!(body, "Complete image result");
+        assert_eq!(usage.requests, 1);
+        assert_eq!(failed.finish().len(), 1);
+        assert_eq!(good.finish().len(), 1);
+    }
+
+    #[test]
+    fn least_busy_cancelled_and_exhausted_attempts_do_not_send_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut cfg = cfg(
+            "openai/routing-test",
+            &format!("http://{}", listener.local_addr().unwrap()),
+        );
+        cfg["llm"]["router_settings"]["routing_strategy"] = json!("least-busy");
+        cfg["llm"]["max_requests_per_document"] = json!(1);
+        let runtime = LlmRuntime::new(1).unwrap();
+        let stopped = std::sync::atomic::AtomicBool::new(true);
+        let context = DocumentScope::new(&cfg);
+        let failure = run_controlled(
+            &plain(),
+            &cfg,
+            &HashMap::new(),
+            &mut |_| {},
+            Some(&runtime),
+            Some(&stopped),
+        )
+        .unwrap_err();
+        assert!(failure.error.to_string().contains("stopped"));
+        assert_eq!(context.current.lock().unwrap().attempts, 0);
+        stopped.store(false, Ordering::Release);
+        admit_document_attempt().unwrap();
+        let failure = run_controlled(
+            &plain(),
+            &cfg,
+            &HashMap::new(),
+            &mut |_| {},
+            Some(&runtime),
+            Some(&stopped),
+        )
+        .unwrap_err();
+        assert!(failure.error.to_string().contains("budget exhausted"));
+        assert!(
+            matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock)
+        );
+        assert_eq!(context.usage().requests, 0);
     }
 }

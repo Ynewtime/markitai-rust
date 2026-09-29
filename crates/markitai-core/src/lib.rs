@@ -19,6 +19,7 @@ mod output_profiles;
 mod pdf_media;
 mod pdf_raster;
 pub mod provider_management;
+pub mod spa_domains;
 mod types;
 
 pub use images::is_image_extension;
