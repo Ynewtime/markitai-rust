@@ -1,12 +1,16 @@
 """Offline license-provenance counterexamples; never compile or download."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import tarfile
+import zipfile
 
-from license_overlay import stage_overlay
+from license_overlay import stage_overlay, upstream_files
+from ci_packages import supplement_wheel_licenses, verify_node_licenses
 from package_go_static import bundle_licenses, inventory, package_archive, unpack_verified
 
 VENDOR = Path(__file__).resolve().parents[1] / "licenses/upstream"
@@ -64,13 +68,13 @@ class LicenseOverlayTests(unittest.TestCase):
         self.destination.parent.parent.mkdir(parents=True)
         record = bundle_licenses(metadata, self.destination.parent, self.repository, sysroot)
         self.assertEqual(record["legal_review"], "not_performed")
-        self.assertEqual(record["upstream_overlay"]["complete_text_packages"], 6)
-        self.assertEqual(record["upstream_overlay"]["notice_only_packages"], 9)
+        self.assertEqual(record["upstream_overlay"]["complete_text_packages"], 12)
+        self.assertEqual(record["upstream_overlay"]["notice_only_packages"], 3)
         expected_missing = {p["id"] for p in self.manifest["packages"] if p["content_kind"] == "notice_only"}
         self.assertEqual({p["id"] for p in record["unresolved"]}, expected_missing)
-        self.assertEqual(len(expected_missing), 9)
+        self.assertEqual(len(expected_missing), 3)
         copied = [text for p in record["dependencies"] for text in p["texts"] if text.get("origin") == "verified_upstream_overlay"]
-        self.assertEqual(len(copied), 16)
+        self.assertEqual(len(copied), 22)
         for text in copied:
             raw = (self.destination.parent.parent / text["path"]).read_bytes()
             self.assertEqual(raw, Path(text["source"]).read_bytes())
@@ -169,6 +173,140 @@ class LicenseOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Duplicate"):
             stage_overlay(self.vendor, self.destination, self.packages)
         self.assertFalse(self.destination.exists())
+
+
+    def authority(self):
+        entry = next(p for p in self.manifest["packages"] if p["name"] == "dispatch2")
+        asset = next(a for a in entry["assets"] if a.get("source_kind") == "linked_authority")
+        return entry, asset
+
+    def test_authority_url_and_license_option_are_not_general_allowlists(self):
+        entry, asset = self.authority()
+        for field, value in [("source_url", "https://www.apache.org.example/LICENSE-2.0.txt"),
+                             ("source_url", "https://www.apache.org/licenses/LICENSE-2.0.txt?variant=other"),
+                             ("license_option", "MIT"),
+                             ("source_kind", "external_url"),
+                             ("notice_asset", "overlay/licenses/selectors-0.38.0/NOTICE-MPL-2.0.txt")]:
+            with self.subTest(field=field, value=value):
+                old = asset.get(field)
+                asset[field] = value
+                self.save_manifest()
+                with self.assertRaises(RuntimeError):
+                    stage_overlay(self.vendor, self.destination, self.packages)
+                self.assertFalse(self.destination.exists())
+                asset[field] = old
+        self.save_manifest()
+
+    def test_resealed_authority_substitution_still_fails_reviewed_digest(self):
+        _, asset = self.authority()
+        raw = (self.vendor / asset["source_path"]).read_bytes() + b"\nSubstituted terms\n"
+        for name in [asset["source_path"], asset["path"]]:
+            (self.vendor / name).write_bytes(raw)
+            self.seal(name)
+        asset.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                     source_sha256=hashlib.sha256(raw).hexdigest())
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "reviewed text hash"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_authority_requires_the_link_in_the_verified_version_notice(self):
+        entry, _ = self.authority()
+        notice = entry["assets"][0]
+        raw = (self.vendor / notice["source_path"]).read_bytes().replace(
+            b"[Apache-2.0]: https://www.apache.org/licenses/LICENSE-2.0",
+            b"[Apache-2.0]: https://example.invalid/unreviewed")
+        for name in [notice["source_path"], notice["path"]]:
+            (self.vendor / name).write_bytes(raw)
+            self.seal(name)
+        notice.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                      source_sha256=hashlib.sha256(raw).hexdigest())
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "does not link"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_historical_original_is_packaged_but_cannot_clear_unresolved_review(self):
+        result = stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertEqual(result["record"]["supplemental_review_needed_packages"], 3)
+        for entry in self.manifest["packages"]:
+            if not entry.get("supplemental"):
+                continue
+            record = result["packages"][entry["id"]]
+            self.assertFalse(record["complete_text"])
+            self.assertTrue(record["supplemental_review_needed"])
+            supplemental = next(t for t in record["texts"] if t.get("review_needed"))
+            self.assertIn(b"Copyright (c) Steven Sheldon", Path(supplemental["source"]).read_bytes())
+        shutil.rmtree(self.destination)
+        entry = next(p for p in self.manifest["packages"] if p.get("supplemental"))
+        entry["supplemental"][0]["review_needed"] = False
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "remain review-needed"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_missing_or_resealed_historical_provenance_is_not_accepted(self):
+        entry = next(p for p in self.manifest["packages"] if p.get("supplemental"))
+        proof = entry["supplemental"][0]["proofs"][0]
+        raw = (self.vendor / proof["path"]).read_bytes() + b"changed"
+        (self.vendor / proof["path"]).write_bytes(raw)
+        proof.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+        self.seal(proof["path"])
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "Historical provenance"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_source_archive_matches_exact_package_and_is_not_only_a_link(self):
+        result = stage_overlay(self.vendor, self.destination, self.packages)
+        source = result["record"]["source_archives"][0]
+        archive = self.destination.parent.parent / source["path"]
+        self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), source["sha256"])
+        with tarfile.open(archive) as contents:
+            self.assertEqual(len(contents.getmembers()), 22)
+            original = contents.extractfile("selectors-0.38.0/Cargo.toml.orig").read()
+            self.assertEqual(original, (self.vendor / "local-evidence/selectors-0.38.0/Cargo.toml.orig").read_bytes())
+        shutil.rmtree(self.destination)
+        row = self.manifest["source_archives"][0]
+        raw = (self.vendor / row["path"]).read_bytes() + b"changed"
+        (self.vendor / row["path"]).write_bytes(raw)
+        row.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+        self.seal(row["path"])
+        self.save_manifest()
+        with self.assertRaisesRegex(RuntimeError, "reviewed exact package"):
+            stage_overlay(self.vendor, self.destination, self.packages)
+        self.assertFalse(self.destination.exists())
+
+    def test_wheel_and_npm_payloads_include_verified_offline_source_and_notices(self):
+        files = upstream_files(self.repository)
+        source_name = "licenses/upstream/source-archives/selectors-0.38.0.crate"
+        self.assertEqual(files[source_name], (self.vendor / "source-archives/selectors-0.38.0.crate").read_bytes())
+        source = self.root / "base.whl"
+        wheel = self.root / "final.whl"
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("markitai/__init__.py", "fixture")
+            archive.writestr("markitai-1.dist-info/RECORD", "markitai/__init__.py,,\nmarkitai-1.dist-info/RECORD,,\n")
+        supplement_wheel_licenses(source, wheel, files)
+        with zipfile.ZipFile(wheel) as archive:
+            for name, raw in files.items():
+                self.assertEqual(archive.read("markitai-1.dist-info/licenses/" + name), raw)
+        npm = self.root / "module.tgz"
+        with tarfile.open(npm, "w:gz") as archive:
+            for name, raw in files.items():
+                member = tarfile.TarInfo("package/" + name)
+                member.size = len(raw)
+                archive.addfile(member, io.BytesIO(raw))
+        verify_node_licenses(npm, files)
+        # A distributor cannot silently omit the covered-source copy.
+        with tarfile.open(npm, "w:gz") as archive:
+            for name, raw in files.items():
+                if name == source_name:
+                    continue
+                member = tarfile.TarInfo("package/" + name)
+                member.size = len(raw)
+                archive.addfile(member, io.BytesIO(raw))
+        with self.assertRaises(RuntimeError):
+            verify_node_licenses(npm, files)
 
 
 if __name__ == "__main__":

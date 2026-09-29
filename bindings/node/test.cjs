@@ -156,6 +156,10 @@ test('paid native failures retain separate document accounting including zero to
       assert.ok(error.usage);
       assert.deepEqual([error.usage.requests, error.usage.input_tokens, error.usage.output_tokens], [1, input, output]);
       assert.deepEqual(Object.keys(error.usage.by_model), [name]);
+      const coverage = error.usage.by_model[name];
+      assert.deepEqual([coverage.priced_requests, coverage.unpriced_requests, coverage.cost_status], [0, 1, 'unknown']);
+      assert.equal(coverage.pricing_snapshot, undefined);
+      assert.equal(error.usage.cost_usd, 0);
     }
     assert.equal(entered, 2);
     assert.equal(gateTimedOut, false, 'both document requests reached the server together');

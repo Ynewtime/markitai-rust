@@ -1,4 +1,8 @@
-use crate::{diagnostics::AttemptDiagnostics, report_store};
+use crate::{
+    diagnostics::AttemptDiagnostics,
+    pricing::{self, Pricing},
+    report_store,
+};
 use markitai_core::ConversionUsage;
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, json};
@@ -24,6 +28,7 @@ pub(crate) enum ItemStatus {
     Completed,
     Skipped,
     Failed,
+    Pending,
 }
 
 #[derive(Debug)]
@@ -317,13 +322,17 @@ fn totals(records: &Map<String, Value>) -> Result<(u64, u64, u64), String> {
 
 fn usage_block(records: &Map<String, Value>, cost: f64) -> Result<Ordered, String> {
     let (requests, input, output) = totals(records)?;
-    Ok(object([
+    let mut fields = vec![
         ("models", models(records)),
         ("requests", value(requests)),
         ("input_tokens", value(input)),
         ("output_tokens", value(output)),
         ("cost_usd", value(cost)),
-    ]))
+    ];
+    if let Some(pricing) = Pricing::from_models(records) {
+        fields.push(("pricing", value(json!(pricing))));
+    }
+    Ok(object(fields))
 }
 
 fn aggregate(items: &[&RunItem], mode: RunMode) -> Result<(Map<String, Value>, f64), String> {
@@ -334,32 +343,7 @@ fn aggregate(items: &[&RunItem], mode: RunMode) -> Result<(Map<String, Value>, f
             continue;
         }
         cost += item.usage.cost_usd;
-        for (name, usage) in &item.usage.by_model {
-            let merged = combined.entry(name.clone()).or_insert_with(|| {
-                json!({
-                    "requests": 0, "input_tokens": 0, "output_tokens": 0,
-                    "cost_usd": 0.0, "cached_input_tokens": 0,
-                })
-            });
-            for key in [
-                "requests",
-                "input_tokens",
-                "output_tokens",
-                "cached_input_tokens",
-            ] {
-                merged[key] = json!(
-                    counter(merged, key)
-                        .checked_add(counter(usage, key))
-                        .ok_or("Report usage counter overflow")?
-                );
-            }
-            let model_cost = merged["cost_usd"].as_f64().unwrap_or(0.0)
-                + usage["cost_usd"].as_f64().unwrap_or(0.0);
-            if !model_cost.is_finite() {
-                return Err("Report model cost total is not finite".into());
-            }
-            merged["cost_usd"] = json!(model_cost);
-        }
+        pricing::merge_models(&mut combined, &item.usage.by_model)?;
     }
     if !cost.is_finite() {
         return Err("Report usage total is not finite".into());
@@ -375,6 +359,8 @@ fn completed(item: &RunItem, mode: RunMode) -> bool {
 fn status(item: &RunItem, mode: RunMode) -> &'static str {
     if completed(item, mode) {
         "completed"
+    } else if item.status == ItemStatus::Pending {
+        "pending"
     } else if item.status == ItemStatus::Skipped {
         "skipped"
     } else {
@@ -404,13 +390,16 @@ fn directory_entry(item: &RunItem) -> Ordered {
         ("cost_usd", value(item.usage.cost_usd)),
         ("llm_usage", models(&item.usage.by_model)),
     ]);
+    if let Some(pricing) = Pricing::from_usage(&item.usage) {
+        fields.push(("pricing", value(json!(pricing))));
+    }
     object(fields)
 }
 
 fn single_file_entry(item: &RunItem) -> Result<Ordered, String> {
     let (_, input, output) = totals(&item.usage.by_model)?;
-    Ok(object([
-        ("status", value("completed")),
+    let mut fields = vec![
+        ("status", value(status(item, RunMode::SingleFile))),
         ("output", path_value(item.output.as_deref())),
         ("error", option_string(item.error.as_deref())),
         ("duration", duration(item.elapsed_s)),
@@ -424,12 +413,16 @@ fn single_file_entry(item: &RunItem) -> Result<Ordered, String> {
                 ("output_tokens", value(output)),
             ]),
         ),
-    ]))
+    ];
+    if let Some(pricing) = Pricing::from_usage(&item.usage) {
+        fields.push(("pricing", value(json!(pricing))));
+    }
+    Ok(object(fields))
 }
 
 fn single_url_entry(item: &RunItem) -> Ordered {
-    object([
-        ("status", value("completed")),
+    let mut fields = vec![
+        ("status", value(status(item, RunMode::SingleUrl))),
         (
             "cache_hit",
             value(item.fetch_cache_hit || item.llm_cache_hit),
@@ -451,10 +444,22 @@ fn single_url_entry(item: &RunItem) -> Ordered {
         ("images", value(item.images)),
         ("screenshots", value(item.screenshots)),
         ("llm_usage", models(&item.usage.by_model)),
-    ])
+    ];
+    if let Some(pricing) = Pricing::from_usage(&item.usage) {
+        fields.push(("pricing", value(json!(pricing))));
+    }
+    object(fields)
 }
 
 fn list_entry(item: &RunItem) -> Ordered {
+    if item.status == ItemStatus::Pending {
+        return object([
+            ("status", value("pending")),
+            ("output", path_value(item.output.as_deref())),
+            ("error", option_string(item.error.as_deref())),
+            ("skip_reason", value("pending_batch")),
+        ]);
+    }
     if item.status != ItemStatus::Completed {
         return object([
             ("status", value(status(item, RunMode::UrlList))),
@@ -581,15 +586,22 @@ fn summary(mode: RunMode, items: &[&RunItem], finished: &RunFinished) -> Ordered
     };
     let files = count(ItemKind::File, |_| true);
     let file_failed = count(ItemKind::File, |item| item.status == ItemStatus::Failed);
+    let file_pending = count(ItemKind::File, |item| item.status == ItemStatus::Pending);
+    let url_pending = count(ItemKind::Url, |item| item.status == ItemStatus::Pending);
     let urls = count(ItemKind::Url, |_| true);
     let url_failed = count(ItemKind::Url, |item| item.status == ItemStatus::Failed);
     let mut fields = vec![
         ("total_documents", value(files)),
-        ("completed_documents", value(files - file_failed)),
+        (
+            "completed_documents",
+            value(files - file_failed - file_pending),
+        ),
         ("failed_documents", value(file_failed)),
     ];
     if mode == RunMode::Directory {
-        fields.push(("pending_documents", value(file_failed)));
+        fields.push(("pending_documents", value(file_failed + file_pending)));
+    } else if file_pending > 0 {
+        fields.push(("pending_documents", value(file_pending)));
     }
     if mode != RunMode::SingleFile {
         fields.extend([
@@ -608,7 +620,7 @@ fn summary(mode: RunMode, items: &[&RunItem], finished: &RunFinished) -> Ordered
     }
     if mode == RunMode::Directory {
         fields.extend([
-            ("pending_urls", value(url_failed)),
+            ("pending_urls", value(url_failed + url_pending)),
             (
                 "url_cache_hits",
                 value(
@@ -634,6 +646,9 @@ fn summary(mode: RunMode, items: &[&RunItem], finished: &RunFinished) -> Ordered
                 ),
             ),
         ]);
+    }
+    if mode != RunMode::Directory && url_pending > 0 {
+        fields.push(("pending_urls", value(url_pending)));
     }
     let elapsed = if matches!(mode, RunMode::SingleFile | RunMode::SingleUrl) {
         items[0].elapsed_s
@@ -689,9 +704,10 @@ pub(crate) fn render(
     }
     let mode = plan.run.mode;
     if matches!(mode, RunMode::SingleFile | RunMode::SingleUrl)
-        && (items.len() != 1 || items[0].status != ItemStatus::Completed)
+        && (items.len() != 1
+            || !matches!(items[0].status, ItemStatus::Completed | ItemStatus::Pending))
     {
-        return Err("A single-item report requires one completed item".into());
+        return Err("A single-item report requires one completed or provider-pending item".into());
     }
     let mut keys = BTreeSet::new();
     for item in items {
@@ -1024,6 +1040,9 @@ fn resumed_entry(view: &ResumedView<'_>, mode: RunMode) -> Result<Ordered, Strin
         ("cost_usd", value(cost)),
         ("llm_usage", usage.map(models).unwrap_or_else(|| object([]))),
     ]);
+    if let Some(pricing) = usage.and_then(Pricing::from_models) {
+        fields.push(("pricing", value(json!(pricing))));
+    }
     Ok(object(fields))
 }
 
@@ -1045,31 +1064,8 @@ fn resumed_usage(views: &[ResumedView<'_>], mode: RunMode) -> Result<Ordered, St
         };
         let (records, saved_cost) = saved_usage(entry)?;
         cost += saved_cost;
-        for (name, usage) in records.into_iter().flatten() {
-            let merged = combined.entry(name.clone()).or_insert_with(|| {
-                json!({
-                    "requests": 0, "input_tokens": 0, "output_tokens": 0,
-                    "cost_usd": 0.0, "cached_input_tokens": 0,
-                })
-            });
-            for key in [
-                "requests",
-                "input_tokens",
-                "output_tokens",
-                "cached_input_tokens",
-            ] {
-                merged[key] = json!(
-                    counter(merged, key)
-                        .checked_add(counter(usage, key))
-                        .ok_or("Report usage counter overflow")?
-                );
-            }
-            let model_cost = merged["cost_usd"].as_f64().unwrap_or(0.0)
-                + usage["cost_usd"].as_f64().unwrap_or(0.0);
-            if !model_cost.is_finite() {
-                return Err("Report model cost total is not finite".into());
-            }
-            merged["cost_usd"] = json!(model_cost);
+        if let Some(records) = records {
+            pricing::merge_models(&mut combined, records)?;
         }
     }
     if !cost.is_finite() {
@@ -1147,6 +1143,12 @@ fn resumed_summary(
                 ),
             ),
         ]);
+    }
+    if mode == RunMode::UrlList {
+        let pending = count(ItemKind::Url, Some("pending"));
+        if pending > 0 {
+            fields.push(("pending_urls", value(pending)));
+        }
     }
     fields.push(("duration", duration(finished.duration_s)));
     if mode == RunMode::Directory {
@@ -1613,8 +1615,9 @@ mod tests {
         assert_eq!(
             body["llm_usage"],
             json!({
-                "models":{"m":{"requests":3,"input_tokens":12,"output_tokens":7,"cached_input_tokens":3,"cost_usd":3.5}},
+                "models":{"m":{"requests":3,"input_tokens":12,"output_tokens":7,"cached_input_tokens":3,"cost_usd":3.5,"priced_requests":0,"unpriced_requests":3,"cost_status":"unknown"}},
                 "requests":3,"input_tokens":12,"output_tokens":7,"cost_usd":0.123456789,
+                "pricing":{"priced_requests":0,"unpriced_requests":3,"cost_status":"unknown","pricing_snapshots":[]},
             })
         );
     }
@@ -1831,5 +1834,105 @@ mod tests {
                 render_resumed(&plan, &items, &state, &keys, &finish()).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn provider_pending_reports_preserve_base_without_counting_remote_completion() {
+        let root = tempfile::tempdir().unwrap();
+        for (mode, kind, key) in [
+            (RunMode::SingleFile, ItemKind::File, "notes.txt"),
+            (
+                RunMode::SingleUrl,
+                ItemKind::Url,
+                "https://example.test/notes",
+            ),
+            (RunMode::Directory, ItemKind::File, "notes.txt"),
+            (
+                RunMode::UrlList,
+                ItemKind::Url,
+                "https://example.test/notes",
+            ),
+        ] {
+            let plan = plan(
+                run(root.path(), mode, json!({})),
+                Some(true),
+                "rename",
+                false,
+            )
+            .unwrap()
+            .unwrap();
+            let mut row = item(0, kind, key);
+            row.status = ItemStatus::Pending;
+            row.output = Some(root.path().join("base.md"));
+            let (_, body) = decode(&plan, &[row]);
+            let (total, completed, failed, pending) = if kind == ItemKind::File {
+                (
+                    "total_documents",
+                    "completed_documents",
+                    "failed_documents",
+                    "pending_documents",
+                )
+            } else {
+                (
+                    "total_urls",
+                    "completed_urls",
+                    "failed_urls",
+                    "pending_urls",
+                )
+            };
+            assert_eq!(body["summary"][total], 1);
+            assert_eq!(body["summary"][completed], 0);
+            assert_eq!(body["summary"][failed], 0);
+            assert_eq!(body["summary"][pending], 1);
+            let entry = if kind == ItemKind::File {
+                &body["documents"][key]
+            } else {
+                &body["url_sources"][if mode == RunMode::SingleUrl {
+                    "cli"
+                } else {
+                    "unknown.urls"
+                }]["urls"][key]
+            };
+            assert_eq!(entry["status"], "pending");
+            assert_eq!(
+                entry["output"],
+                root.path().join("base.md").to_string_lossy().as_ref()
+            );
+            assert!(body["llm_usage"].get("pricing").is_none());
+        }
+    }
+
+    #[test]
+    fn resumed_report_combines_known_and_legacy_requests_without_repricing_history() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = resumed_plan(root.path(), RunMode::Directory);
+        let mut state = crate::run_state::Snapshot::default();
+        state.documents.insert("legacy.txt".into(), recovered(crate::run_state::Status::Completed,
+            json!({"cost_usd":0.25,"llm_usage":{"same":{"requests":1,"input_tokens":7,"output_tokens":3,"cost_usd":0.25}}})));
+        let mut current = item(0, ItemKind::File, "current.txt");
+        current.usage.cost_usd = 0.5;
+        current.usage.by_model = json!({"same":{"requests":2,"input_tokens":8,"output_tokens":4,"cost_usd":0.5,"priced_requests":2,"unpriced_requests":0,"cost_status":"complete","pricing_snapshot":"catalog-v1"}}).as_object().unwrap().clone();
+        let body: Value = serde_json::from_slice(
+            &render_resumed(&plan, &[current], &state, &[], &finish()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["llm_usage"]["cost_usd"], 0.75);
+        assert_eq!(
+            body["llm_usage"]["pricing"],
+            json!({"priced_requests":2,"unpriced_requests":1,"cost_status":"partial","pricing_snapshots":["catalog-v1"]})
+        );
+        assert_eq!(
+            body["documents"]["legacy.txt"]["pricing"]["cost_status"],
+            "unknown"
+        );
+        assert_eq!(
+            body["documents"]["current.txt"]["pricing"]["cost_status"],
+            "complete"
+        );
+        assert!(
+            body["documents"]["legacy.txt"]["llm_usage"]["same"]
+                .get("pricing_snapshot")
+                .is_none()
+        );
     }
 }

@@ -4,6 +4,11 @@
 
 ### Added
 
+- Reviewed offline model pricing, explicit unknown-price coverage, fixed-point per-document continuation budgets and retained pricing attribution in CLI and binding packages.
+- OpenAI text Batch submission and collection with private durable request/result evidence, preserved observed usage and receipt-checked publication after restarts.
+- Origin-scoped browser Digest authentication, including session algorithms, stale nonces and authenticated PDF downloads.
+- Exact-version license authority links and an offline selectors source archive in every certified package; three recovered historical MIT notices retain separate review markers.
+
 - Caller-owned bounded browser reuse with isolated contexts or origin/identity-scoped domain sessions, shared within CLI runs, active REST jobs and MCP connections.
 - Shared-runtime usage and latency model routing based on provider observations, separate from paid usage accounting.
 - Exact-byte private backups before valid legacy recovery-state adoption, plus current CLI help and removed-option migration hints.

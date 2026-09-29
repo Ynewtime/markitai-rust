@@ -20,6 +20,9 @@ import tarfile
 import tempfile
 import zipfile
 
+from pricing_attribution import pricing_files
+from license_overlay import upstream_files
+
 
 def identity(path):
     digest = hashlib.sha256()
@@ -194,6 +197,8 @@ def main():
             raise RuntimeError("Package validation requires a clean source checkout")
         record["source_before"] = snapshot()
         licenses = {name: (root / name).read_bytes() for name in ["LICENSE", "NOTICE"]}
+        licenses.update(pricing_files(root))
+        licenses.update(upstream_files(root))
         compiler = run("compiler", ["rustc", "-vV"])
         record["compiler"] = compiler
         host = next(line.split(": ", 1)[1] for line in compiler.splitlines()
@@ -212,8 +217,8 @@ def main():
         with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as bundle:
             for name in ["markitai", "mkai"]:
                 bundle.write(release / (name + extension), name + extension)
-            for name in ["LICENSE", "NOTICE"]:
-                bundle.write(root / name, name)
+            for name, content in licenses.items():
+                bundle.writestr(name, content)
             for name in ["marked-LICENSE", "DOMPurify-LICENSE", "provenance.json"]:
                 relative = "vendor/web/" + name
                 bundle.write(root / relative, relative)
@@ -224,6 +229,9 @@ def main():
             if os.name != "nt":
                 for name in ["markitai", "mkai"]:
                     (extracted / name).chmod(0o755)
+        for name, content in licenses.items():
+            if (extracted / name).read_bytes() != content:
+                raise RuntimeError(f"Archived CLI {name} differs from pricing/project attribution")
         source = work / "source.md"
         source.write_text("# Native package\n\nHello 世界.\n", encoding="utf-8")
         text = run("archived-cli", [extracted / ("markitai" + extension), source, "--pure"], cwd=work)
@@ -243,21 +251,25 @@ def main():
         shutil.copy2(root / "bindings/c/markitai.h", native / "markitai.h")
         artifact(ffi)
         artifact(native / "markitai.h")
-        for name in licenses:
-            shutil.copy2(root / name, native / name)
-            artifact(native / name)
+        for name, content in licenses.items():
+            target = native / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            artifact(target)
 
         node_source = work / "node-package"
         node_source.mkdir()
         for name in ["index.cjs", "index.d.ts", "package.json"]:
             shutil.copy2(root / "bindings/node" / name, node_source / name)
-        for name in ["LICENSE", "NOTICE"]:
-            shutil.copy2(root / name, node_source / name)
+        for name, content in licenses.items():
+            target = node_source / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
         package_json = node_source / "package.json"
         package = json.loads(package_json.read_text(encoding="utf-8"))
         package["files"] = list(dict.fromkeys([*package.get("files", []), *licenses]))
         package_json.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
-        record["node_staging"] = {"operation": "include_LICENSE_and_NOTICE_in_files", "package_json": identity(package_json)}
+        record["node_staging"] = {"operation": "include_project_and_pricing_attribution_in_files", "package_json": identity(package_json)}
         shutil.copy2(release / libraries[1], node_source / "markitai.node")
         npm = shutil.which("npm")
         if not npm:
@@ -312,7 +324,8 @@ files = {}
 for item in distribution.files:
     if '.dist-info/licenses/' in str(item):
         path = pathlib.Path(distribution.locate_file(item))
-        files[path.name] = {'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+        key = str(item).split('.dist-info/licenses/', 1)[1]
+        files[key] = {'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 native = pathlib.Path(_native.__file__)
 print(json.dumps({'module': markitai.__file__, 'prefix': sys.prefix, 'licenses': files,
     'native': {'file': native.name, 'bytes': native.stat().st_size, 'sha256': hashlib.sha256(native.read_bytes()).hexdigest()}}))

@@ -35,10 +35,32 @@ impl Table {
                 )
             });
         };
-        Ok(
-            json!({"job_id":id,"status":job.status,"total":job.slots.len(),"done":job.done,
-            "failed":job.failed,"output_dir":job.directory,"results":job.slots.iter().flatten().collect::<Vec<_>>()}),
-        )
+        let mut value = json!({"job_id":id,"status":job.status,"total":job.slots.len(),"done":job.done,
+            "failed":job.failed,"output_dir":job.directory,"results":job.slots.iter().flatten().collect::<Vec<_>>()});
+        let summaries: Vec<crate::pricing::Pricing> = job
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(|item| item.get("pricing"))
+            .filter_map(|pricing| serde_json::from_value(pricing.clone()).ok())
+            .collect();
+        if let Some(pricing) = crate::pricing::Pricing::aggregate(summaries.iter()) {
+            value["pricing"] = json!(pricing);
+            let cost: f64 = job
+                .slots
+                .iter()
+                .flatten()
+                .filter_map(|item| {
+                    item.get("cost_usd")
+                        .or_else(|| item.pointer("/diagnostics/last_attempt/usage/cost_usd"))
+                        .and_then(Value::as_f64)
+                })
+                .sum();
+            if cost.is_finite() {
+                value["cost_usd"] = json!(cost);
+            }
+        }
+        Ok(value)
     }
 
     fn finish(&mut self, id: &str, cancelled: bool) {
@@ -135,6 +157,9 @@ pub(super) fn start(
             let (value, failed) = match result {
                 Ok(mut result) => {
                     let mut value = json!({"source":source,"status":"ok","markdown_file":result["markdown_file"],"cost_usd":result["cost_usd"],"warnings":result["warnings"]});
+                    if let Some(pricing) = result.as_object_mut().unwrap().remove("pricing") {
+                        value["pricing"] = pricing;
+                    }
                     if let Some(diagnostics) = result.as_object_mut().unwrap().remove("diagnostics") {
                         value["diagnostics"] = diagnostics;
                     }
@@ -143,6 +168,9 @@ pub(super) fn start(
                 Err(error) => {
                     let mut value = json!({"source":source,"status":"error","error":error.message});
                     if let Some(diagnostics) = error.diagnostics {
+                        if let Some(pricing) = crate::pricing::Pricing::from_usage(&diagnostics.last_attempt.usage) {
+                            value["pricing"] = json!(pricing);
+                        }
                         value["diagnostics"] = json!(diagnostics);
                     }
                     (value, true)
@@ -162,6 +190,21 @@ pub(super) fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_pricing_combines_success_and_failure_observations_once() {
+        let mut table = Table::default();
+        table.jobs.insert("priced".into(), Job { directory:PathBuf::from("/isolated"), status:"completed", done:2, failed:1, slots:vec![
+            Some(json!({"source":"a","status":"ok","cost_usd":0.5,"pricing":{"priced_requests":1,"unpriced_requests":0,"cost_status":"complete","pricing_snapshots":["catalog-v1"]},"diagnostics":{"last_attempt":{"usage":{"cost_usd":0.5}}}})),
+            Some(json!({"source":"b","status":"error","pricing":{"priced_requests":0,"unpriced_requests":1,"cost_status":"unknown","pricing_snapshots":[]},"diagnostics":{"last_attempt":{"usage":{"cost_usd":0.0}}}})),
+        ] });
+        let value = table.snapshot("priced").unwrap();
+        assert_eq!(value["cost_usd"], 0.5);
+        assert_eq!(
+            value["pricing"],
+            json!({"priced_requests":1,"unpriced_requests":1,"cost_status":"partial","pricing_snapshots":["catalog-v1"]})
+        );
+        assert_eq!(value["results"].as_array().unwrap().len(), 2);
+    }
     #[test]
     fn retention_preserves_running_jobs_and_distinguishes_expired_ids() {
         let mut table = Table::default();

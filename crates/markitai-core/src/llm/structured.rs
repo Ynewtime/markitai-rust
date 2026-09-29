@@ -2,7 +2,8 @@
 use super::*;
 use std::sync::atomic::AtomicBool;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum Mode {
     Tools,
     JsonSchema,
@@ -47,7 +48,7 @@ impl Schema {
 // Exact identities verified against official provider contracts on 2026-09-29.
 // Sources and exclusions are recorded in the structured-transport planning doc.
 // An OpenAI-compatible endpoint or a vision flag alone establishes neither bit.
-fn capabilities(entry: &Deployment) -> (bool, bool) {
+pub(super) fn capabilities(entry: &Deployment) -> (bool, bool) {
     match (
         entry.provider.as_str(),
         entry.model.as_str(),
@@ -396,7 +397,7 @@ fn json_text(text: &str) -> &str {
         .map(str::trim)
         .unwrap_or(text)
 }
-fn parse(text: &str) -> Result<Value> {
+pub(super) fn parse(text: &str) -> Result<Value> {
     serde_json::from_str(json_text(text))
         .map_err(|_| Error::Conversion("LLM response is not valid structured JSON".into()))
 }

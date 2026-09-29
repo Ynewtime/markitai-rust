@@ -1,0 +1,35 @@
+[
+  {
+    "requested_url": "https://www.mozilla.org/en-US/MPL/2.0/",
+    "started_at": "2026-09-29T08:50:42.220580+00:00",
+    "status": null,
+    "error": "URLError: <urlopen error EOF occurred in violation of protocol (_ssl.c:1129)>",
+    "finished_at": "2026-09-29T08:50:45.236392+00:00"
+  },
+  {
+    "requested_url": "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch",
+    "started_at": "2026-09-29T08:50:42.222748+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch",
+    "content_type": "text/plain; charset=utf-8",
+    "etag": "W/\"b4ecc7d6db95a78e1cf777636049b4a9\"",
+    "last_modified": null,
+    "path": "primary/objc2-license-clarification.patch",
+    "bytes": 11656,
+    "sha256": "b4ecc7d6db95a78e1cf777636049b4a9156783f326edf016a1461b24c84d1872",
+    "finished_at": "2026-09-29T08:50:43.123188+00:00"
+  },
+  {
+    "requested_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch",
+    "started_at": "2026-09-29T08:50:42.224722+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch",
+    "content_type": "text/plain; charset=utf-8",
+    "etag": "W/\"13127f39976ceecdadb86870d2448867\"",
+    "last_modified": null,
+    "path": "primary/objc2-original-license-commit.patch",
+    "bytes": 1543,
+    "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb",
+    "finished_at": "2026-09-29T08:50:43.006965+00:00"
+  }
+]

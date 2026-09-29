@@ -22,6 +22,7 @@ import sys
 import tarfile
 
 from license_overlay import stage_overlay
+from pricing_attribution import stage_pricing_files
 
 HOST = "aarch64-apple-darwin"
 MAX_NOTICE = 16 * 1024 * 1024
@@ -395,7 +396,10 @@ def main(argv=None):
         copy_verified(inputs["archive"], module / "native/darwin_arm64/libmarkitai_ffi.a")
         for name in ["LICENSE", "NOTICE"]:
             copy_verified(root / name, module / name)
+        pricing_record = stage_pricing_files(root, module)
+        record["pricing_attribution"] = pricing_record
         license_record = bundle_licenses(json.loads(inputs["metadata"].read_text()), module / "licenses", root, sysroot)
+        license_record["pricing_attribution"] = pricing_record
         json_file(module / "licenses.json", license_record)
         record["unresolved_licenses"] = license_record["unresolved"]
         record["license_overlay"] = license_record["upstream_overlay"]

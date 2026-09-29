@@ -92,6 +92,14 @@ impl Claim {
     pub(crate) fn keys(&self) -> Vec<(u64, u64)> {
         self.leases.keys()
     }
+    pub(crate) fn evidence_digest(&self) -> Result<String> {
+        receipts::evidence_digest(
+            &self.leases,
+            self.owner.as_ref().ok_or_else(|| {
+                Error::Invalid("publication evidence requires a native owner".into())
+            })?,
+        )
+    }
 }
 
 impl markitai_core::output::Publication for Claim {

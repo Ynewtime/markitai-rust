@@ -504,6 +504,25 @@ fn read_job(path: &Path) -> Value {
                     || !usage["by_model"].as_object().unwrap().is_empty()
             );
         }
+        if let Some(pricing) = item.get("pricing") {
+            item_keys.push("pricing");
+            keys(
+                pricing,
+                &[
+                    "priced_requests",
+                    "unpriced_requests",
+                    "cost_status",
+                    "pricing_snapshots",
+                ],
+            );
+            assert_eq!(pricing["cost_status"], "unknown");
+            assert_eq!(pricing["priced_requests"], 0);
+            assert_eq!(
+                pricing["unpriced_requests"],
+                item["diagnostics"]["last_attempt"]["usage"]["requests"]
+            );
+            assert_eq!(pricing["pricing_snapshots"], json!([]));
+        }
         keys(item, &item_keys);
         assert_eq!(item["item_id"], format!("i{}", index + 1));
         assert!(item["name"].is_string());

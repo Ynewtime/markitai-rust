@@ -3,6 +3,8 @@ mod auth;
 #[cfg(test)]
 mod auth_tests;
 mod cdp;
+#[cfg(test)]
+mod digest_tests;
 mod download;
 #[cfg(test)]
 mod download_tests;

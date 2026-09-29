@@ -238,7 +238,7 @@ pub(crate) fn process_document_with_runtime(
     Ok(result)
 }
 
-fn document_prompts(
+pub(super) fn document_prompts(
     content: &str,
     source: &str,
     metadata_only: bool,
@@ -318,7 +318,7 @@ fn run_chunk(
     .map_err(|failure| failure.error)
 }
 
-fn validate_answer(
+pub(super) fn validate_answer(
     protected: &chunks::Protected,
     original: &str,
     answer: &str,

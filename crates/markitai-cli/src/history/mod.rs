@@ -301,6 +301,8 @@ struct Item<'a> {
     duration_ms: Option<u64>,
     finished_at: &'a str,
     cost_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pricing: Option<crate::pricing::Pricing>,
     llm_enhanced: bool,
     operation: &'static str,
     skipped: bool,
@@ -319,7 +321,8 @@ impl<'a> Item<'a> {
         finished_at: &'a str,
         mode: RunMode,
     ) -> Self {
-        let skipped = item.status == ItemStatus::Skipped || item.skip_reason.is_some();
+        let pending = item.status == ItemStatus::Pending;
+        let skipped = pending || item.status == ItemStatus::Skipped || item.skip_reason.is_some();
         let mut seen = HashSet::new();
         let duration = if item.status == ItemStatus::Completed && mode != RunMode::UrlList {
             item.conversion_duration_s
@@ -343,9 +346,15 @@ impl<'a> Item<'a> {
             } else {
                 "done"
             },
-            error: (item.status == ItemStatus::Failed)
-                .then_some(item.error.as_deref())
-                .flatten(),
+            error: if pending {
+                Some(
+                    "Provider batch enhancement is pending. This archive contains the base Markdown; use the printed --llm-batch-collect command before requesting enhancement again.",
+                )
+            } else {
+                (item.status == ItemStatus::Failed)
+                    .then_some(item.error.as_deref())
+                    .flatten()
+            },
             output_name: output.as_ref().map(|name| {
                 name.strip_suffix(".llm.md")
                     .map_or_else(|| name.clone(), |stem| format!("{stem}.md"))
@@ -360,10 +369,15 @@ impl<'a> Item<'a> {
                 .map(|seconds| (seconds * 1000.0).round_ties_even().max(0.0) as u64),
             finished_at,
             cost_usd: item.usage.cost_usd,
+            pricing: crate::pricing::Pricing::from_usage(&item.usage),
             operation: "convert",
             diagnostics: item.diagnostics.as_ref(),
             skipped,
-            skip_reason: item.skip_reason.as_deref(),
+            skip_reason: if pending {
+                Some("pending_batch")
+            } else {
+                item.skip_reason.as_deref()
+            },
             retryable: item.kind == ItemKind::Url,
             warnings: item
                 .warnings
@@ -1022,5 +1036,55 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), b"percent filename");
         assert_eq!(value["images"][0]["text"], "keep text");
         assert!(!job.join("out/assets/.images.lock").exists());
+    }
+
+    #[test]
+    fn provider_pending_archive_keeps_base_and_explains_the_collect_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("output/notes.md");
+        put(&source, b"Original base pending cloud enhancement.\n");
+        let mut pending = record(0, "notes.txt", Some(source.clone()));
+        pending.status = ItemStatus::Pending;
+        let job = plan(tmp.path(), RunMode::SingleFile)
+            .publish(&[pending])
+            .unwrap()
+            .unwrap();
+        let value = metadata(&job);
+        let entry = &value["items"][0];
+        assert_eq!(entry["status"], "done");
+        assert_eq!(entry["skipped"], true);
+        assert_eq!(entry["skip_reason"], "pending_batch");
+        assert_eq!(entry["llm_enhanced"], false);
+        assert!(
+            entry["error"]
+                .as_str()
+                .unwrap()
+                .contains("--llm-batch-collect")
+        );
+        assert_eq!(
+            fs::read(job.join("out").join(entry["output"].as_str().unwrap())).unwrap(),
+            fs::read(source).unwrap()
+        );
+        assert!(entry.get("pricing").is_none());
+    }
+
+    #[test]
+    fn history_retains_pricing_coverage_and_preserves_legacy_unknown() {
+        let mut current = record(0, "notes.txt", None);
+        current.usage.cost_usd = 0.5;
+        current.usage.by_model = json!({"known":{"requests":1,"cost_usd":0.5,"priced_requests":1,"unpriced_requests":0,"cost_status":"complete","pricing_snapshot":"catalog-v1"},"old":{"requests":1,"cost_usd":0.0}}).as_object().unwrap().clone();
+        let entry = serde_json::to_value(Item::from_record(
+            0,
+            &current,
+            Some("base.md".into()),
+            "finished",
+            RunMode::SingleFile,
+        ))
+        .unwrap();
+        assert_eq!(entry["cost_usd"], 0.5);
+        assert_eq!(
+            entry["pricing"],
+            json!({"priced_requests":1,"unpriced_requests":1,"cost_status":"partial","pricing_snapshots":["catalog-v1"]})
+        );
     }
 }

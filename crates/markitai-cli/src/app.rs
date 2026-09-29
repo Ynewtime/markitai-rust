@@ -17,6 +17,8 @@ mod batch_run;
 #[cfg(all(test, unix))]
 #[path = "batch_run_portable.rs"]
 mod batch_run_portable_tests;
+#[path = "provider_batch/mod.rs"]
+mod provider_batch;
 use crate::report::{
     self, ItemKind, ItemStatus, ReportOptions, RunFinished, RunInfo, RunItem, RunMode,
 };
@@ -134,13 +136,13 @@ struct Cli {
     /// Directory scan depth; 0 scans only the input directory.
     max_depth: Option<usize>,
     #[arg(long)]
-    /// Provider Batch API (not implemented in this Rust development build).
+    /// Submit directory text enhancement to the OpenAI Batch API; retains resumable collection evidence.
     llm_batch: bool,
     #[arg(long, value_parser=clap::value_parser!(u64).range(60..))]
-    /// Provider Batch API timeout (not implemented in this Rust development build).
+    /// Maximum local wait for a provider batch (seconds, at least 60); expiry does not cancel it.
     llm_batch_timeout: Option<u64>,
     #[arg(long)]
-    /// Provider Batch API collection (not implemented in this Rust development build).
+    /// Collect a saved provider batch into its original -o directory; no input is required.
     llm_batch_collect: Option<String>,
     #[arg(short='s', long, value_parser=["auto","static","playwright","defuddle","jina","cloudflare"])]
     /// URL strategy: auto/static/playwright are local; remote strategies remain explicitly unsupported.
@@ -329,10 +331,16 @@ fn tri(yes: bool, no: bool) -> Option<bool> {
 }
 
 fn execute(cli: &Cli) -> CliResult<i32> {
-    if cli.command.is_some() && (cli.input.is_some() || cli.interactive) {
+    if cli.command.is_some()
+        && (cli.input.is_some()
+            || cli.interactive
+            || cli.llm_batch
+            || cli.llm_batch_collect.is_some()
+            || cli.llm_batch_timeout.is_some())
+    {
         return Err((
             2,
-            "Cannot mix INPUT or --interactive with a subcommand".into(),
+            "Cannot mix INPUT, --interactive or Provider Batch options with a subcommand".into(),
         ));
     }
     let permits_missing = matches!(
@@ -365,13 +373,19 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     if cli.interactive && cli.json {
         return Err((2, "--interactive and --json cannot be used together".into()));
     }
+    if let Some(id) = &cli.llm_batch_collect {
+        if cli.input.is_some() || cli.interactive || cli.llm_batch || cli.resume || cli.dry_run {
+            return Err((2, "Batch collection cannot be mixed with input, submission, resume, preview or interactive mode".into()));
+        }
+        return provider_batch::collect(cli, id, conversion_config(cli, overrides)?);
+    }
+    if cli.llm_batch_timeout.is_some() && !cli.llm_batch {
+        return Err((2, "--llm-batch-timeout requires --llm-batch".into()));
+    }
     if cli.input.is_none() && !cli.interactive {
         Cli::command().print_help().map_err(runtime)?;
         println!();
         return Ok(0);
-    }
-    if cli.llm_batch || cli.llm_batch_timeout.is_some() || cli.llm_batch_collect.is_some() {
-        return Err(unsupported("LLM Batch API"));
     }
     let cfg = conversion_config(cli, overrides)?;
     if cli.interactive {
@@ -524,6 +538,9 @@ fn execute_conversion(
     let directory = !is_url(input)
         && input_path.is_dir()
         && !markitai_core::formats::is_numbers_package_path(input_path);
+    if cli.llm_batch && !directory {
+        return Err((2, "--llm-batch requires a directory input".into()));
+    }
     let batch = !is_url(input)
         && (directory
             || input_path
@@ -632,6 +649,12 @@ fn execute_conversion(
             emit_json(&[], None);
         }
         return Ok(0);
+    }
+    if cli.llm_batch {
+        return provider_batch::submit(cli, input, cfg, tasks, output.as_deref().unwrap());
+    }
+    if batch && cli.resume {
+        provider_batch::reject_pending(input_path, output.as_deref().unwrap(), &cfg)?;
     }
     let run_clock = Instant::now();
     let started_at = timestamp();
@@ -1073,6 +1096,7 @@ fn outcome(item: &RunItem) -> Value {
             ItemStatus::Completed => "completed",
             ItemStatus::Skipped => "skipped",
             ItemStatus::Failed => "failed",
+            ItemStatus::Pending => "pending",
         },
         "output": item.output,
         "error": item.error,
@@ -1091,6 +1115,9 @@ fn outcome(item: &RunItem) -> Value {
     });
     if let Some(diagnostics) = &item.diagnostics {
         result["diagnostics"] = json!(diagnostics);
+    }
+    if let Some(pricing) = crate::pricing::Pricing::from_usage(usage) {
+        result["pricing"] = json!(pricing);
     }
     result
 }
@@ -1128,7 +1155,18 @@ fn round(value: f64, factor: f64) -> f64 {
 }
 fn envelope(items: &[Value], error: Option<&str>) -> Value {
     let count = |status: &str| items.iter().filter(|i| i["status"] == status).count();
-    json!({"version":"1.0","ok":count("failed")==0 && count("pending")==0 && error.is_none(),"error":error,"batch":null,"items":items,"totals":{"total":items.len(),"completed":count("completed"),"failed":count("failed"),"skipped":count("skipped"),"pending":count("pending"),"cost_usd":round(items.iter().filter_map(|i|i["cost_usd"].as_f64()).sum(),1_000_000.0),"duration_s":round(items.iter().filter_map(|i|i["duration_s"].as_f64()).sum(),1000.0)}})
+    let mut value = json!({"version":"1.0","ok":count("failed")==0 && count("pending")==0 && error.is_none(),"error":error,"batch":null,"items":items,"totals":{"total":items.len(),"completed":count("completed"),"failed":count("failed"),"skipped":count("skipped"),"pending":count("pending"),"cost_usd":round(items.iter().filter_map(|i|i["cost_usd"].as_f64()).sum(),1_000_000.0),"duration_s":round(items.iter().filter_map(|i|i["duration_s"].as_f64()).sum(),1000.0)}});
+    let pricing = items
+        .iter()
+        .filter_map(|item| item.get("pricing"))
+        .filter_map(|pricing| {
+            serde_json::from_value::<crate::pricing::Pricing>(pricing.clone()).ok()
+        })
+        .collect::<Vec<_>>();
+    if let Some(pricing) = crate::pricing::Pricing::aggregate(&pricing) {
+        value["totals"]["pricing"] = json!(pricing);
+    }
+    value
 }
 fn emit_json(items: &[Value], error: Option<&str>) {
     println!(

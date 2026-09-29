@@ -19,6 +19,9 @@ pub mod output;
 mod output_profiles;
 mod pdf_media;
 mod pdf_raster;
+mod pricing;
+#[doc(hidden)]
+pub mod provider_batch;
 pub mod provider_management;
 pub mod spa_domains;
 mod types;
@@ -173,14 +176,6 @@ fn convert_inner(
             return Err(Error::Config(format!("Invalid output profile: {profile}")));
         }
         cfg["output"]["profile"] = json!(profile);
-    }
-    if config::enabled(&cfg, "/llm/enabled")
-        && cfg
-            .pointer("/llm/max_cost_per_document_usd")
-            .and_then(Value::as_f64)
-            .is_some_and(|v| v > 0.0)
-    {
-        return Err(Error::Unsupported("LLM cost limits require pricing support, which is not implemented in this development build".into()));
     }
     let is_url = is_url(source);
     if source.contains("://") && !is_url {
@@ -704,7 +699,9 @@ fn convert_inner(
         result.usage = scope.usage();
         if result.usage.requests > 0 {
             result.llm_cache_hit = false;
-            result.warnings.push("LLM token usage is recorded; provider cost pricing is not yet available in this build.".into());
+            if !result.usage.cost_complete() {
+                result.warnings.push("Some observed LLM requests could not be priced. cost_usd is the known priced subtotal; the complete cost is unknown.".into());
+            }
         }
     }
     output::apply_profiles(&mut result, &cfg);

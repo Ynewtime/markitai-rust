@@ -135,6 +135,27 @@ pub struct ConversionUsage {
     pub by_model: Map<String, Value>,
 }
 
+impl ConversionUsage {
+    /// Whether every observed request has a recorded reviewed tariff quote.
+    /// Legacy records with requests but no completeness metadata remain unknown.
+    pub fn cost_complete(&self) -> bool {
+        if self.requests == 0 {
+            return true;
+        }
+        let priced = self.by_model.values().try_fold(0u64, |total, row| {
+            let requests = row.get("requests")?.as_u64()?;
+            let priced = row.get("priced_requests")?.as_u64()?;
+            let unpriced = row.get("unpriced_requests")?.as_u64()?;
+            (priced == requests
+                && unpriced == 0
+                && row.get("cost_status")?.as_str()? == "complete")
+                .then_some(())?;
+            total.checked_add(priced)
+        });
+        priced == Some(self.requests)
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ConversionOutput {
     pub source: String,

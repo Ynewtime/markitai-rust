@@ -1,0 +1,107 @@
+[
+  {
+    "requested_url": "https://www.apache.org/licenses/LICENSE-2.0",
+    "started_at": "2026-09-29T08:49:43.292800+00:00",
+    "status": 200,
+    "final_url": "https://www.apache.org/licenses/LICENSE-2.0",
+    "content_type": "text/plain",
+    "etag": "\"2c5e-64706305a0bd1;65c4779e069a5",
+    "last_modified": "Sun, 28 Dec 2025 17:09:26 GMT",
+    "path": "primary/apache-license-page.html",
+    "bytes": 11358,
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "finished_at": "2026-09-29T08:49:45.630891+00:00"
+  },
+  {
+    "requested_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "started_at": "2026-09-29T08:49:43.293224+00:00",
+    "status": 200,
+    "final_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "content_type": "text/plain",
+    "etag": "\"2c5e-64706305a0bd1\"",
+    "last_modified": "Sun, 28 Dec 2025 17:09:26 GMT",
+    "path": "primary/Apache-2.0.txt",
+    "bytes": 11358,
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "finished_at": "2026-09-29T08:49:45.640689+00:00"
+  },
+  {
+    "requested_url": "https://mozilla.org/MPL/2.0/",
+    "started_at": "2026-09-29T08:49:43.297223+00:00",
+    "status": null,
+    "error": "URLError: <urlopen error EOF occurred in violation of protocol (_ssl.c:1129)>",
+    "finished_at": "2026-09-29T08:49:49.036668+00:00"
+  },
+  {
+    "requested_url": "https://www.mozilla.org/en-US/MPL/2.0/index.txt",
+    "started_at": "2026-09-29T08:49:45.630941+00:00",
+    "status": 404,
+    "error": "HTTPError: HTTP Error 404: Not Found",
+    "finished_at": "2026-09-29T08:49:48.239214+00:00"
+  },
+  {
+    "requested_url": "https://opensource.org/license/MIT",
+    "started_at": "2026-09-29T08:49:45.640728+00:00",
+    "status": 200,
+    "final_url": "https://opensource.org/license/MIT",
+    "content_type": "text/html; charset=UTF-8",
+    "etag": null,
+    "last_modified": "Tue, 29 Sep 2026 08:42:29 GMT",
+    "path": "primary/mit-license-page.html",
+    "bytes": 184430,
+    "sha256": "c981b31cd4d31c5b44bfc7fd9671668706fdce284e2dab54fefa2da132df6ae6",
+    "finished_at": "2026-09-29T08:49:47.875490+00:00"
+  },
+  {
+    "requested_url": "https://github.com/madsmtm/objc2/issues/23",
+    "started_at": "2026-09-29T08:49:47.875518+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/issues/23",
+    "content_type": "text/html; charset=utf-8",
+    "etag": null,
+    "last_modified": null,
+    "path": "primary/objc2-issue-23.html",
+    "bytes": 280791,
+    "sha256": "0308ef6e95ef60a32f393ac11116fdc283d5b706ad9361d1450aeb2e42da5a41",
+    "finished_at": "2026-09-29T08:49:48.920437+00:00"
+  },
+  {
+    "requested_url": "https://github.com/servo/stylo/issues/317",
+    "started_at": "2026-09-29T08:49:48.239253+00:00",
+    "status": 200,
+    "final_url": "https://github.com/servo/stylo/issues/317",
+    "content_type": "text/html; charset=utf-8",
+    "etag": null,
+    "last_modified": null,
+    "path": "primary/selectors-issue-317.html",
+    "bytes": 252837,
+    "sha256": "e26875719513c943785e3fc8d1a197a5567a2fea216ef76e3d4160db2ef3a61a",
+    "finished_at": "2026-09-29T08:49:49.265563+00:00"
+  },
+  {
+    "requested_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+    "started_at": "2026-09-29T08:49:48.920486+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+    "content_type": "text/html; charset=utf-8",
+    "etag": "W/\"3a8b5b0a266fbad8eaccbf3f65ab0e4f\"",
+    "last_modified": null,
+    "path": "primary/objc2-license-history.html",
+    "bytes": 241239,
+    "sha256": "9ba8ffdfcf2c31d076255c0b50d85c72f83215fc1b3f38cb999ab4427e01ff83",
+    "finished_at": "2026-09-29T08:49:50.177305+00:00"
+  },
+  {
+    "requested_url": "https://github.com/madsmtm/objc2/commits/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt",
+    "started_at": "2026-09-29T08:49:49.036753+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/commits/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt",
+    "content_type": "text/html; charset=utf-8",
+    "etag": "W/\"bb4abe4f6e7855526cb82b723371af76\"",
+    "last_modified": null,
+    "path": "primary/objc2-encode-old-license-history.html",
+    "bytes": 242573,
+    "sha256": "0a1efed6cc84aac1d931fe09facf2883ae2fb13caa4e131ddc3bf61aca0d9e3a",
+    "finished_at": "2026-09-29T08:49:50.309756+00:00"
+  }
+]

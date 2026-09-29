@@ -25,3 +25,18 @@ The Numbers reader uses iwork 0.2.1 (MIT), pinned in Cargo.lock. Its independent
 sourced regression documents are from numbers-parser (MIT), with the original
 license and exact source identities in
 crates/markitai-core/src/formats/numbers/fixtures/.
+
+The bounded offline token-pricing catalog derives selected rows from LiteLLM
+1.100.1's bundled model data. Its original BerriAI copyright/license notice,
+exact selected source objects and official tariff/alias provenance are retained
+in licenses/pricing/. This attribution does not assert universal price coverage
+or complete legal review of the dependency bundle.
+
+Reviewed supplemental upstream dependency notices and full terms are included in
+licenses/upstream/. The unmodified MPL-covered selectors 0.38.0 source is available
+offline at licenses/upstream/source-archives/selectors-0.38.0.crate; its exact
+checksum, upstream download URL and license are recorded in that directory.
+These paths are relative to the archive's attribution root (the Python wheel
+uses its .dist-info/licenses/ directory). Three historical objc2-family MIT
+notices remain explicitly review-needed. This collection does not complete a
+legal review or resolve the upstream Apple SDK licensing discussion.

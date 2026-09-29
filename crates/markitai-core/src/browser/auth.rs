@@ -136,7 +136,11 @@ impl State {
                 && challenge
                     .get("scheme")
                     .and_then(Value::as_str)
-                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("basic"))
+                    .is_some_and(|scheme| {
+                        ["basic", "digest"]
+                            .iter()
+                            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+                    })
                 && request_origin.as_ref() == Some(&credentials.origin)
                 && challenge_origin.as_ref() == Some(&credentials.origin)
         });
@@ -270,17 +274,92 @@ mod tests {
             ),
             json!({"response":"CancelAuth"})
         );
-        let mut digest = challenge(
-            "digest",
+        let mut unsupported = challenge(
+            "unsupported",
             "https://example.test/",
             "https://example.test",
             "Server",
         );
-        digest["authChallenge"]["scheme"] = json!("digest");
+        unsupported["authChallenge"]["scheme"] = json!("ntlm");
         assert_eq!(
-            response(&mut auth, digest),
+            response(&mut auth, unsupported),
             json!({"response":"CancelAuth"})
         );
+    }
+    #[test]
+    fn digest_uses_the_same_exact_origin_and_single_credential_submission_policy() {
+        for scheme in ["digest", "Digest", "DIGEST"] {
+            let mut auth = state(json!({"username":"u","password":"private-value"}));
+            let mut allowed = challenge(
+                "digest",
+                "https://example.test/document",
+                "https://example.test",
+                "Server",
+            );
+            allowed["authChallenge"]["scheme"] = json!(scheme);
+            assert_eq!(
+                response(&mut auth, allowed.clone())["response"],
+                "ProvideCredentials"
+            );
+            assert_eq!(
+                response(&mut auth, allowed),
+                json!({"response":"CancelAuth"})
+            );
+            for (index, source, request, origin) in [
+                (
+                    0,
+                    "Proxy",
+                    "https://example.test/document",
+                    "https://example.test",
+                ),
+                (
+                    1,
+                    "Server",
+                    "https://example.test:444/document",
+                    "https://example.test:444",
+                ),
+                (
+                    2,
+                    "Server",
+                    "http://example.test/document",
+                    "http://example.test",
+                ),
+                (
+                    3,
+                    "Server",
+                    "https://example.test/document",
+                    "https://other.test",
+                ),
+            ] {
+                let mut denied = challenge(&format!("denied-{index}"), request, origin, source);
+                denied["authChallenge"]["scheme"] = json!(scheme);
+                assert_eq!(
+                    response(&mut auth, denied),
+                    json!({"response":"CancelAuth"})
+                );
+            }
+        }
+        for scheme in [
+            "ntlm",
+            "negotiate",
+            "kerberos",
+            "digest-extra",
+            "",
+            " digest",
+        ] {
+            let mut auth = state(json!({"username":"u","password":"p"}));
+            let mut denied = challenge(
+                "scheme",
+                "https://example.test/",
+                "https://example.test",
+                "Server",
+            );
+            denied["authChallenge"]["scheme"] = json!(scheme);
+            assert_eq!(
+                response(&mut auth, denied),
+                json!({"response":"CancelAuth"})
+            );
+        }
     }
     #[test]
     fn unbounded_new_request_ids_cannot_grow_authentication_state() {

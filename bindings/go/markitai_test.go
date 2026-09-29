@@ -236,6 +236,10 @@ func TestPaidNativeFailuresKeepDocumentScopesSeparate(t *testing.T) {
 		if failure.Usage == nil || failure.Usage.Requests != 1 || failure.Usage.InputTokens != tokens[0] || failure.Usage.OutputTokens != tokens[1] || len(failure.Usage.ByModel) != 1 || failure.Usage.ByModel[result.name] == nil {
 			t.Fatalf("%s: missing or mixed accounting: %+v", result.name, failure.Usage)
 		}
+		coverage := failure.Usage.ByModel[result.name]
+		if coverage["priced_requests"] != float64(0) || coverage["unpriced_requests"] != float64(1) || coverage["cost_status"] != "unknown" || coverage["pricing_snapshot"] != nil || failure.Usage.CostUSD != 0 {
+			t.Fatalf("%s: custom endpoint must retain unknown price coverage: %+v", result.name, failure.Usage)
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()

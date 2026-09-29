@@ -1,0 +1,148 @@
+{
+  "schema": 1,
+  "collected_at": "2026-09-29T08:56:34.356357+00:00",
+  "summary": {
+    "packages": 9,
+    "directly_linked_full_terms": 6,
+    "historical_original_recovered_review_needed": 3,
+    "proposed_asset_files": 18,
+    "new_collection_http_requests": 20,
+    "successful_requests": 17
+  },
+  "historical_mit_verification": {
+    "deleted_file_equals_introduced_file": true,
+    "introduced_and_removed_original_bytes": 1066,
+    "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+    "all_three_target_anchored_histories_confirmed": true,
+    "current_cargo_manifests_keep_mit_and_future_mit": true
+  },
+  "scope": "Round30 exact authority/history follow-up. Current notices retained; only six direct-link candidates clear full-text flags. Three historical originals remain supplemental/review-needed.",
+  "sources": [
+    {
+      "requested_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "final_url": "https://www.apache.org/licenses/LICENSE-2.0",
+      "path": "primary/apache-license-page.html",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "requested_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+      "final_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+      "path": "primary/Apache-2.0.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "requested_url": "https://opensource.org/license/MIT",
+      "final_url": "https://opensource.org/license/MIT",
+      "path": "primary/mit-license-page.html",
+      "bytes": 184430,
+      "sha256": "c981b31cd4d31c5b44bfc7fd9671668706fdce284e2dab54fefa2da132df6ae6"
+    },
+    {
+      "requested_url": "https://github.com/madsmtm/objc2/issues/23",
+      "final_url": "https://github.com/madsmtm/objc2/issues/23",
+      "path": "primary/objc2-issue-23.html",
+      "bytes": 280791,
+      "sha256": "0308ef6e95ef60a32f393ac11116fdc283d5b706ad9361d1450aeb2e42da5a41"
+    },
+    {
+      "requested_url": "https://github.com/servo/stylo/issues/317",
+      "final_url": "https://github.com/servo/stylo/issues/317",
+      "path": "primary/selectors-issue-317.html",
+      "bytes": 252837,
+      "sha256": "e26875719513c943785e3fc8d1a197a5567a2fea216ef76e3d4160db2ef3a61a"
+    },
+    {
+      "requested_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+      "final_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+      "path": "primary/objc2-license-history.html",
+      "bytes": 241239,
+      "sha256": "9ba8ffdfcf2c31d076255c0b50d85c72f83215fc1b3f38cb999ab4427e01ff83"
+    },
+    {
+      "requested_url": "https://github.com/madsmtm/objc2/commits/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt",
+      "final_url": "https://github.com/madsmtm/objc2/commits/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt",
+      "path": "primary/objc2-encode-old-license-history.html",
+      "bytes": 242573,
+      "sha256": "0a1efed6cc84aac1d931fe09facf2883ae2fb13caa4e131ddc3bf61aca0d9e3a"
+    },
+    {
+      "requested_url": "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch",
+      "final_url": "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch",
+      "path": "primary/objc2-license-clarification.patch",
+      "bytes": 11656,
+      "sha256": "b4ecc7d6db95a78e1cf777636049b4a9156783f326edf016a1461b24c84d1872"
+    },
+    {
+      "requested_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch",
+      "final_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch",
+      "path": "primary/objc2-original-license-commit.patch",
+      "bytes": 1543,
+      "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb"
+    },
+    {
+      "requested_url": "https://www.mozilla.org/en-US/MPL/2.0/",
+      "final_url": "https://www.mozilla.org/en-US/MPL/2.0/",
+      "path": "primary/mozilla-license-canonical.html",
+      "bytes": 17329,
+      "sha256": "79fefbb5ce750421056e8639e83b055fa97deb02407617d4c0f9d50cfa0cfd32"
+    },
+    {
+      "requested_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
+      "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
+      "path": "primary/objc2-original-MIT.txt",
+      "bytes": 1066,
+      "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5"
+    },
+    {
+      "requested_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.modified.toml",
+      "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.modified.toml",
+      "path": "primary/foundation-contribution-policy.toml",
+      "bytes": 1034,
+      "sha256": "a5d9adc1a4e53b2e41d077b9c77d6fdee47273e7978f5a459cc35c84308b32da"
+    },
+    {
+      "requested_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/CONTRIBUTING.md",
+      "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/CONTRIBUTING.md",
+      "path": "primary/objc2-contribution-policy.md",
+      "bytes": 5697,
+      "sha256": "083990f511e3bfe936739ccbe70d6a6a6c1287831679838fa40b0c7b8be71f04"
+    },
+    {
+      "requested_url": "https://www.mozilla.org/en-US/MPL/",
+      "final_url": "https://www.mozilla.org/en-US/MPL/",
+      "path": "primary/mozilla-overview.html",
+      "bytes": 50250,
+      "sha256": "7c0c0dab2346d2282f9cbccd418891e3ba53c654c44628c0783cac751ae3f8b9"
+    },
+    {
+      "requested_url": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt",
+      "final_url": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt",
+      "path": "primary/MPL-2.0.txt",
+      "bytes": 16726,
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+    },
+    {
+      "requested_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.txt",
+      "final_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.txt",
+      "path": "primary/objc2-original-license-history.html",
+      "bytes": 242574,
+      "sha256": "cce3f980b9088bf6533102997510603f50a5fbdda6fd34c055f797777fc20e0b"
+    },
+    {
+      "requested_url": "https://github.com/madsmtm/objc2/commits/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.txt",
+      "final_url": "https://github.com/madsmtm/objc2/commits/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.txt",
+      "path": "primary/foundation-original-license-history.html",
+      "bytes": 242573,
+      "sha256": "ab00bc3db74112a44b17ac776fab3a16bc6122ffc8ccf2708a80e5d96206b4de"
+    }
+  ],
+  "limits": {
+    "max_response_bytes": 2097152,
+    "timeout_seconds": 25,
+    "max_concurrency": 3,
+    "github_api": false,
+    "authenticated": false
+  }
+}

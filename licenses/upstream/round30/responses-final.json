@@ -1,0 +1,54 @@
+[
+  {
+    "requested_url": "https://www.mozilla.org/en-US/MPL/2.0/",
+    "started_at": "2026-09-29T08:51:23.019637+00:00",
+    "status": 200,
+    "final_url": "https://www.mozilla.org/en-US/MPL/2.0/",
+    "content_type": "text/html; charset=utf-8",
+    "etag": "\"dfa73f9aa9b151551893a25d5050f753\"",
+    "last_modified": null,
+    "path": "primary/mozilla-license-canonical.html",
+    "bytes": 17329,
+    "sha256": "79fefbb5ce750421056e8639e83b055fa97deb02407617d4c0f9d50cfa0cfd32",
+    "finished_at": "2026-09-29T08:51:23.524428+00:00"
+  },
+  {
+    "requested_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
+    "started_at": "2026-09-29T08:51:23.020027+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
+    "content_type": "text/plain; charset=utf-8",
+    "etag": "\"ee674d52afb7fa3ad77ff5df38819bf101ce201ad7d4a3506d842f0d0a7fdec2\"",
+    "last_modified": null,
+    "path": "primary/objc2-original-MIT.txt",
+    "bytes": 1066,
+    "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+    "finished_at": "2026-09-29T08:51:23.497469+00:00"
+  },
+  {
+    "requested_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.modified.toml",
+    "started_at": "2026-09-29T08:51:23.020124+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.modified.toml",
+    "content_type": "text/plain; charset=utf-8",
+    "etag": "\"039ecd52edd0903b6d7cff126a0785217cea272117fe12b1230ad0ba17bfc638\"",
+    "last_modified": null,
+    "path": "primary/foundation-contribution-policy.toml",
+    "bytes": 1034,
+    "sha256": "a5d9adc1a4e53b2e41d077b9c77d6fdee47273e7978f5a459cc35c84308b32da",
+    "finished_at": "2026-09-29T08:51:23.472196+00:00"
+  },
+  {
+    "requested_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/CONTRIBUTING.md",
+    "started_at": "2026-09-29T08:51:23.472252+00:00",
+    "status": 200,
+    "final_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/CONTRIBUTING.md",
+    "content_type": "text/plain; charset=utf-8",
+    "etag": "\"216d3fd0aa188d4ba6496d2faaef004259fe86507bdd708d10953b0bcec5e471\"",
+    "last_modified": null,
+    "path": "primary/objc2-contribution-policy.md",
+    "bytes": 5697,
+    "sha256": "083990f511e3bfe936739ccbe70d6a6a6c1287831679838fa40b0c7b8be71f04",
+    "finished_at": "2026-09-29T08:51:23.914751+00:00"
+  }
+]

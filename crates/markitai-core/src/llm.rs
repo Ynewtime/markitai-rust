@@ -1,4 +1,6 @@
 //! Native text and image requests with a bounded routing and retry policy.
+mod accounting;
+pub(crate) mod batch;
 mod chunks;
 mod document;
 pub(crate) mod flight;
@@ -6,6 +8,7 @@ pub(crate) mod routing;
 mod service_probe;
 mod structured;
 mod vision;
+use crate::pricing::{self, BillingClass, Identity};
 use crate::{ConversionUsage, Error, LlmRuntime, Result, config, llm_cache};
 use base64::Engine;
 pub(crate) use document::{DocumentMetadata, process_document_with_runtime};
@@ -80,6 +83,7 @@ pub(crate) struct Enhancement {
 struct DocumentAccounting {
     attempts: u64,
     limit: u64,
+    dollars: accounting::Dollars,
     usage: ConversionUsage,
 }
 thread_local! {
@@ -100,6 +104,7 @@ impl DocumentScope {
                 .pointer("/llm/max_requests_per_document")
                 .and_then(Value::as_u64)
                 .unwrap_or(50),
+            dollars: accounting::Dollars::new(cfg),
             ..Default::default()
         }));
         let previous = DOCUMENT_ACCOUNTING.with(|slot| slot.replace(Some(current.clone())));
@@ -139,7 +144,7 @@ fn document_usage() -> Option<ConversionUsage> {
             .map(|state| copy_usage(&state.lock().unwrap_or_else(|e| e.into_inner()).usage))
     })
 }
-fn admit_document_attempt() -> Result<()> {
+fn admit_document_attempt_for(entry: Option<&Deployment>) -> Result<()> {
     DOCUMENT_ACCOUNTING.with(|slot| {
         if let Some(state) = slot.borrow().as_ref() {
             let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -148,11 +153,25 @@ fn admit_document_attempt() -> Result<()> {
                     "LLM per-document request budget exhausted".into(),
                 ));
             }
+            state.dollars.admit(entry.map(price_identity).as_ref())?;
             state.attempts = state.attempts.saturating_add(1);
         }
         Ok(())
     })
 }
+#[cfg(test)]
+fn admit_document_attempt() -> Result<()> {
+    admit_document_attempt_for(None)
+}
+
+fn price_identity(entry: &Deployment) -> Identity<'_> {
+    Identity {
+        provider: &entry.provider,
+        endpoint: &entry.endpoint,
+        model: &entry.model,
+    }
+}
+
 fn document_exhausted() -> bool {
     DOCUMENT_ACCOUNTING.with(|slot| {
         slot.borrow().as_ref().is_some_and(|state| {
@@ -375,52 +394,10 @@ fn parse_image_value(value: &Value) -> Result<(String, String, String)> {
     Ok((caption, description, text))
 }
 fn merge_usage(target: &mut ConversionUsage, source: &ConversionUsage) {
-    target.requests = target.requests.saturating_add(source.requests);
-    target.input_tokens = target.input_tokens.saturating_add(source.input_tokens);
-    target.output_tokens = target.output_tokens.saturating_add(source.output_tokens);
-    target.cost_usd += source.cost_usd;
-    for (model, values) in &source.by_model {
-        let entry = target.by_model.entry(model.clone()).or_insert_with(
-            || json!({"requests":0,"input_tokens":0,"output_tokens":0,"cost_usd":0.0}),
-        );
-        for name in ["requests", "input_tokens", "output_tokens"] {
-            entry[name] = json!(
-                entry[name]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .saturating_add(values[name].as_u64().unwrap_or(0))
-            );
-        }
-        entry["cost_usd"] = json!(
-            entry["cost_usd"].as_f64().unwrap_or(0.0) + values["cost_usd"].as_f64().unwrap_or(0.0)
-        );
-    }
+    accounting::merge(target, source);
 }
 fn usage_difference(after: &ConversionUsage, before: &ConversionUsage) -> ConversionUsage {
-    let mut usage = copy_usage(after);
-    usage.requests = usage.requests.saturating_sub(before.requests);
-    usage.input_tokens = usage.input_tokens.saturating_sub(before.input_tokens);
-    usage.output_tokens = usage.output_tokens.saturating_sub(before.output_tokens);
-    usage.cost_usd -= before.cost_usd;
-    for (model, entry) in &mut usage.by_model {
-        if let Some(old) = before.by_model.get(model) {
-            for name in ["requests", "input_tokens", "output_tokens"] {
-                entry[name] = json!(
-                    entry[name]
-                        .as_u64()
-                        .unwrap_or(0)
-                        .saturating_sub(old[name].as_u64().unwrap_or(0))
-                );
-            }
-            entry["cost_usd"] = json!(
-                entry["cost_usd"].as_f64().unwrap_or(0.0) - old["cost_usd"].as_f64().unwrap_or(0.0)
-            );
-        }
-    }
-    usage
-        .by_model
-        .retain(|_, entry| entry["requests"].as_u64().unwrap_or(0) > 0);
-    usage
+    accounting::difference(after, before)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1156,6 +1133,9 @@ fn run_mode(
     stop: Option<&std::sync::atomic::AtomicBool>,
     structured: Option<structured::Wire>,
 ) -> std::result::Result<(String, ConversionUsage), VisionFailure> {
+    let _own_scope = DocumentScope::shared()
+        .is_none()
+        .then(|| DocumentScope::new(cfg));
     let strategy = routing::Strategy::parse(
         cfg.pointer("/llm/router_settings/routing_strategy")
             .and_then(Value::as_str)
@@ -1255,15 +1235,9 @@ fn run_mode(
                         "Visual document processing stopped after a fatal batch".into(),
                     )));
                 }
-                if let Err(error) = admit_document_attempt() {
-                    if let Some(stop) = stop {
-                        stop.store(true, Ordering::Release);
-                    }
-                    return Err(VisionFailure::blocked(error));
-                }
-                // Selection happens after queueing and budget admission. In
-                // least-busy mode reservation and selection share one lock;
-                // queued callers cannot reserve a stale deployment choice.
+                // Select under the runtime permit, then check the selected tariff
+                // and document budgets before a request or metric observation.
+                // A refused admission drops its reservation without an observation.
                 let (selected, route) = if strategy.adaptive() {
                     let (index, lease) = runtime.routing().select(
                         strategy,
@@ -1276,6 +1250,12 @@ fn run_mode(
                 } else {
                     (weighted_index(&entries, eligible, random_ticket()), None)
                 };
+                if let Err(error) = admit_document_attempt_for(Some(&entries[selected])) {
+                    if let Some(stop) = stop {
+                        stop.store(true, Ordering::Release);
+                    }
+                    return Err(VisionFailure::blocked(error));
+                }
                 attempts = attempts.saturating_add(1);
                 let mut observation = routing::Observation::default();
                 let response = request_with_mode(
@@ -1661,6 +1641,15 @@ fn metric_tokens(entry: &Deployment, data: &Value) -> (Option<u64>, Option<u64>)
 }
 
 fn record_usage(usage: &mut ConversionUsage, entry: &Deployment, data: &Value) {
+    record_usage_class(usage, entry, data, BillingClass::Standard);
+}
+
+fn record_usage_class(
+    usage: &mut ConversionUsage,
+    entry: &Deployment,
+    data: &Value,
+    class: BillingClass,
+) {
     let mut input = data
         .pointer("/usage/prompt_tokens")
         .or_else(|| data.pointer("/usage/input_tokens"))
@@ -1686,38 +1675,26 @@ fn record_usage(usage: &mut ConversionUsage, entry: &Deployment, data: &Value) {
         .and_then(Value::as_str)
         .filter(|model| !model.is_empty())
         .unwrap_or(&entry.id);
+    let quote = pricing::quote(&price_identity(entry), data, class);
+    let mut delta = accounting::response(model, input, output, quote);
+    let cached = if entry.protocol == Protocol::Anthropic {
+        data.pointer("/usage/cache_read_input_tokens")
+    } else {
+        data.pointer("/usage/prompt_tokens_details/cached_tokens")
+            .or_else(|| data.pointer("/usage/input_tokens_details/cached_tokens"))
+    }
+    .and_then(Value::as_u64);
+    if let Some(cached) = cached {
+        delta.by_model[model]["cached_input_tokens"] = json!(cached);
+    }
     DOCUMENT_ACCOUNTING.with(|slot| {
         if let Some(state) = slot.borrow().as_ref() {
-            let mut delta = ConversionUsage {
-                requests: 1,
-                input_tokens: input,
-                output_tokens: output,
-                ..Default::default()
-            };
-            delta.by_model.insert(
-                model.to_owned(),
-                json!({"requests":1,"input_tokens":input,"output_tokens":output,"cost_usd":0.0}),
-            );
-            merge_usage(
-                &mut state.lock().unwrap_or_else(|e| e.into_inner()).usage,
-                &delta,
-            );
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            state.dollars.observe(quote);
+            merge_usage(&mut state.usage, &delta);
         }
     });
-    usage.requests = usage.requests.saturating_add(1);
-    usage.input_tokens = usage.input_tokens.saturating_add(input);
-    usage.output_tokens = usage.output_tokens.saturating_add(output);
-    let detail = usage
-        .by_model
-        .entry(model)
-        .or_insert_with(|| json!({"requests":0,"input_tokens":0,"output_tokens":0,"cost_usd":0.0}));
-    for (key, addition) in [
-        ("requests", 1),
-        ("input_tokens", input),
-        ("output_tokens", output),
-    ] {
-        detail[key] = json!(detail[key].as_u64().unwrap_or(0).saturating_add(addition));
-    }
+    merge_usage(usage, &delta);
 }
 
 #[cfg(test)]
@@ -2617,7 +2594,10 @@ mod tests {
         assert_eq!(text, "image text");
         assert_eq!(usage.input_tokens, 35);
         assert_eq!(usage.by_model["claude-test"]["input_tokens"], 35);
-        assert_eq!(usage.by_model["claude-test"].as_object().unwrap().len(), 4);
+        assert_eq!(usage.by_model["claude-test"]["cached_input_tokens"], 20);
+        assert_eq!(usage.by_model["claude-test"]["priced_requests"], 0);
+        assert_eq!(usage.by_model["claude-test"]["unpriced_requests"], 1);
+        assert_eq!(usage.by_model["claude-test"]["cost_status"], "unknown");
         let requests = server.finish();
         assert!(
             requests[0]

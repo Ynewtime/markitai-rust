@@ -123,6 +123,10 @@ class TerminalUsageTests(unittest.TestCase):
                         self.assertIsInstance(error.usage, markitai.ConversionUsage)
                         self.assertEqual((error.usage.requests, error.usage.input_tokens, error.usage.output_tokens), (1, *expected))
                         self.assertEqual(set(error.usage.by_model), {name})
+                        coverage = error.usage.by_model[name]
+                        self.assertEqual((coverage["priced_requests"], coverage["unpriced_requests"], coverage["cost_status"]), (0, 1, "unknown"))
+                        self.assertNotIn("pricing_snapshot", coverage)
+                        self.assertEqual(error.usage.cost_usd, 0)
                     with self.assertRaises(FileNotFoundError) as missing:
                         markitai.convert(root / "missing.md", config={}, llm=False)
                     self.assertIsNone(missing.exception.usage)

@@ -28,7 +28,7 @@ Availability checks do not launch a process.
 
 `fetch.playwright.http_credentials` accepts an object containing `username` and
 `password`, with optional `origin` and `send`. Credentials are supplied only after
-a Chromium **Server Basic** challenge. They are not placed in browser arguments,
+a Chromium **Server Basic or Digest** challenge. They are not placed in browser arguments,
 URLs or a global Authorization header. The username and password are each bounded
 to 4,096 UTF-8 bytes; control characters and a colon in the Basic username are
 rejected. Empty strings are valid configured credentials. Unknown fields and
@@ -45,12 +45,17 @@ Proxy challenges never receive the server password. `send=always` and
 `send=unauthorized` retain Playwright's browser semantics: neither makes these
 browser requests send a preemptive Authorization header.
 
-Each intercepted request receives the configured credentials at most once;
-a repeated challenge is cancelled. A navigation session accepts at most 128
+Each intercepted request receives the configured credentials through CDP at most
+once; a repeated credential prompt is cancelled. Digest negotiation, digest
+calculation and a server-marked stale nonce are handled by Chromium. A successful
+Digest navigation can therefore contain several HTTP handshake requests without
+resending the configured password through CDP or starting a second navigation. A navigation session accepts at most 128
 challenge events, including rejected events. Authentication shares the existing
 navigation deadline. Errors do not include challenge payloads or credentials.
-Digest, NTLM/Kerberos and authenticated proxies are not supported by this first
-implementation. Extra HTTP headers retain their separate context-wide contract
+NTLM/Kerberos and authenticated proxies remain unsupported. Digest algorithms
+are delegated to the installed Chromium; the authored tests exercise MD5,
+MD5-sess, SHA-256 and SHA-256-sess with `qop=auth`. This does not add `auth-int`
+support or a native Rust digest implementation. Extra HTTP headers retain their separate context-wide contract
 below; this credential policy does not silently narrow explicitly supplied headers.
 
 The internal presence helper allows the fetch coordinator to route authenticated
@@ -71,12 +76,19 @@ five-second deadline, followed by process cleanup. Discovery alone remains a
 separate non-launching availability check.
 
 Optional tests explicitly launch installed Chromium against authored loopback
-servers for successful Basic authentication and actual screenshot pixels, bounded
+servers for successful Basic and Digest authentication and actual screenshot pixels, bounded
 wrong-password failure, cross-origin redirect isolation with an explicit-origin
 positive case, third-party resource isolation, and diagnostic/profile cleanup.
 These are ignored in the ordinary workspace invocation and must be selected
 explicitly by the coordinator; implementation does not itself establish a passing
-release acceptance result.
+release acceptance result. The Digest server independently verifies the username,
+realm, nonce, opaque value, method, URI, algorithm, qop, nonce count, client nonce
+and response hash. Its selected browser cases cover stale-nonce renewal, denied
+credentials without navigation replay, redirected origin scope, third-party
+challenges, extensionless PDF bytes and caller-owned runtime account isolation.
+A valid header prefix alone does not satisfy the fixture. Known-answer tests use
+an RFC MD5 vector and independently calculated Python `hashlib` values; MD5 code
+is only a test dependency.
 
 ## Authenticated PDF responses
 
@@ -88,7 +100,7 @@ header within the first 1,024 bytes. Explicit HTML and `text/*` representations
 remain rendered content; a textual PDF example is not a document download.
 A content-disposition attachment does not prevent a recognized PDF from being read.
 
-The existing Basic challenge policy, supplied cookies and request headers remain
+The existing origin-scoped challenge policy, supplied cookies and request headers remain
 inside the same private Chromium process. `Fetch.takeResponseBodyAsStream` and
 sequential `IO.read` calls consume the paused response in 64 KiB chunks. There is
 no second HTTP request by Rust or an anonymous download client. The original
@@ -242,7 +254,7 @@ caller-surface coverage and measured performance require their own validation.
 - `session_mode=isolated` creates a fresh private browser context for every
   request. `domain_persistent` retains a matching context only within an explicit
   caller-owned runtime, with a fresh page for each request. No session survives
-  runtime shutdown or a new process. Scoped Server Basic authentication retains
+  runtime shutdown or a new process. Scoped Server Basic and Digest authentication retain
   its exact-origin challenge policy.
 - Proxy configuration comes from scheme-appropriate `HTTP_PROXY`, `HTTPS_PROXY`
   or `ALL_PROXY` environment variables and their lowercase forms. `NO_PROXY`

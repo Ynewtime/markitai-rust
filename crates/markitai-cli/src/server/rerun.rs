@@ -91,6 +91,7 @@ pub(super) async fn retry(
         if data.persistence_error.is_some(){return Err(ApiError::new(409,"job persistence failed; restart to recover before retrying"));}
         let index=data.items.iter().position(|i|i.item_id==item_id).ok_or_else(||ApiError::new(404,"item not found"))?;
         let prior=data.items[index].clone();
+        if prior.skip_reason.as_deref()==Some("pending_batch"){return Err(ApiError::new(409,"provider batch enhancement is pending; collect that batch before retrying or enhancing this item"));}
         if !["done","error"].contains(&prior.status.as_str())||job.retry_pending.lock().unwrap().contains(&item_id){return Err(ApiError::new(409,"item has not reached a terminal state yet; retry when done"));}
         if !prior.retryable{return Err(ApiError::new(409,"file items recorded from a CLI run cannot be retried or enhanced here; run the markitai CLI on the file again"));}
         if prior.kind=="file" {store::safe_file(&job.folder.join("uploads"),&prior.name).map_err(|_|ApiError::new(404,"original upload is no longer on disk"))?;}
@@ -118,7 +119,7 @@ pub(super) async fn retry(
         }
         data.bases.insert(item_id.clone(),base.clone());
         let job_id=data.id.clone();
-        let item=&mut data.items[index];item.status="queued".into();item.error=None;item.output=None;item.duration_ms=None;item.finished_at=None;item.cost_usd=None;item.diagnostics=None;item.llm_enhanced=false;item.operation=body.operation.name().into();item.skipped=false;item.skip_reason=None;item.warnings.clear();
+        let item=&mut data.items[index];item.status="queued".into();item.error=None;item.output=None;item.duration_ms=None;item.finished_at=None;item.cost_usd=None;item.pricing=None;item.diagnostics=None;item.llm_enhanced=false;item.operation=body.operation.name().into();item.skipped=false;item.skip_reason=None;item.warnings.clear();
         let created=json!({"job_id":job_id,"items":[item.created()]});
         let payload=json!(item);
         data.status="running".into();data.finished_at=None;data.persistence_error=None;
@@ -363,6 +364,7 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
             item.duration_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
             item.finished_at = Some(now());
             item.cost_usd = Some(converted.usage.cost_usd);
+            item.pricing = crate::pricing::Pricing::from_usage(&converted.usage);
             item.diagnostics = AttemptDiagnostics::completed(
                 work.operation.diagnostic_operation(),
                 converted.usage,

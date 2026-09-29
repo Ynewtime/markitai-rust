@@ -3,8 +3,8 @@
   "files": [
     {
       "path": "README.md",
-      "bytes": 1438,
-      "sha256": "3839c63beb5e9ee6806504650906d24ca2b288438bde1f4ca4a2d1db6a4efc14"
+      "bytes": 2881,
+      "sha256": "c3e9f6eed8f2d68f370cbe18162e70dbe59efff8956287a6af6605845d64c39d"
     },
     {
       "path": "input-manifest.json",
@@ -238,8 +238,8 @@
     },
     {
       "path": "manifest.json",
-      "bytes": 45667,
-      "sha256": "9911ee8daeefadc3b30a07f2f8b925ed1c34ca1c0fe2feb9971f62fba2600ba0"
+      "bytes": 56233,
+      "sha256": "22972bc5dca6f54b8111cd36da94137cce3b2a7739ce2de8a0e8266014df2547"
     },
     {
       "path": "overlay/licenses/alloc-stdlib-0.2.4/LICENSE",
@@ -257,6 +257,11 @@
       "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
     },
     {
+      "path": "overlay/licenses/dispatch2-0.3.1/LICENSE-APACHE-2.0.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
       "path": "overlay/licenses/dispatch2-0.3.1/LICENSE.md",
       "bytes": 1339,
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
@@ -272,9 +277,19 @@
       "sha256": "9369f62987b3a116111f2edfdc4cc72633e44ddc94d5d0c68659cf537b76a31f"
     },
     {
+      "path": "overlay/licenses/objc2-0.6.4/LICENSE-MIT-HISTORICAL.txt",
+      "bytes": 1066,
+      "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5"
+    },
+    {
       "path": "overlay/licenses/objc2-0.6.4/LICENSE.md",
       "bytes": 1339,
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+    },
+    {
+      "path": "overlay/licenses/objc2-core-foundation-0.3.2/LICENSE-APACHE-2.0.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
     },
     {
       "path": "overlay/licenses/objc2-core-foundation-0.3.2/LICENSE.md",
@@ -282,9 +297,19 @@
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
     },
     {
+      "path": "overlay/licenses/objc2-core-graphics-0.3.2/LICENSE-APACHE-2.0.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
       "path": "overlay/licenses/objc2-core-graphics-0.3.2/LICENSE.md",
       "bytes": 1339,
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+    },
+    {
+      "path": "overlay/licenses/objc2-encode-4.1.0/LICENSE-MIT-HISTORICAL.txt",
+      "bytes": 1066,
+      "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5"
     },
     {
       "path": "overlay/licenses/objc2-encode-4.1.0/LICENSE.md",
@@ -292,14 +317,29 @@
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
     },
     {
+      "path": "overlay/licenses/objc2-foundation-0.3.2/LICENSE-MIT-HISTORICAL.txt",
+      "bytes": 1066,
+      "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5"
+    },
+    {
       "path": "overlay/licenses/objc2-foundation-0.3.2/LICENSE.md",
       "bytes": 1339,
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
     },
     {
+      "path": "overlay/licenses/objc2-image-io-0.3.2/LICENSE-APACHE-2.0.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
       "path": "overlay/licenses/objc2-image-io-0.3.2/LICENSE.md",
       "bytes": 1339,
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
+    },
+    {
+      "path": "overlay/licenses/objc2-vision-0.3.2/LICENSE-APACHE-2.0.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
     },
     {
       "path": "overlay/licenses/objc2-vision-0.3.2/LICENSE.md",
@@ -315,6 +355,11 @@
       "path": "overlay/licenses/r-efi-6.0.0/AUTHORS",
       "bytes": 3733,
       "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111"
+    },
+    {
+      "path": "overlay/licenses/selectors-0.38.0/LICENSE-MPL-2.0.txt",
+      "bytes": 16726,
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
     },
     {
       "path": "overlay/licenses/selectors-0.38.0/NOTICE-MPL-2.0.txt",
@@ -335,6 +380,86 @@
       "path": "responses-3.json",
       "bytes": 6814,
       "sha256": "f6eb514b284023ee544a281c1045404e7b5bdd03cc72fb80fefe720f32768791"
+    },
+    {
+      "path": "round30/primary/Apache-2.0.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "round30/primary/MPL-2.0.txt",
+      "bytes": 16726,
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+    },
+    {
+      "path": "round30/primary/apache-license-page.html",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "round30/primary/foundation-original-license-history.html",
+      "bytes": 242573,
+      "sha256": "ab00bc3db74112a44b17ac776fab3a16bc6122ffc8ccf2708a80e5d96206b4de"
+    },
+    {
+      "path": "round30/primary/mozilla-overview.html",
+      "bytes": 50250,
+      "sha256": "7c0c0dab2346d2282f9cbccd418891e3ba53c654c44628c0783cac751ae3f8b9"
+    },
+    {
+      "path": "round30/primary/objc2-encode-old-license-history.html",
+      "bytes": 242573,
+      "sha256": "0a1efed6cc84aac1d931fe09facf2883ae2fb13caa4e131ddc3bf61aca0d9e3a"
+    },
+    {
+      "path": "round30/primary/objc2-license-clarification.patch",
+      "bytes": 11656,
+      "sha256": "b4ecc7d6db95a78e1cf777636049b4a9156783f326edf016a1461b24c84d1872"
+    },
+    {
+      "path": "round30/primary/objc2-original-MIT.txt",
+      "bytes": 1066,
+      "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5"
+    },
+    {
+      "path": "round30/primary/objc2-original-license-commit.patch",
+      "bytes": 1543,
+      "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb"
+    },
+    {
+      "path": "round30/primary/objc2-original-license-history.html",
+      "bytes": 242574,
+      "sha256": "cce3f980b9088bf6533102997510603f50a5fbdda6fd34c055f797777fc20e0b"
+    },
+    {
+      "path": "round30/provenance.json",
+      "bytes": 7235,
+      "sha256": "0ac2eb222598babd45c7558d9bc4c56bd07d18426f696acc18465cc4f5c69924"
+    },
+    {
+      "path": "round30/responses-final.json",
+      "bytes": 2722,
+      "sha256": "7657331c551be1e28b88420d3f16bb723288c35a7a3ed2330ba301eb0401c8d8"
+    },
+    {
+      "path": "round30/responses-followup.json",
+      "bytes": 1584,
+      "sha256": "6869bee68a85553acf0ce25810915daccb75d253d65fafa996ba16b07454effb"
+    },
+    {
+      "path": "round30/responses-links.json",
+      "bytes": 2429,
+      "sha256": "4b9a24f54ba02a78e9b4b6af01cfe5687225080bf6d0099e7e665826b9e755ce"
+    },
+    {
+      "path": "round30/responses.json",
+      "bytes": 4486,
+      "sha256": "d49f87c1969d9ce1f46b7b43b2c856c9a47d9263afbdf6142952fb8e3b93f45f"
+    },
+    {
+      "path": "source-archives/selectors-0.38.0.crate",
+      "bytes": 69601,
+      "sha256": "8adfa1c298912827b8a28b223b3b874357397ae706e6190acd9bf28cee99114d"
     },
     {
       "path": "upstream/Michael-F-Bryan/include_dir/d742c6fffce99ee89da91b934e7ce6fb2a82680c/Cargo.toml",

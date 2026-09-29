@@ -48,6 +48,46 @@ impl JobData {
         }
         value
     }
+    // Output totals must not silently omit old observations or price a failed
+    // later attempt as if it belonged to the retained output.
+    fn output_pricing(&self) -> Option<crate::pricing::Pricing> {
+        let mut coverage = Vec::new();
+        for item in &self.items {
+            let Some(cost) = item.cost_usd else {
+                if item.pricing.is_some()
+                    || item.diagnostics.as_ref().is_some_and(|diagnostics| {
+                        diagnostics.last_attempt.status == crate::diagnostics::Status::Done
+                    })
+                {
+                    return None;
+                }
+                continue;
+            };
+            if let Some(pricing) = &item.pricing {
+                coverage.push(pricing.clone());
+                continue;
+            }
+            if let Some(diagnostics) = &item.diagnostics {
+                let attempt = &diagnostics.last_attempt;
+                if attempt.status == crate::diagnostics::Status::Done {
+                    if item.status != "done" || cost != attempt.usage.cost_usd {
+                        return None;
+                    }
+                    // Historical successful observations predate pricing counters.
+                    // The helper retains their recorded request count as unknown.
+                    coverage.push(crate::pricing::Pricing::from_usage(&attempt.usage)?);
+                    continue;
+                }
+            }
+            // A scalar cost provides no request count. Suppress the aggregate
+            // completeness claim rather than invent an unpriced request.
+            if cost > 0.0 {
+                return None;
+            }
+        }
+        crate::pricing::Pricing::aggregate(coverage.iter())
+    }
+
     pub fn history(&self) -> Value {
         let max_duration = self.items.iter().filter_map(|i| i.duration_ms).max();
         let duration = if self.items.iter().any(|i| i.operation != "convert") {
@@ -75,6 +115,9 @@ impl JobData {
         value["skipped"] = json!(self.items.iter().filter(|i| i.skipped).count());
         value["llm_enhanced"] = json!(self.items.iter().filter(|i| i.llm_enhanced).count());
         value["cost_usd"] = json!(cost);
+        if let Some(pricing) = self.output_pricing() {
+            value["pricing"] = json!(pricing);
+        }
         value["names_preview"] = json!(
             self.items
                 .iter()
@@ -299,6 +342,7 @@ async fn convert_one(
                 .map(|reason| format!("skipped ({reason})"));
             item.llm_enhanced = result.llm_output_path.is_some();
             item.cost_usd = Some(result.usage.cost_usd);
+            item.pricing = crate::pricing::Pricing::from_usage(&result.usage);
             item.diagnostics = AttemptDiagnostics::completed(Operation::Convert, result.usage);
             item.warnings = result.warnings;
             item.output = result.llm_output_path.or(result.output_path).and_then(|p| {
@@ -395,5 +439,151 @@ pub(super) async fn complete(state: &Arc<State>, job: Arc<Job>) {
     .await;
     if !matches!(finalized, Ok(Ok(()))) {
         state.persistence_failed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::*;
+    #[test]
+    fn history_prices_retained_outputs_separately_from_a_failed_latest_attempt() {
+        let known = json!({"m":{"requests":1,"input_tokens":4,"output_tokens":2,"cost_usd":0.5,"priced_requests":1,"unpriced_requests":0,"cost_status":"complete","pricing_snapshot":"catalog-v1"}});
+        let usage = markitai_core::ConversionUsage {
+            requests: 1,
+            input_tokens: 4,
+            output_tokens: 2,
+            cost_usd: 0.5,
+            by_model: known.as_object().unwrap().clone(),
+        };
+        let mut item = Item::new(
+            1,
+            "https://example.test/document".into(),
+            "url",
+            Some("base.md".into()),
+        );
+        item.status = "done".into();
+        item.output = Some("base.md".into());
+        item.cost_usd = Some(0.5);
+        item.pricing = crate::pricing::Pricing::from_usage(&usage);
+        let unknown = markitai_core::ConversionUsage { requests:1, by_model:json!({"unknown":{"requests":1,"input_tokens":0,"output_tokens":0,"cost_usd":0.0,"priced_requests":0,"unpriced_requests":1,"cost_status":"unknown"}}).as_object().unwrap().clone(), ..Default::default() };
+        item.diagnostics =
+            AttemptDiagnostics::failed(Operation::Enhance, "later provider failure", unknown);
+        let data = JobData {
+            id: "job".into(),
+            created_at: now(),
+            finished_at: Some(now()),
+            status: "done".into(),
+            persistence_error: None,
+            options: json!({}),
+            items: vec![item],
+            size: 0,
+            bases: HashMap::new(),
+            assets: HashMap::new(),
+            item_options: HashMap::new(),
+            transactions: Vec::new(),
+        };
+        let history = data.history();
+        assert_eq!(history["cost_usd"], 0.5);
+        assert_eq!(history["pricing"]["cost_status"], "complete");
+        assert_eq!(history["pricing"]["priced_requests"], 1);
+        let snapshot = data.snapshot();
+        assert_eq!(
+            snapshot["items"][0]["diagnostics"]["last_attempt"]["usage"]["by_model"]["unknown"]["cost_status"],
+            "unknown"
+        );
+        assert_eq!(snapshot["items"][0]["output"], "base.md");
+    }
+
+    fn fixture(items: Vec<Item>) -> JobData {
+        JobData {
+            id: "job".into(),
+            created_at: now(),
+            finished_at: Some(now()),
+            status: "done".into(),
+            persistence_error: None,
+            options: json!({}),
+            items,
+            size: 0,
+            bases: HashMap::new(),
+            assets: HashMap::new(),
+            item_options: HashMap::new(),
+            transactions: Vec::new(),
+        }
+    }
+    fn priced_item() -> Item {
+        let mut item = Item::new(1, "priced.md".into(), "file", None);
+        item.status = "done".into();
+        item.output = Some("priced.md".into());
+        item.cost_usd = Some(0.5);
+        item.pricing = crate::pricing::Pricing::from_usage(&markitai_core::ConversionUsage {
+            requests:1, cost_usd:0.5, by_model:json!({"known":{"requests":1,"cost_usd":0.5,"priced_requests":1,"unpriced_requests":0,"cost_status":"complete","pricing_snapshot":"catalog-v1"}}).as_object().unwrap().clone(), ..Default::default()
+        });
+        item
+    }
+    #[test]
+    fn history_mixed_legacy_observation_is_partial_without_inventing_request_counts() {
+        let mut old = Item::new(2, "legacy.md".into(), "file", None);
+        old.status = "done".into();
+        old.output = Some("legacy.md".into());
+        old.cost_usd = Some(0.25);
+        old.diagnostics = AttemptDiagnostics::completed(Operation::Convert, markitai_core::ConversionUsage {
+            requests:2, input_tokens:8, cost_usd:0.25,
+            by_model:json!({"legacy":{"requests":2,"input_tokens":8,"output_tokens":0,"cost_usd":0.25}}).as_object().unwrap().clone(), ..Default::default()
+        });
+        let history = fixture(vec![priced_item(), old]).history();
+        assert_eq!(history["cost_usd"], 0.75);
+        assert_eq!(history["pricing"]["cost_status"], "partial");
+        assert_eq!(history["pricing"]["priced_requests"], 1);
+        assert_eq!(history["pricing"]["unpriced_requests"], 2);
+        assert_eq!(
+            history["pricing"]["pricing_snapshots"],
+            json!(["catalog-v1"])
+        );
+        let mut missing_scalar = Item::new(3, "missing-scalar.md".into(), "file", None);
+        missing_scalar.status = "done".into();
+        missing_scalar.output = Some("missing-scalar.md".into());
+        missing_scalar.diagnostics = AttemptDiagnostics::completed(
+            Operation::Convert,
+            markitai_core::ConversionUsage {
+                requests: 2,
+                ..Default::default()
+            },
+        );
+        let history = fixture(vec![priced_item(), missing_scalar]).history();
+        assert_eq!(history["cost_usd"], 0.5);
+        assert!(history.get("pricing").is_none());
+    }
+    #[test]
+    fn history_unattributed_legacy_cost_suppresses_completeness_not_the_subtotal() {
+        let mut old = Item::new(2, "legacy.md".into(), "file", None);
+        old.status = "done".into();
+        old.output = Some("legacy.md".into());
+        old.cost_usd = Some(0.25);
+        assert!(old.diagnostics.is_none());
+        let history = fixture(vec![priced_item(), old.clone()]).history();
+        assert_eq!(history["cost_usd"], 0.75);
+        assert!(history.get("pricing").is_none());
+        old.diagnostics = AttemptDiagnostics::failed(
+            Operation::Enhance,
+            "later failure",
+            markitai_core::ConversionUsage {
+                requests: 7,
+                ..Default::default()
+            },
+        );
+        let history = fixture(vec![priced_item(), old]).history();
+        assert_eq!(history["cost_usd"], 0.75);
+        assert!(history.get("pricing").is_none());
+    }
+    #[test]
+    fn history_does_not_invent_unknown_work_for_an_unmetered_zero_cost_output() {
+        let mut no_model = Item::new(2, "plain.md".into(), "file", None);
+        no_model.status = "done".into();
+        no_model.output = Some("plain.md".into());
+        no_model.cost_usd = Some(0.0);
+        let history = fixture(vec![priced_item(), no_model]).history();
+        assert_eq!(history["pricing"]["cost_status"], "complete");
+        assert_eq!(history["pricing"]["priced_requests"], 1);
+        assert_eq!(history["pricing"]["unpriced_requests"], 0);
     }
 }

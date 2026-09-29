@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "created_at": "2026-09-29T07:22:48.539823+00:00",
-  "scope": "Exact upstream text collection and provenance only; not legal review, redistribution approval or selection of a license alternative. No standard license templates were substituted.",
+  "scope": "Exact-version upstream notices and reviewed same-commit, linked-authority, and historical supplemental evidence; no legal review or election of a license alternative.",
   "input_manifest": {
     "path": "input-manifest.json",
     "bytes": 26236,
@@ -26,9 +26,11 @@
   "summary": {
     "requested_packages": 15,
     "exact_commit_manifest_matches": 15,
-    "full_license_text_packages": 6,
-    "notice_only_packages": 9,
-    "overlay_files": 16
+    "full_license_text_packages": 12,
+    "notice_only_packages": 3,
+    "overlay_files": 25,
+    "supplemental_review_needed_packages": 3,
+    "source_archives": 1
   },
   "packages": [
     {
@@ -159,10 +161,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": true,
       "version_inherited_from_workspace": false,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
-      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "Apache-2.0"
+      ],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches. The exact-version notice links the reviewed publisher terms retained in round30; only that explicit license alternative is supplied.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/dispatch2/Cargo.toml",
@@ -202,6 +206,19 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
+        },
+        {
+          "path": "overlay/licenses/dispatch2-0.3.1/LICENSE-APACHE-2.0.txt",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "destination": "licenses/dispatch2-0.3.1/LICENSE-APACHE-2.0.txt",
+          "source_path": "round30/primary/Apache-2.0.txt",
+          "source_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+          "source_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source_kind": "linked_authority",
+          "license_option": "Apache-2.0",
+          "notice_asset": "overlay/licenses/dispatch2-0.3.1/LICENSE.md",
+          "content_kind": "full_license_text"
         }
       ]
     },
@@ -337,7 +354,7 @@
       "content_kind": "notice_only",
       "complete_license_options_present": [],
       "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "unresolved_full_text_reason": "Exact-version repository contains the current MIT declaration and Apple SDK notice but no full MIT file. The historical original MIT text is supplied with an upstream provenance chain as review-needed; full-text/copyright restoration review remains unresolved.",
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/objc2/Cargo.toml",
@@ -372,6 +389,40 @@
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
         }
+      ],
+      "supplemental": [
+        {
+          "path": "overlay/licenses/objc2-0.6.4/LICENSE-MIT-HISTORICAL.txt",
+          "bytes": 1066,
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "destination": "licenses/objc2-0.6.4/LICENSE-MIT-HISTORICAL.txt",
+          "source_path": "round30/primary/objc2-original-MIT.txt",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
+          "source_sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_kind": "historical_notice",
+          "content_kind": "supplemental_review_needed",
+          "review_needed": true,
+          "proofs": [
+            {
+              "path": "round30/primary/objc2-original-license-history.html",
+              "bytes": 242574,
+              "sha256": "cce3f980b9088bf6533102997510603f50a5fbdda6fd34c055f797777fc20e0b",
+              "source_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.txt"
+            },
+            {
+              "path": "round30/primary/objc2-license-clarification.patch",
+              "bytes": 11656,
+              "sha256": "b4ecc7d6db95a78e1cf777636049b4a9156783f326edf016a1461b24c84d1872",
+              "source_url": "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch"
+            },
+            {
+              "path": "round30/primary/objc2-original-license-commit.patch",
+              "bytes": 1543,
+              "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb",
+              "source_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch"
+            }
+          ]
+        }
       ]
     },
     {
@@ -385,10 +436,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": true,
       "version_inherited_from_workspace": true,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
-      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "Apache-2.0"
+      ],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches. The exact-version notice links the reviewed publisher terms retained in round30; only that explicit license alternative is supplied.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-foundation/Cargo.toml",
@@ -428,6 +481,19 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
+        },
+        {
+          "path": "overlay/licenses/objc2-core-foundation-0.3.2/LICENSE-APACHE-2.0.txt",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "destination": "licenses/objc2-core-foundation-0.3.2/LICENSE-APACHE-2.0.txt",
+          "source_path": "round30/primary/Apache-2.0.txt",
+          "source_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+          "source_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source_kind": "linked_authority",
+          "license_option": "Apache-2.0",
+          "notice_asset": "overlay/licenses/objc2-core-foundation-0.3.2/LICENSE.md",
+          "content_kind": "full_license_text"
         }
       ]
     },
@@ -442,10 +508,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": true,
       "version_inherited_from_workspace": true,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
-      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "Apache-2.0"
+      ],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches. The exact-version notice links the reviewed publisher terms retained in round30; only that explicit license alternative is supplied.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-graphics/Cargo.toml",
@@ -485,6 +553,19 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
+        },
+        {
+          "path": "overlay/licenses/objc2-core-graphics-0.3.2/LICENSE-APACHE-2.0.txt",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "destination": "licenses/objc2-core-graphics-0.3.2/LICENSE-APACHE-2.0.txt",
+          "source_path": "round30/primary/Apache-2.0.txt",
+          "source_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+          "source_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source_kind": "linked_authority",
+          "license_option": "Apache-2.0",
+          "notice_asset": "overlay/licenses/objc2-core-graphics-0.3.2/LICENSE.md",
+          "content_kind": "full_license_text"
         }
       ]
     },
@@ -502,7 +583,7 @@
       "content_kind": "notice_only",
       "complete_license_options_present": [],
       "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "unresolved_full_text_reason": "Exact-version repository contains the current MIT declaration and Apple SDK notice but no full MIT file. The historical original MIT text is supplied with an upstream provenance chain as review-needed; full-text/copyright restoration review remains unresolved.",
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/crates/objc2-encode/Cargo.toml",
@@ -537,6 +618,40 @@
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
         }
+      ],
+      "supplemental": [
+        {
+          "path": "overlay/licenses/objc2-encode-4.1.0/LICENSE-MIT-HISTORICAL.txt",
+          "bytes": 1066,
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "destination": "licenses/objc2-encode-4.1.0/LICENSE-MIT-HISTORICAL.txt",
+          "source_path": "round30/primary/objc2-original-MIT.txt",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
+          "source_sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_kind": "historical_notice",
+          "content_kind": "supplemental_review_needed",
+          "review_needed": true,
+          "proofs": [
+            {
+              "path": "round30/primary/objc2-encode-old-license-history.html",
+              "bytes": 242573,
+              "sha256": "0a1efed6cc84aac1d931fe09facf2883ae2fb13caa4e131ddc3bf61aca0d9e3a",
+              "source_url": "https://github.com/madsmtm/objc2/commits/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt"
+            },
+            {
+              "path": "round30/primary/objc2-license-clarification.patch",
+              "bytes": 11656,
+              "sha256": "b4ecc7d6db95a78e1cf777636049b4a9156783f326edf016a1461b24c84d1872",
+              "source_url": "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch"
+            },
+            {
+              "path": "round30/primary/objc2-original-license-commit.patch",
+              "bytes": 1543,
+              "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb",
+              "source_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch"
+            }
+          ]
+        }
       ]
     },
     {
@@ -553,7 +668,7 @@
       "content_kind": "notice_only",
       "complete_license_options_present": [],
       "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "unresolved_full_text_reason": "Exact-version repository contains the current MIT declaration and Apple SDK notice but no full MIT file. The historical original MIT text is supplied with an upstream provenance chain as review-needed; full-text/copyright restoration review remains unresolved.",
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-foundation/Cargo.toml",
@@ -594,6 +709,40 @@
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
         }
+      ],
+      "supplemental": [
+        {
+          "path": "overlay/licenses/objc2-foundation-0.3.2/LICENSE-MIT-HISTORICAL.txt",
+          "bytes": 1066,
+          "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "destination": "licenses/objc2-foundation-0.3.2/LICENSE-MIT-HISTORICAL.txt",
+          "source_path": "round30/primary/objc2-original-MIT.txt",
+          "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt",
+          "source_sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+          "source_kind": "historical_notice",
+          "content_kind": "supplemental_review_needed",
+          "review_needed": true,
+          "proofs": [
+            {
+              "path": "round30/primary/foundation-original-license-history.html",
+              "bytes": 242573,
+              "sha256": "ab00bc3db74112a44b17ac776fab3a16bc6122ffc8ccf2708a80e5d96206b4de",
+              "source_url": "https://github.com/madsmtm/objc2/commits/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.txt"
+            },
+            {
+              "path": "round30/primary/objc2-license-clarification.patch",
+              "bytes": 11656,
+              "sha256": "b4ecc7d6db95a78e1cf777636049b4a9156783f326edf016a1461b24c84d1872",
+              "source_url": "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch"
+            },
+            {
+              "path": "round30/primary/objc2-original-license-commit.patch",
+              "bytes": 1543,
+              "sha256": "13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb",
+              "source_url": "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch"
+            }
+          ]
+        }
       ]
     },
     {
@@ -607,10 +756,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": true,
       "version_inherited_from_workspace": true,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
-      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "Apache-2.0"
+      ],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches. The exact-version notice links the reviewed publisher terms retained in round30; only that explicit license alternative is supplied.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-image-io/Cargo.toml",
@@ -650,6 +801,19 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
+        },
+        {
+          "path": "overlay/licenses/objc2-image-io-0.3.2/LICENSE-APACHE-2.0.txt",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "destination": "licenses/objc2-image-io-0.3.2/LICENSE-APACHE-2.0.txt",
+          "source_path": "round30/primary/Apache-2.0.txt",
+          "source_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+          "source_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source_kind": "linked_authority",
+          "license_option": "Apache-2.0",
+          "notice_asset": "overlay/licenses/objc2-image-io-0.3.2/LICENSE.md",
+          "content_kind": "full_license_text"
         }
       ]
     },
@@ -664,10 +828,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": true,
       "version_inherited_from_workspace": true,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
-      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches.",
-      "unresolved_full_text_reason": "Exact-commit LICENSE.md gives applicable license alternatives and Apple SDK notice but contains no complete MIT/Apache/Zlib license grant text. No full license file is present in the inspected root/package directories.",
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "Apache-2.0"
+      ],
+      "applicability": "Exact-commit root LICENSE.md expressly licenses objc2, objc2-foundation and objc2-encode under MIT and all other crates under Zlib OR Apache-2.0 OR MIT; exact package/workspace declaration matches. The exact-version notice links the reviewed publisher terms retained in round30; only that explicit license alternative is supplied.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-vision/Cargo.toml",
@@ -707,6 +873,19 @@
           "source_url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
           "source_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
           "content_kind": "notice_only"
+        },
+        {
+          "path": "overlay/licenses/objc2-vision-0.3.2/LICENSE-APACHE-2.0.txt",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "destination": "licenses/objc2-vision-0.3.2/LICENSE-APACHE-2.0.txt",
+          "source_path": "round30/primary/Apache-2.0.txt",
+          "source_url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+          "source_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "source_kind": "linked_authority",
+          "license_option": "Apache-2.0",
+          "notice_asset": "overlay/licenses/objc2-vision-0.3.2/LICENSE.md",
+          "content_kind": "full_license_text"
         }
       ]
     },
@@ -827,10 +1006,12 @@
       "package_manifest_matches_published_original": true,
       "license_inherited_from_workspace": false,
       "version_inherited_from_workspace": false,
-      "content_kind": "notice_only",
-      "complete_license_options_present": [],
-      "applicability": "Exact package manifest declares MPL-2.0; retrieved selectors/lib.rs starts with the Mozilla Public License 2.0 notice.",
-      "unresolved_full_text_reason": "Exact-commit selectors/lib.rs contains an MPL-2.0 notice with an external license URL, not the complete MPL-2.0 license text. Inspected repository root and selectors directory have no independent license file.",
+      "content_kind": "full_license_text",
+      "complete_license_options_present": [
+        "MPL-2.0"
+      ],
+      "applicability": "Exact package manifest declares MPL-2.0; retrieved selectors/lib.rs starts with the Mozilla Public License 2.0 notice. The exact-version notice links the reviewed publisher terms retained in round30; only that explicit license alternative is supplied.",
+      "unresolved_full_text_reason": null,
       "evidence": [
         {
           "path": "upstream/servo/stylo/572ecba2d1600e7c3d490586692a209faf703baa/selectors/Cargo.toml",
@@ -868,6 +1049,19 @@
             "start_inclusive": 0,
             "end_exclusive": 206
           }
+        },
+        {
+          "path": "overlay/licenses/selectors-0.38.0/LICENSE-MPL-2.0.txt",
+          "bytes": 16726,
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+          "destination": "licenses/selectors-0.38.0/LICENSE-MPL-2.0.txt",
+          "source_path": "round30/primary/MPL-2.0.txt",
+          "source_url": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt",
+          "source_sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+          "source_kind": "linked_authority",
+          "license_option": "MPL-2.0",
+          "notice_asset": "overlay/licenses/selectors-0.38.0/NOTICE-MPL-2.0.txt",
+          "content_kind": "full_license_text"
         }
       ]
     }
@@ -882,5 +1076,22 @@
     "registry+https://github.com/rust-lang/crates.io-index#objc2-image-io@0.3.2",
     "registry+https://github.com/rust-lang/crates.io-index#objc2-vision@0.3.2",
     "registry+https://github.com/rust-lang/crates.io-index#selectors@0.38.0"
-  ]
+  ],
+  "source_archives": [
+    {
+      "path": "source-archives/selectors-0.38.0.crate",
+      "bytes": 69601,
+      "sha256": "8adfa1c298912827b8a28b223b3b874357397ae706e6190acd9bf28cee99114d",
+      "package": "selectors",
+      "version": "0.38.0",
+      "commit": "572ecba2d1600e7c3d490586692a209faf703baa",
+      "source_url": "https://static.crates.io/crates/selectors/selectors-0.38.0.crate",
+      "scope": "Original covered source, unmodified; SHA equals the pinned Cargo.lock checksum and all 22 files matched the local published registry source."
+    }
+  ],
+  "round30_provenance": {
+    "path": "round30/provenance.json",
+    "bytes": 7235,
+    "sha256": "0ac2eb222598babd45c7558d9bc4c56bd07d18426f696acc18465cc4f5c69924"
+  }
 }

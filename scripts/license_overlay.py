@@ -4,10 +4,13 @@ A full text and a license notice are deliberately different states. Hash checks
 establish byte provenance, not the sufficiency of a license for redistribution.
 """
 import hashlib
+import io
 import json
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import tarfile
+import tempfile
 
 MAX_FILE = 16 * 1024 * 1024
 MAX_TOTAL = 32 * 1024 * 1024
@@ -65,6 +68,134 @@ def _repo(value):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise RuntimeError("Invalid upstream evidence repository")
     return repo
+
+
+
+# Only these reviewed package identities may add externally hosted license terms.
+_AUTHORITY_TERMS = {
+    "Apache-2.0": {
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "link": b"[Apache-2.0]: https://www.apache.org/licenses/LICENSE-2.0",
+        "repository": "madsmtm/objc2",
+        "packages": {
+            ("dispatch2", "0.3.1", "8852b424193ca41602281b3d7540d7c8ed51e49a"),
+            ("objc2-core-foundation", "0.3.2", "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"),
+            ("objc2-core-graphics", "0.3.2", "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"),
+            ("objc2-image-io", "0.3.2", "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"),
+            ("objc2-vision", "0.3.2", "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"),
+        },
+    },
+    "MPL-2.0": {
+        "url": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt",
+        "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+        "link": b"https://mozilla.org/MPL/2.0/",
+        "repository": "servo/stylo",
+        "packages": {("selectors", "0.38.0", "572ecba2d1600e7c3d490586692a209faf703baa")},
+    },
+}
+_MIT_ORIGINAL_URL = "https://raw.githubusercontent.com/madsmtm/objc2/9961247c1a82027d6edbe6c516011b1363b9354c/LICENSE.txt"
+_MIT_ORIGINAL_SHA = "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5"
+_MIT_TARGETS = {
+    ("objc2", "0.6.4"): "8852b424193ca41602281b3d7540d7c8ed51e49a",
+    ("objc2-encode", "4.1.0"): "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+    ("objc2-foundation", "0.3.2"): "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+}
+_MIT_PROOFS = {'https://github.com/madsmtm/objc2/commits/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.txt': '0a1efed6cc84aac1d931fe09facf2883ae2fb13caa4e131ddc3bf61aca0d9e3a', 'https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch': 'b4ecc7d6db95a78e1cf777636049b4a9156783f326edf016a1461b24c84d1872', 'https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch': '13127f39976ceecdadb86870d2448867fba8601ad21a376724f242fbd67e86fb', 'https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.txt': 'cce3f980b9088bf6533102997510603f50a5fbdda6fd34c055f797777fc20e0b', 'https://github.com/madsmtm/objc2/commits/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.txt': 'ab00bc3db74112a44b17ac776fab3a16bc6122ffc8ccf2708a80e5d96206b4de'}
+_SELECTORS_ARCHIVE_SHA = "8adfa1c298912827b8a28b223b3b874357397ae706e6190acd9bf28cee99114d"
+
+
+def _same_commit_source(asset, data, root, repo, commit):
+    source_path = str(_relative(asset["source_path"]))
+    if not source_path.startswith(root) or source_path not in data:
+        raise RuntimeError("License source is outside the attributed commit")
+    expected_url = "https://raw.githubusercontent.com/" + repo + "/" + commit + "/" + source_path[len(root):]
+    full = data[source_path]
+    if asset["source_url"] != expected_url or hashlib.sha256(full).hexdigest() != asset["source_sha256"]:
+        raise RuntimeError("License source URL or hash differs")
+    bounds = asset.get("source_byte_range")
+    if bounds is not None:
+        start, end = bounds.get("start_inclusive"), bounds.get("end_exclusive")
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(full):
+            raise RuntimeError("Invalid license notice byte range")
+        full = full[start:end]
+    return full
+
+
+def _linked_terms(asset, entry, data, recorded, root, repo, commit):
+    option = asset.get("license_option")
+    authority = _AUTHORITY_TERMS.get(option)
+    identity = (entry["name"], entry["version"], commit)
+    if (authority is None or repo != authority["repository"] or identity not in authority["packages"]
+            or option not in entry["declared_license"].split(" OR ")
+            or entry["complete_license_options_present"] != [option]
+            or asset["content_kind"] != "full_license_text"):
+        raise RuntimeError("Unreviewed linked license authority or package")
+    notices = [row for row in entry["assets"] if row["path"] == asset.get("notice_asset")]
+    if (len(notices) != 1 or notices[0].get("source_kind", "same_commit") != "same_commit"
+            or notices[0]["content_kind"] != "notice_only"):
+        raise RuntimeError("Linked license requires its exact-version notice")
+    notice = recorded(notices[0])
+    if notice != _same_commit_source(notices[0], data, root, repo, commit):
+        raise RuntimeError("Linked license notice differs from upstream source bytes")
+    if authority["link"] not in notice:
+        raise RuntimeError("Exact-version notice does not link this license authority")
+    source_path = str(_relative(asset["source_path"]))
+    raw = data.get(source_path)
+    if (asset["source_url"] != authority["url"] or asset["source_sha256"] != authority["sha256"]
+            or raw is None or hashlib.sha256(raw).hexdigest() != authority["sha256"]):
+        raise RuntimeError("Linked authority URL or reviewed text hash differs")
+    return raw
+
+
+def _historical_supplement(asset, entry, data, recorded, repo, commit):
+    if (repo != "madsmtm/objc2" or _MIT_TARGETS.get((entry["name"], entry["version"])) != commit
+            or entry["declared_license"] != "MIT" or entry["content_kind"] != "notice_only"
+            or entry["complete_license_options_present"] != []
+            or asset.get("source_kind") != "historical_notice" or asset.get("review_needed") is not True
+            or asset.get("content_kind") != "supplemental_review_needed"):
+        raise RuntimeError("Historical license supplement must remain review-needed")
+    source_path = str(_relative(asset["source_path"]))
+    raw = data.get(source_path)
+    if (asset["source_url"] != _MIT_ORIGINAL_URL or asset["source_sha256"] != _MIT_ORIGINAL_SHA
+            or raw is None or hashlib.sha256(raw).hexdigest() != _MIT_ORIGINAL_SHA):
+        raise RuntimeError("Historical original URL or reviewed text hash differs")
+    expected = {
+        "https://github.com/madsmtm/objc2/commits/" + commit + "/LICENSE.txt",
+        "https://github.com/madsmtm/objc2/commit/cfb199226661ec6e4939fcd7cd7531b3c5453076.patch",
+        "https://github.com/madsmtm/objc2/commit/9961247c1a82027d6edbe6c516011b1363b9354c.patch",
+    }
+    proofs = asset.get("proofs", [])
+    if type(proofs) is not list or len(proofs) != 3 or {p.get("source_url") for p in proofs} != expected:
+        raise RuntimeError("Historical supplement requires its target-anchored provenance")
+    for proof in proofs:
+        body = recorded(proof)
+        if hashlib.sha256(body).hexdigest() != _MIT_PROOFS[proof["source_url"]]:
+            raise RuntimeError("Historical provenance differs from reviewed upstream bytes")
+    return raw
+
+
+def _source_archives(manifest, data, recorded):
+    records = manifest.get("source_archives", [])
+    if type(records) is not list or len(records) > 1:
+        raise RuntimeError("Unreviewed source archive inventory")
+    result = []
+    for row in records:
+        raw = recorded(row)
+        if (row.get("package") != "selectors" or row.get("version") != "0.38.0"
+                or row.get("commit") != "572ecba2d1600e7c3d490586692a209faf703baa"
+                or row.get("source_url") != "https://static.crates.io/crates/selectors/selectors-0.38.0.crate"
+                or hashlib.sha256(raw).hexdigest() != _SELECTORS_ARCHIVE_SHA):
+            raise RuntimeError("Source archive is not the reviewed exact package")
+        # Fixed compressed digest bounds all archive members. Never extract paths.
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+            vcs = _json(archive.extractfile("selectors-0.38.0/.cargo_vcs_info.json").read())
+            original = archive.extractfile("selectors-0.38.0/Cargo.toml.orig").read()
+        if (vcs.get("git", {}).get("sha1") != row["commit"] or vcs.get("path_in_vcs") != "selectors"
+                or original != data["local-evidence/selectors-0.38.0/Cargo.toml.orig"]):
+            raise RuntimeError("Source archive version differs from license evidence")
+        result.append(row)
+    return result
 
 
 def stage_overlay(source, destination, packages):
@@ -141,32 +272,45 @@ def stage_overlay(source, destination, packages):
         if (kind == "full_license_text") != bool(options):
             raise RuntimeError("License notice cannot claim a complete license option")
         texts = []
+        has_full_text = False
         for asset in entry["assets"]:
             raw = recorded(asset)
-            if asset["path"] in all_assets or asset["content_kind"] != kind:
+            asset_kind = asset.get("content_kind")
+            if asset["path"] in all_assets or asset_kind not in {"full_license_text", "notice_only"}:
                 raise RuntimeError("Duplicate or inconsistent upstream license asset")
             all_assets.add(asset["path"])
-            source_path = str(_relative(asset["source_path"]))
-            if not source_path.startswith(root) or source_path not in data:
-                raise RuntimeError("License source is outside the attributed commit")
-            expected_url = "https://raw.githubusercontent.com/" + repo + "/" + commit + "/" + source_path[len(root):]
-            full = data[source_path]
-            if asset["source_url"] != expected_url or hashlib.sha256(full).hexdigest() != asset["source_sha256"]:
-                raise RuntimeError("License source URL or hash differs")
-            bounds = asset.get("source_byte_range")
-            if bounds is not None:
-                start, end = bounds.get("start_inclusive"), bounds.get("end_exclusive")
-                if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(full):
-                    raise RuntimeError("Invalid license notice byte range")
-                full = full[start:end]
+            source_kind = asset.get("source_kind", "same_commit")
+            if source_kind == "same_commit":
+                full = _same_commit_source(asset, data, root, repo, commit)
+            elif source_kind == "linked_authority":
+                full = _linked_terms(asset, entry, data, recorded, root, repo, commit)
+            else:
+                raise RuntimeError("Unreviewed license source kind")
             if full != raw:
                 raise RuntimeError("License asset differs from its upstream source bytes")
+            has_full_text |= asset_kind == "full_license_text"
             texts.append({"source": str(source / asset["path"]),
                           "path": (destination / asset["path"]).relative_to(destination.parent.parent).as_posix(),
                           **identities[asset["path"]], "origin": "verified_upstream_overlay",
-                          "source_url": expected_url, "content_kind": kind})
-        if not texts:
-            raise RuntimeError("License overlay package has no text")
+                          "source_url": asset["source_url"], "source_kind": source_kind,
+                          "content_kind": asset_kind})
+        if not texts or has_full_text != (kind == "full_license_text"):
+            raise RuntimeError("License classification differs from complete source texts")
+        supplements = entry.get("supplemental", [])
+        if type(supplements) is not list or len(supplements) > 1:
+            raise RuntimeError("Unreviewed historical supplement inventory")
+        for asset in supplements:
+            raw = recorded(asset)
+            if asset["path"] in all_assets:
+                raise RuntimeError("Duplicate historical license supplement")
+            all_assets.add(asset["path"])
+            if _historical_supplement(asset, entry, data, recorded, repo, commit) != raw:
+                raise RuntimeError("Historical supplement differs from original source bytes")
+            texts.append({"source": str(source / asset["path"]),
+                          "path": (destination / asset["path"]).relative_to(destination.parent.parent).as_posix(),
+                          **identities[asset["path"]], "origin": "verified_historical_notice_supplement",
+                          "source_url": asset["source_url"], "content_kind": "supplemental_review_needed",
+                          "review_needed": True})
         package = available.get(key)
         if package is None:
             continue
@@ -178,7 +322,9 @@ def stage_overlay(source, destination, packages):
                 raise RuntimeError("Current package source differs from exact-commit evidence")
         matched[key] = {"texts": texts, "complete_text": kind == "full_license_text",
                         "content_kind": kind, "commit": commit,
-                        "full_text_gap": entry["unresolved_full_text_reason"]}
+                        "full_text_gap": entry["unresolved_full_text_reason"],
+                        "supplemental_review_needed": bool(supplements)}
+    source_archives = _source_archives(manifest, data, recorded)
     # All provenance and classification checks precede copying. The caller's
     # clean-source checks also bind the inventory itself to the build revision.
     data["inventory.json"] = raw_inventory
@@ -192,5 +338,25 @@ def stage_overlay(source, destination, packages):
         "matched_packages": len(matched),
         "complete_text_packages": sum(value["complete_text"] for value in matched.values()),
         "notice_only_packages": sum(not value["complete_text"] for value in matched.values()),
+        "supplemental_review_needed_packages": sum(value["supplemental_review_needed"] for value in matched.values()),
+        "source_archives": [{**row, "path": (destination / row["path"]).relative_to(destination.parent.parent).as_posix()} for row in source_archives],
         "archived_evidence_files": len(data),
         "scope": "Reviewed local exact-version texts and provenance; notices alone do not resolve full-license-text gaps; no legal review"}}
+
+
+def upstream_files(root):
+    """Return validated offline evidence for CLI, wheel and npm archive payloads.
+
+    The source snapshot supplies version provenance here. Static-Go packaging
+    additionally passes the resolved Cargo packages to stage_overlay.
+    """
+    source = Path(root) / "licenses/upstream"
+    if not source.exists():
+        raise RuntimeError("Required upstream attribution directory is unavailable")
+    with tempfile.TemporaryDirectory(prefix="markitai-upstream-notices-") as temporary:
+        destination = Path(temporary) / "package/licenses/upstream"
+        result = stage_overlay(source, destination, [])
+        if result["record"]["status"] != "verified":
+            raise RuntimeError("Upstream attribution did not validate")
+        return {"licenses/upstream/" + path.relative_to(destination).as_posix(): path.read_bytes()
+                for path in sorted(destination.rglob("*")) if path.is_file()}

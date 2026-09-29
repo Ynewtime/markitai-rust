@@ -245,6 +245,20 @@ pub(crate) fn verify_owned(leases: &MemberLeases, owner: &Owner) -> Result<()> {
     verify_members(&paths, receipt.as_ref())
 }
 
+/// An identity digest of a validated receipt, not authority derived from a hash.
+pub(crate) fn evidence_digest(leases: &MemberLeases, owner: &Owner) -> Result<String> {
+    validate_owner(owner, leases.parent())?;
+    let paths = member_paths(leases)?;
+    let path = receipt_path(leases, owner, &paths)?;
+    let receipt = read_receipt(leases, &path)?
+        .ok_or_else(|| mismatch("publication has no native receipt"))?;
+    validate_receipt(&receipt, leases.parent(), owner, &paths)?;
+    verify_members(&paths, Some(&receipt))?;
+    let bytes = serde_json::to_vec(&receipt)
+        .map_err(|_| mismatch("publication receipt cannot be encoded"))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 /// Persist a bare-URL adoption before the checkpoint switches to its named key.
 /// Keeping the old receipt also preserves recovery if checkpoint replacement fails.
 pub(crate) fn adopt_owner(leases: &MemberLeases, previous: &Owner, next: &Owner) -> Result<()> {

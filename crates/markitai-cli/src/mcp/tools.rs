@@ -271,6 +271,9 @@ fn project(output: ConversionOutput, directory: &Path) -> Value {
         "assets":output.assets,"screenshots":output.screenshots,"cost_usd":output.usage.cost_usd,
         "skip_reason":output.skip_reason,"duration_s":(output.duration * 100.0).round_ties_even() / 100.0,
         "warnings":output.warnings});
+    if let Some(pricing) = crate::pricing::Pricing::from_usage(&output.usage) {
+        value["pricing"] = json!(pricing);
+    }
     if let Some(diagnostics) = AttemptDiagnostics::completed(Operation::Convert, output.usage) {
         value["diagnostics"] = json!(diagnostics);
     }
@@ -294,10 +297,23 @@ fn diagnostics_schema() -> Value {
         }),
         &["cost_usd", "requests", "input_tokens", "output_tokens"],
     );
+    let mut model = counters.clone();
+    model["properties"].as_object_mut().unwrap().extend(
+        json!({
+            "priced_requests":{"type":"integer","minimum":0},
+            "unpriced_requests":{"type":"integer","minimum":0},
+            "cost_status":{"type":"string","enum":["complete","partial","unknown"]},
+            "pricing_snapshot":{"type":"string"},
+            "pricing_snapshots":{"type":"array","items":{"type":"string"}}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
     let mut usage = counters.clone();
     usage["properties"].as_object_mut().unwrap().insert(
         "by_model".into(),
-        json!({"type":"object","additionalProperties":counters}),
+        json!({"type":"object","additionalProperties":model}),
     );
     usage["required"]
         .as_array_mut()
@@ -335,7 +351,7 @@ pub(super) fn definitions() -> Vec<Tool> {
             "assets":{"type":"array","items":{"type":"string"}},"screenshots":{"type":"array","items":{"type":"string"}},
             "cost_usd":{"type":"number"},"skip_reason":{"anyOf":[{"type":"string"},{"type":"null"}]},
             "duration_s":{"type":"number"},"warnings":{"type":"array","items":{"type":"string"}},
-            "diagnostics":diagnostics_schema()
+            "diagnostics":diagnostics_schema(),"pricing":crate::pricing::schema()
         }),
         &[
             "source",
@@ -356,7 +372,7 @@ pub(super) fn definitions() -> Vec<Tool> {
         &["job_id", "status", "total", "output_dir"],
     );
     let status_output = object(
-        json!({"job_id":{"type":"string"},"status":{"type":"string"},"total":{"type":"integer"},"done":{"type":"integer"},"failed":{"type":"integer"},"output_dir":{"type":"string"},"results":{"type":"array","items":{"type":"object","properties":{"diagnostics":diagnostics_schema()}}}}),
+        json!({"job_id":{"type":"string"},"status":{"type":"string"},"total":{"type":"integer"},"done":{"type":"integer"},"failed":{"type":"integer"},"output_dir":{"type":"string"},"pricing":crate::pricing::schema(),"cost_usd":{"type":"number"},"results":{"type":"array","items":{"type":"object","properties":{"diagnostics":diagnostics_schema(),"pricing":crate::pricing::schema()}}}}),
         &[
             "job_id",
             "status",
@@ -432,4 +448,42 @@ pub(super) fn definitions() -> Vec<Tool> {
     tools.push(Tool::new("job_status", "Return batch progress and finished results in input order. done counts successes and failures; failed counts errors. Unknown and forgotten jobs have distinct errors. Files remain on disk after job eviction or restart.", object(json!({"job_id":{"type":"string"}}), &["job_id"]))
         .with_raw_output_schema(Arc::new(with_error_schema(status_output))));
     tools
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::*;
+    #[test]
+    fn conversion_projection_distinguishes_known_zero_unknown_and_no_request() {
+        for (model, expected) in [
+            (
+                json!({"requests":1,"input_tokens":0,"output_tokens":0,"cost_usd":0.0,"priced_requests":1,"unpriced_requests":0,"cost_status":"complete","pricing_snapshot":"catalog-v1"}),
+                "complete",
+            ),
+            (
+                json!({"requests":1,"input_tokens":0,"output_tokens":0,"cost_usd":0.0}),
+                "unknown",
+            ),
+        ] {
+            let usage = markitai_core::ConversionUsage {
+                requests: 1,
+                by_model: json!({"m":model}).as_object().unwrap().clone(),
+                ..Default::default()
+            };
+            let value = project(
+                {
+                    let mut result = ConversionOutput::default();
+                    result.usage = usage;
+                    result
+                },
+                Path::new("/isolated/output"),
+            );
+            assert_eq!(value["cost_usd"], 0.0);
+            assert_eq!(value["pricing"]["cost_status"], expected);
+            assert_eq!(value["diagnostics"]["last_attempt"]["usage"]["requests"], 1);
+        }
+        let empty = project(ConversionOutput::default(), Path::new("/isolated/output"));
+        assert!(empty.get("pricing").is_none());
+        assert!(empty.get("diagnostics").is_none());
+    }
 }

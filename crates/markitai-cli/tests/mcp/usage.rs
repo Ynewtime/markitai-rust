@@ -226,7 +226,11 @@ fn both_protocols_keep_paid_failures_known_zero_success_and_unknown_distinct() {
             attempt(value, "error", input, output);
         }
         let result = client.success("convert_document", json!({"path":good}));
-        assert_eq!(result.as_object().unwrap().len(), 12);
+        assert_eq!(result.as_object().unwrap().len(), 13);
+        assert_eq!(result["pricing"]["cost_status"], "unknown");
+        assert_eq!(result["pricing"]["priced_requests"], 0);
+        assert_eq!(result["pricing"]["unpriced_requests"], 1);
+        assert_eq!(result["pricing"]["pricing_snapshots"], json!([]));
         attempt(&result, "done", 7, 5);
         let early = client.tool("convert_document", json!({"path":"relative.md"}));
         assert_eq!(early["isError"], true);

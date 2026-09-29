@@ -34,8 +34,10 @@ retries may revisit the pool.
 attempts in the same `LlmRuntime`. Equal counts use configured candidate order;
 positive weights do not change the comparison, while weight zero still disables
 a deployment. Selection and reservation happen atomically after acquiring the
-runtime's shared request capacity and passing cancellation and document-budget
-checks. The reservation lasts through response reading and decoding, and is
+runtime's shared request capacity and passing cancellation. The selected
+identity then passes document request/dollar admission before any network call;
+a refused admission releases its reservation without a routing observation.
+The reservation lasts through response reading and decoding, and is
 released on success, error or unwind. Backoff, queueing, cached answers and
 coalesced waiters do not reserve a deployment.
 
@@ -254,18 +256,32 @@ remain independent; unrelated runtimes and different processes do not merge.
 
 The reference also scopes its shared runtime to a batch or service job; its
 independent processors may own separate semaphores. This implementation does
-not add provider-specific concurrency, rate-per-minute accounting, adaptive
-routing metrics or a budget shared across unrelated documents.
+not add provider-specific concurrency, rate-per-minute quotas or a budget shared
+across unrelated documents. The native adaptive metrics described above remain
+scoped to the caller-owned runtime.
 
-Public usage retains the existing four fields per model: `requests`,
-`input_tokens`, `output_tokens` and `cost_usd`. `usage.requests` counts parsed
-successful HTTP responses and HTTP error responses containing structured usage,
-including paid responses preceding successful retries or image-analysis fallback.
-This differs intentionally from the attempt budget. Actual
-response model identifiers are used when present. Anthropic cache-read and
-cache-creation input tokens are included in input totals without adding public
-fields. Costs remain zero because the native build has no pricing catalog.
-Configured cost limits therefore remain unsupported.
+Public usage retains `requests`, `input_tokens`, `output_tokens` and `cost_usd`
+per model. `usage.requests` counts parsed successful HTTP responses and HTTP
+error responses containing structured usage, including paid invalid answers and
+responses preceding retries or image-analysis fallback. It differs from the
+attempt budget. Response model identifiers are used when present. Anthropic
+cache-read and cache-creation input tokens remain part of public input totals.
+
+The [bounded offline pricing catalog](pricing.md) estimates reviewed first-party
+token charges. Numeric `cost_usd` is the known priced subtotal; additive
+`priced_requests`, `unpriced_requests`, `cost_status` and snapshot provenance
+make incomplete coverage explicit. Unknown is not free. Standard and Batch
+classes apply per observed attempt before semantic validation. No live pricing
+lookup or new custom-rate configuration is introduced.
+
+`llm.max_cost_per_document_usd` is a shared conversion continuation limit. Zero
+disables it. Positive limits require a verified selected tariff before network
+admission. Exact fixed-point observed spend greater than the cap, or incomplete
+pricing after an observed response, stops subsequent admissions. The crossing
+response and already admitted concurrent work are retained. The cap does not
+reserve speculative dollars or promise a hard invoice ceiling. See the pricing
+page for conservative float-to-fixed conversion, supported identities and
+Provider Batch limitations.
 
 Rust's additive `convert_detailed` and detailed context/publication entrypoints
 retain the original error plus its document's already recorded usage. The old
@@ -274,8 +290,9 @@ Node/Python/Go errors now carry optional terminal usage, including late publicat
 failures. Pre-model errors carry no JSON usage; a recorded zero-token response is
 still distinguishable. Embedded image analysis may retain the established successful
 fallback with warnings; standalone image terminal errors retain their usage too.
-CLI/report, REST and MCP propagation are separate work. This addition does not
-implement pricing or recover usage from native panics.
+CLI/report, persisted history, REST and MCP retain the shared attempt diagnostics
+contract. Pricing completeness accompanies observed rows; native panics still do
+not recover unobserved provider usage.
 
 ## Prompt selection
 

@@ -118,6 +118,12 @@ pub(super) struct Item {
     pub duration_ms: Option<u64>,
     pub finished_at: Option<String>,
     pub cost_usd: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::pricing::deserialize_optional"
+    )]
+    pub pricing: Option<crate::pricing::Pricing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<crate::diagnostics::AttemptDiagnostics>,
     #[serde(default)]
@@ -152,6 +158,7 @@ impl Item {
             duration_ms: None,
             finished_at: None,
             cost_usd: None,
+            pricing: None,
             diagnostics: None,
             llm_enhanced: false,
             operation: "convert".into(),
@@ -217,5 +224,35 @@ impl IntoResponse for ApiError {
                 .insert("www-authenticate", "Bearer".parse().unwrap());
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::*;
+    #[test]
+    fn historical_items_keep_their_output_when_optional_pricing_is_missing_or_invalid() {
+        let mut item = Item::new(1, "legacy.md".into(), "file", Some("legacy.md".into()));
+        item.status = "done".into();
+        item.output = Some("legacy.md".into());
+        item.cost_usd = Some(0.75);
+        let original = serde_json::to_value(item).unwrap();
+        assert!(original.get("pricing").is_none());
+        for bad in [
+            json!(null),
+            json!({"cost_status":"complete"}),
+            json!({"priced_requests":0,"unpriced_requests":2,"cost_status":"complete","pricing_snapshots":[]}),
+        ] {
+            let mut value = original.clone();
+            value["pricing"] = bad;
+            let restored: Item = serde_json::from_value(value).unwrap();
+            assert_eq!(restored.output.as_deref(), Some("legacy.md"));
+            assert_eq!(restored.cost_usd, Some(0.75));
+            assert!(restored.pricing.is_none());
+        }
+        let mut value = original;
+        value["pricing"] = json!({"priced_requests":1,"unpriced_requests":2,"cost_status":"partial","pricing_snapshots":["catalog-v1"]});
+        let restored: Item = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), value);
     }
 }

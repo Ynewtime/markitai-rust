@@ -116,7 +116,10 @@ fn help_explains_output_privacy_cache_and_unsupported_workflows() {
             "implies --screenshot",
             "quiet by default",
             "log.dir",
-            "not implemented in this Rust development build",
+            "OpenAI Batch API",
+            "original -o directory",
+            "does not cancel it",
+            "cloudflare remains explicitly unsupported",
         ] {
             assert!(
                 normalized.contains(phrase),
@@ -138,4 +141,28 @@ fn help_explains_output_privacy_cache_and_unsupported_workflows() {
         }
     }
     assert!(!root.path().join("home").exists());
+}
+
+#[test]
+fn unrepresentable_batch_wait_fails_before_output_or_provider_admission() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("input")).unwrap();
+    std::fs::write(root.path().join("input/document.txt"), "Authored source").unwrap();
+    let output = invoke(
+        root.path(),
+        &[
+            "input",
+            "-o",
+            "out",
+            "--llm",
+            "--llm-batch",
+            "--json",
+            "--llm-batch-timeout",
+            "18446744073709551615",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("supported clock range"));
+    assert!(!root.path().join("out").exists());
 }

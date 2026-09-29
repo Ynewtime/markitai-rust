@@ -1,0 +1,54 @@
+[
+  {
+    "requested_url": "https://www.mozilla.org/en-US/MPL/",
+    "started_at": "2026-09-29T08:53:18.442058+00:00",
+    "status": 200,
+    "final_url": "https://www.mozilla.org/en-US/MPL/",
+    "content_type": "text/html; charset=utf-8",
+    "etag": "\"8f373593da59d5a7ec90b5e6b91e8320\"",
+    "last_modified": null,
+    "path": "primary/mozilla-overview.html",
+    "bytes": 50250,
+    "sha256": "7c0c0dab2346d2282f9cbccd418891e3ba53c654c44628c0783cac751ae3f8b9",
+    "finished_at": "2026-09-29T08:53:19.228171+00:00"
+  },
+  {
+    "requested_url": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt",
+    "started_at": "2026-09-29T08:53:18.442323+00:00",
+    "status": 200,
+    "final_url": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt",
+    "content_type": "text/plain",
+    "etag": "\"f75d2927d3c1ed2414ef72048f5ad640\"",
+    "last_modified": "Mon, 10 Aug 2026 15:14:19 GMT",
+    "path": "primary/MPL-2.0.txt",
+    "bytes": 16726,
+    "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+    "finished_at": "2026-09-29T08:53:19.108525+00:00"
+  },
+  {
+    "requested_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.txt",
+    "started_at": "2026-09-29T08:53:18.442458+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/commits/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.txt",
+    "content_type": "text/html; charset=utf-8",
+    "etag": "W/\"714b6badcc1f2c116072a017fdceb979\"",
+    "last_modified": null,
+    "path": "primary/objc2-original-license-history.html",
+    "bytes": 242574,
+    "sha256": "cce3f980b9088bf6533102997510603f50a5fbdda6fd34c055f797777fc20e0b",
+    "finished_at": "2026-09-29T08:53:19.686868+00:00"
+  },
+  {
+    "requested_url": "https://github.com/madsmtm/objc2/commits/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.txt",
+    "started_at": "2026-09-29T08:53:19.108546+00:00",
+    "status": 200,
+    "final_url": "https://github.com/madsmtm/objc2/commits/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.txt",
+    "content_type": "text/html; charset=utf-8",
+    "etag": "W/\"c11d8b9445a050ae30131a435bcb217b\"",
+    "last_modified": null,
+    "path": "primary/foundation-original-license-history.html",
+    "bytes": 242573,
+    "sha256": "ab00bc3db74112a44b17ac776fab3a16bc6122ffc8ccf2708a80e5d96206b4de",
+    "finished_at": "2026-09-29T08:53:21.189222+00:00"
+  }
+]

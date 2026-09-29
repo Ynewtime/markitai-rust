@@ -9,6 +9,41 @@ let capabilities = null;
 const notice = (message, bad = false) => { $('notice').textContent = message; $('notice').hidden = !message; $('notice').classList.toggle('error', bad); };
 const run = async action => { try { return await action(); } catch (error) { notice(errorText(error), true); } };
 const terminal = item => ['done','error'].includes(item.status);
+// Request coverage is independent of a zero or rounded cost subtotal.
+function attemptPricing(usage) {
+  if (!usage) return null;
+  let priced = 0, unpriced = 0;
+  for (const row of Object.values(usage.by_model || {})) {
+    const requests = Number.isSafeInteger(row.requests) && row.requests > 0 ? row.requests : 0;
+    if (!requests) continue;
+    const known = row.priced_requests, missing = row.unpriced_requests;
+    const expected = known === 0 ? 'unknown' : missing > 0 ? 'partial' : 'complete';
+    if (Number.isSafeInteger(known) && known >= 0 && Number.isSafeInteger(missing) && missing >= 0 && known + missing === requests && row.cost_status === expected) {
+      priced += known; unpriced += missing;
+    } else unpriced += requests;
+  }
+  if (Number.isSafeInteger(usage.requests)) unpriced += Math.max(0, usage.requests - priced - unpriced);
+  return priced + unpriced > 0 ? {priced_requests:priced, unpriced_requests:unpriced, cost_status:priced === 0 ? 'unknown' : unpriced > 0 ? 'partial' : 'complete'} : null;
+}
+function priceText(cost, pricing) {
+  if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return '';
+  const amount = `$${cost.toFixed(6)}`;
+  if (pricing?.cost_status === 'complete') return `${amount} · all recorded requests priced`;
+  if (pricing?.cost_status === 'partial') return `${amount} known subtotal · ${pricing.unpriced_requests} unpriced request(s)`;
+  if (pricing?.cost_status === 'unknown') return `Price unknown · ${amount} known subtotal`;
+  return cost > 0 ? `${amount} recorded subtotal · pricing completeness unavailable` : '';
+}
+
+
+function attemptNotice(item) {
+  const attempt = item.diagnostics?.last_attempt;
+  if (!attempt || (attempt.status !== 'error' && item.cost_usd != null)) return null;
+  const cost = priceText(attempt.usage?.cost_usd, attemptPricing(attempt.usage));
+  const failed = attempt.status === 'error';
+  const error = failed && typeof attempt.error === 'string' && attempt.error !== item.error ? attempt.error : '';
+  return {label: failed ? `Last attempt failed${cost ? `: ${cost}` : ''}` : cost ? `Last attempt: ${cost}` : '', error};
+}
+
 export async function confirmDelete(title, text) {
   const dialog = $('confirm-dialog'); $('confirm-title').textContent = title; $('confirm-message').textContent = text;
   return new Promise(resolve => { dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), {once:true}); dialog.showModal(); });
@@ -84,12 +119,17 @@ function renderJob() {
   for (const item of current.items) {
     const row = element('article','job-item');
     const icon = element('span',`item-icon ${item.status}`,item.status === 'done' ? '✓' : item.status === 'error' ? '!' : item.status === 'running' ? '↻' : '·');
-    const info = element('div','item-info'); info.append(element('strong','filename',item.name),element('small','muted',`${item.kind} · ${item.skipped ? 'skipped' : item.status}${item.duration_ms !== null ? ` · ${(item.duration_ms/1000).toFixed(1)}s` : ''}${item.llm_enhanced ? ' · enhanced' : ''}`));
+    const info = element('div','item-info'); info.append(element('strong','filename',item.name),element('small','muted',`${item.kind} · ${item.skip_reason === 'pending_batch' ? 'provider batch pending' : item.skipped ? 'skipped' : item.status}${item.duration_ms !== null ? ` · ${(item.duration_ms/1000).toFixed(1)}s` : ''}${item.llm_enhanced ? ' · enhanced' : ''}`));
+    const outputCost = priceText(item.cost_usd, item.pricing);
+    if (outputCost) info.append(element('small','muted',`Output cost: ${outputCost}`));
+    const attempt = attemptNotice(item);
+    if (attempt?.label) info.append(element('small','muted',attempt.label));
+    if (attempt?.error) info.append(element('p','item-error',attempt.error));
     if (item.error) info.append(element('p','item-error',item.error));
     if (item.warnings?.length) { const details = element('details','warnings'); details.append(element('summary','',`${item.warnings.length} notice(s)`)); for (const warning of item.warnings) details.append(element('p','',warning)); info.append(details); }
     const actions = element('div','item-actions');
     if (item.status === 'done' && item.output) actions.append(button('View',() => run(() => openResult(item)), 'quiet small strong'));
-    if (terminal(item) && item.retryable) {
+    if (terminal(item) && item.retryable && item.skip_reason !== 'pending_batch') {
       actions.append(button('Retry',() => run(() => retry(item,false))));
       const enhance = button('Enhance',() => run(() => retry(item,true))); enhance.disabled = !capabilities?.llm?.routable; enhance.title = enhance.disabled ? 'Configure a working model connection first' : 'Reconvert with LLM enhancement'; actions.append(enhance);
     }
@@ -161,6 +201,7 @@ function renderHistory() {
   if(!rows.length)$('history-list').append(element('p','empty','No saved jobs yet.'));
   for(const row of rows.slice(page*12,page*12+12)){
     const item=element('article','history-item');const info=element('div');info.append(element('strong','filename',row.names_preview.join(', ')||row.job_id),element('small','muted',`${new Date(row.created_at).toLocaleString()} · ${row.total} items · ${row.done} done${row.failed?` · ${row.failed} failed`:''}`));
+    const historyCost = priceText(row.cost_usd, row.pricing); if (historyCost) info.append(element('small','muted',historyCost));
     const actions=element('div','row');actions.append(button('Open',()=>run(()=>openJob(row.job_id))));const zip=element('a','quiet small','ZIP ↓');zip.href=authenticatedURL(`/api/jobs/${encodeURIComponent(row.job_id)}/archive`);actions.append(zip,button('Delete',()=>run(async()=>{if(await confirmDelete('Delete saved job?',`Remove ${row.names_preview.join(', ')} and all its saved files?`)){await api(`/api/history/${encodeURIComponent(row.job_id)}`,{method:'DELETE'});await loadHistory();}}),'quiet small delete'));item.append(info,actions);$('history-list').append(item);
   }
 }
