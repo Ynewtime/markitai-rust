@@ -169,7 +169,9 @@ fn installed_chromium_basic_auth_captures_authenticated_content_without_preempti
             Reply::challenge()
         }
     });
-    let page = fetch(&server.url("/document"), &config(), true).unwrap();
+    let page = fetch(&server.url("/document"), &config(), true)
+        .unwrap()
+        .page();
     assert!(page.html.contains("AUTHENTICATED CONTENT"));
     assert_eq!(page.title, "Authenticated fixture");
     assert_eq!(page.final_url, server.url("/document"));
@@ -245,7 +247,7 @@ fn installed_chromium_redirect_auth_requires_the_explicit_target_origin() {
     assert!(target.recorded().iter().all(|r| r.authorization.is_none()));
     let mut cfg = config();
     cfg["fetch"]["playwright"]["http_credentials"]["origin"] = json!(target.origin);
-    let page = fetch(&source.url("/start"), &cfg, false).unwrap();
+    let page = fetch(&source.url("/start"), &cfg, false).unwrap().page();
     assert!(page.html.contains("EXPLICIT ORIGIN CONTENT"));
     assert_eq!(page.final_url, target.url("/protected"));
     assert!(source.recorded().iter().all(|r| r.authorization.is_none()));
@@ -271,7 +273,9 @@ fn installed_chromium_foreign_subresource_challenge_does_not_receive_page_passwo
             Reply::challenge()
         }
     });
-    let page = fetch(&source.url("/document"), &config(), false).unwrap();
+    let page = fetch(&source.url("/document"), &config(), false)
+        .unwrap()
+        .page();
     assert!(page.html.contains("PRIVATE MAIN PAGE"));
     let requests = foreign.recorded();
     assert!(!requests.is_empty());

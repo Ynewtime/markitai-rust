@@ -17,7 +17,8 @@ are not forwarded. The implementation keeps the browser sandbox enabled.
 
 `MARKITAI_BROWSER_EXECUTABLE` selects an exact executable. An invalid override
 fails discovery instead of falling back to another installation. Otherwise the
-reader checks executable names in `PATH`, common macOS/Windows application
+reader checks a completed private [managed installation](browser-installation.md),
+then executable names in `PATH`, common macOS/Windows application
 locations, then known Playwright Chromium cache layouts. Cache discovery honors
 `PLAYWRIGHT_BROWSERS_PATH`; only executable paths are inspected. It never loads
 stored browser state, installs a browser or opens the user's normal browser.
@@ -53,10 +54,13 @@ implementation. Extra HTTP headers retain their separate context-wide contract
 below; this credential policy does not silently narrow explicitly supplied headers.
 
 The internal presence helper allows the fetch coordinator to route authenticated
-`auto` requests before anonymous cache access or PDF probes. Explicit `static`
-does not acquire browser credentials. Authenticated downloads remain unsupported;
-a PDF response cannot be reported as successfully extracted browser text.
-Rendered private pages are not added to the static fetch cache.
+`auto` requests before anonymous cache access or PDF probes. Nonempty browser
+cookies or extra HTTP headers also select this private route, including without
+screenshot capture. Empty collections retain ordinary static-first behavior. Explicit `static`
+does not acquire browser credentials. Initial top-level PDF responses now return
+the authenticated response bytes to the native PDF pipeline, described below.
+Rendered private pages and authenticated PDF bytes are not added to the static
+fetch cache.
 
 `browser_diagnostic()` discovers an installed executable, launches a fresh private
 profile and verifies a CDP `about:blank` page, then closes and reaps the process.
@@ -73,6 +77,44 @@ positive case, third-party resource isolation, and diagnostic/profile cleanup.
 These are ignored in the ordinary workspace invocation and must be selected
 explicitly by the coordinator; implementation does not itself establish a passing
 release acceptance result.
+
+## Authenticated PDF responses
+
+The browser intercepts response headers for the initial main-frame navigation,
+including HTTP redirects. `application/pdf` and `application/x-pdf` select the PDF
+pipeline even when a subsequent PDF parser will reject malformed bytes. Generic
+binary responses and final URL paths ending in `.pdf` require a supported `%PDF-`
+header within the first 1,024 bytes. Explicit HTML and `text/*` representations
+remain rendered content; a textual PDF example is not a document download.
+A content-disposition attachment does not prevent a recognized PDF from being read.
+
+The existing Basic challenge policy, supplied cookies and request headers remain
+inside the same private Chromium process. `Fetch.takeResponseBodyAsStream` and
+sequential `IO.read` calls consume the paused response in 64 KiB chunks. There is
+no second HTTP request by Rust or an anonymous download client. The original
+navigation is cancelled after the bytes have been obtained, before a browser PDF
+viewer can replace them with its interface HTML. The typed result carries owned
+bytes and the real final URL; the coordinator applies native extraction, local
+OCR, screenshots and model routing according to the existing PDF options.
+The browser itself does not create a fake page screenshot or publish a download.
+
+A response exceeding 100 MiB, a partial HTTP 206 response, a truncated declared
+uncompressed body, an invalid stream or the navigation deadline causes an error.
+Header declarations provide an early size check; streamed bytes independently
+obey the same cumulative limit. The deadline is not restarted between chunks.
+A generic response that is not PDF is supplied back to Chromium with its original
+status and representation headers and the same decoded body. Wire compression and
+length headers are adjusted for that body. This resumes the intercepted response
+without repeating its request. Non-PDF attachments remain subject to Chromium's
+existing disabled-download policy.
+
+This stage handles the initial HTTP navigation and redirects, not later
+JavaScript-triggered downloads, viewer interactions, arbitrary attachment types
+or persisted browser sessions. Optional authored loopback tests cover authenticated
+inline PDFs, extensionless binary attachments, redirects, origin isolation,
+explicit text priority, advertised size rejection, truncated bodies and timeouts.
+These tests require the coordinator's explicit installed-browser run; adding the
+implementation or tests alone is not release acceptance evidence.
 
 ## Fetch and screenshot behavior
 
@@ -147,8 +189,9 @@ image-page and payload bounds. Pure LLM mode continues to use the text path.
   restrictions on remote unauthenticated URL conversion remain necessary.
 - Top-level input and final documents must use HTTP(S). Embedded URL credentials
   are rejected. Chromium request interception rejects other fetch schemes except
-  normal `about`, `data` and `blob` resources. Downloads are disabled. This does
-  not make browser execution an operating-system sandbox for untrusted sites.
+  normal `about`, `data` and `blob` resources. Filesystem downloads remain disabled;
+  supported main-response PDF bytes are intercepted in memory. This does not make
+  browser execution an operating-system sandbox for untrusted sites.
 - Navigation and each capture/extraction stage use a finite configured timeout
   from 1 to 120,000 ms; browser startup has a separate 15-second limit. Extra
   waits are at most 30 seconds, scrolling at most eight steps. Zero/unbounded
@@ -169,7 +212,8 @@ image-page and payload bounds. Pure LLM mode continues to use the text path.
 The protocol operations use Chromium's published
 [Page](https://chromedevtools.github.io/devtools-protocol/tot/Page/),
 [Network](https://chromedevtools.github.io/devtools-protocol/tot/Network/) and
-[Fetch](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/) domains.
+[Fetch](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/) and
+[IO](https://chromedevtools.github.io/devtools-protocol/tot/IO/) domains.
 Unit coverage targets option validation, cookie field conversion, glob boundaries,
 proxy credential rejection and filename identity. The actual release additionally
 passes delayed JavaScript, headers/cookies, redirects, tiling, canvas-only results,

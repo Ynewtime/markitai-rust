@@ -1,4 +1,4 @@
-//! Configuration-aware diagnostics; no provider requests or automatic installers.
+//! Configuration-aware diagnostics; explicit browser repair uses the native installer.
 use super::{CliResult, runtime};
 use indexmap::IndexMap;
 use markitai_core::config;
@@ -54,8 +54,23 @@ pub(super) fn run(cfg: &Value, path: Option<&Path>, json: bool, fix: bool) -> Cl
         let office = scope.spawn(markitai_core::office_diagnostic);
         (browser.join(), office.join())
     });
-    let browser = browser.map_err(|_| runtime("Browser diagnostic did not complete"))?;
+    let mut browser = browser.map_err(|_| runtime("Browser diagnostic did not complete"))?;
     let office = office.map_err(|_| runtime("Office diagnostic did not complete"))?;
+    let repair_missing = fix && !matches!(&browser, Ok(Some(_)));
+    let mut repair_failed = false;
+    if repair_missing {
+        eprintln!("Installing the official Chrome headless shell in the private Markitai home...");
+        match markitai_core::install_browser() {
+            Ok(path) => {
+                eprintln!("Installed and verified {}", path.display());
+                browser = Ok(Some(path));
+            }
+            Err(error) => {
+                repair_failed = true;
+                eprintln!("Browser repair failed: {error}");
+            }
+        }
+    }
     let env = config::environment();
     let checks = checks(
         cfg,
@@ -90,19 +105,12 @@ pub(super) fn run(cfg: &Value, path: Option<&Path>, json: bool, fix: bool) -> Cl
             }
         }
     }
-    let repair_missing = fix && checks["playwright"].status != "ok";
-    if fix {
-        if repair_missing {
-            eprintln!(
-                "Automatic Chromium installation is not implemented in this native build. Install Chrome/Chromium and rerun doctor; no installer was started."
-            );
-        } else {
-            eprintln!(
-                "Chromium launches successfully; no browser repair is needed. Other diagnostic hints require manual action."
-            );
-        }
+    if fix && !repair_missing {
+        eprintln!(
+            "Chromium launches successfully; no browser repair is needed. Other diagnostic hints require manual action."
+        );
     }
-    Ok(i32::from(failed || repair_missing))
+    Ok(i32::from(failed || repair_failed))
 }
 
 fn checks(
@@ -119,7 +127,7 @@ fn checks(
         "Browser automation for dynamic URLs",
         browser,
         "Launch and CDP connection succeeded in a private profile; no remote page was opened",
-        "Install Chrome/Chromium or set MARKITAI_BROWSER_EXECUTABLE to its executable",
+        "Run markitai doctor --fix to install the official headless shell, or set MARKITAI_BROWSER_EXECUTABLE to an installed Chrome/Chromium executable",
     );
     let strategy = cfg
         .pointer("/fetch/strategy")
@@ -127,9 +135,17 @@ fn checks(
         .unwrap_or("auto");
     browser.required = strategy == "playwright"
         || (strategy == "auto"
-            && cfg
+            && (cfg
                 .pointer("/fetch/playwright/http_credentials")
-                .is_some_and(|value| !value.is_null()))
+                .is_some_and(|value| !value.is_null())
+                || cfg
+                    .pointer("/fetch/playwright/cookies")
+                    .and_then(Value::as_array)
+                    .is_some_and(|value| !value.is_empty())
+                || cfg
+                    .pointer("/fetch/playwright/extra_http_headers")
+                    .and_then(Value::as_object)
+                    .is_some_and(|value| !value.is_empty())))
         || config::enabled(cfg, "/screenshot/enabled")
         || config::enabled(cfg, "/screenshot/screenshot_only");
     result.insert("playwright", browser);
@@ -469,13 +485,27 @@ mod tests {
     }
     #[test]
     fn credentialed_auto_requires_browser_but_explicit_static_does_not() {
-        let mut cfg = config::defaults();
-        cfg["fetch"]["playwright"]["http_credentials"] =
-            json!({"username":"test-user","password":"test-password"});
-        let auto = checks(&cfg, None, &HashMap::new(), Ok(None), Ok(None), Vec::new());
-        assert!(auto["playwright"].failed());
-        cfg["fetch"]["strategy"] = json!("static");
-        let explicit = checks(&cfg, None, &HashMap::new(), Ok(None), Ok(None), Vec::new());
-        assert!(!explicit["playwright"].failed());
+        for (field, identity) in [
+            (
+                "http_credentials",
+                json!({"username":"test-user","password":"test-password"}),
+            ),
+            (
+                "cookies",
+                json!([{"name":"session","value":"fixture","url":"https://example.test"}]),
+            ),
+            (
+                "extra_http_headers",
+                json!({"Authorization":"fixture-only"}),
+            ),
+        ] {
+            let mut cfg = config::defaults();
+            cfg["fetch"]["playwright"][field] = identity;
+            let auto = checks(&cfg, None, &HashMap::new(), Ok(None), Ok(None), Vec::new());
+            assert!(auto["playwright"].failed(), "{field}");
+            cfg["fetch"]["strategy"] = json!("static");
+            let explicit = checks(&cfg, None, &HashMap::new(), Ok(None), Ok(None), Vec::new());
+            assert!(!explicit["playwright"].failed(), "{field}");
+        }
     }
 }

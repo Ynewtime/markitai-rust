@@ -263,7 +263,7 @@ fn classification_rejects_invisible_html_capture_without_starting_a_browser() {
         assert!(error.to_string().contains("output_dir"));
         assert_eq!(server.requests().len(), 1);
     }
-    for strategy in ["playwright", "jina", "defuddle"] {
+    for strategy in ["jina", "defuddle"] {
         let (_directory, mut cfg) = settings();
         cfg["fetch"]["strategy"] = json!(strategy);
         cfg["screenshot"]["screenshot_only"] = json!(true);
@@ -274,6 +274,31 @@ fn classification_rejects_invisible_html_capture_without_starting_a_browser() {
         ));
         assert!(server.requests().is_empty());
     }
+}
+
+#[test]
+fn authenticated_response_classification_keeps_pdf_memory_and_html_output_contracts() {
+    let (_directory, mut cfg) = settings();
+    cfg["screenshot"]["screenshot_only"] = json!(true);
+    let pdf = browser::BrowserResponse::Pdf(browser::BrowserPdf {
+        bytes: PDF.to_vec(),
+        final_url: "https://example.test/private-download".into(),
+        warnings: Vec::new(),
+    });
+    let result = received(browser_response_outcome(pdf, &cfg, false).unwrap());
+    assert_eq!(result.bytes, PDF);
+    assert_eq!(result.strategy, "playwright");
+    let html = browser::BrowserResponse::Page(browser::BrowserPage {
+        html: "<article><p>Private HTML content.</p></article>".into(),
+        final_url: "https://example.test/private-page".into(),
+        title: "Private page".into(),
+        screenshots: Vec::new(),
+        warnings: Vec::new(),
+    });
+    assert!(matches!(
+        browser_response_outcome(html, &cfg, false),
+        Err(Error::InvalidInput(_))
+    ));
 }
 
 #[test]

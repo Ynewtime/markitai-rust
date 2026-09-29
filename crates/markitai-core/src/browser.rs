@@ -3,6 +3,9 @@ mod auth;
 #[cfg(test)]
 mod auth_tests;
 mod cdp;
+mod download;
+#[cfg(test)]
+mod download_tests;
 mod options;
 
 use crate::{Asset, Error, Result};
@@ -16,6 +19,27 @@ use url::Url;
 const MAX_HTML: usize = 100 * 1024 * 1024;
 const MAX_SCREENSHOT_BYTES: usize = 100 * 1024 * 1024;
 const MAX_SCREENSHOT_PIXELS: u64 = 50_000_000;
+
+pub(crate) enum BrowserResponse {
+    Page(BrowserPage),
+    Pdf(BrowserPdf),
+}
+
+pub(crate) struct BrowserPdf {
+    pub bytes: Vec<u8>,
+    pub final_url: String,
+    pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+impl BrowserResponse {
+    fn page(self) -> BrowserPage {
+        match self {
+            Self::Page(page) => page,
+            Self::Pdf(_) => panic!("expected rendered HTML"),
+        }
+    }
+}
 
 pub(crate) struct BrowserPage {
     pub html: String,
@@ -47,6 +71,9 @@ pub(crate) fn discover() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("MARKITAI_BROWSER_EXECUTABLE") {
         let path = PathBuf::from(path);
         return executable(&path).then_some(path);
+    }
+    if let Some(path) = crate::browser_install::installed() {
+        return Some(path);
     }
     let mut paths = Vec::new();
     let env_path = std::env::var_os("PATH").unwrap_or_default();
@@ -146,7 +173,7 @@ pub fn diagnostic() -> Result<Option<PathBuf>> {
     Ok(Some(executable))
 }
 
-fn diagnostic_with(executable: &Path) -> Result<()> {
+pub(crate) fn diagnostic_with(executable: &Path) -> Result<()> {
     let run = || -> Result<()> {
         let mut browser = cdp::Browser::launch(executable, &options::Options::diagnostic())?;
         if browser.evaluate("location.href")?.as_str() != Some("about:blank") {
@@ -165,6 +192,19 @@ fn diagnostic_with(executable: &Path) -> Result<()> {
 pub(crate) fn http_credentials_configured(cfg: &Value) -> bool {
     cfg.pointer("/fetch/playwright/http_credentials")
         .is_some_and(|value| !value.is_null())
+}
+
+/// A browser identity cannot share an anonymous HTTP probe or cached document.
+pub(crate) fn identity_configured(cfg: &Value) -> bool {
+    http_credentials_configured(cfg)
+        || cfg
+            .pointer("/fetch/playwright/cookies")
+            .and_then(Value::as_array)
+            .is_some_and(|cookies| !cookies.is_empty())
+        || cfg
+            .pointer("/fetch/playwright/extra_http_headers")
+            .and_then(Value::as_object)
+            .is_some_and(|headers| !headers.is_empty())
 }
 
 fn filename(url: &Url) -> String {
@@ -315,13 +355,16 @@ fn final_http_url(value: &str) -> Result<Url> {
     Ok(url)
 }
 
-pub(crate) fn fetch(source: &str, cfg: &Value, screenshot: bool) -> Result<BrowserPage> {
+pub(crate) fn fetch(source: &str, cfg: &Value, screenshot: bool) -> Result<BrowserResponse> {
     let url = Url::parse(source).map_err(|_| Error::InvalidInput("Invalid browser URL".into()))?;
     let options = options::Options::from_config(cfg, &url, screenshot)?;
     let executable = discover().ok_or_else(|| Error::Unsupported("Chromium is not installed; install Chrome/Chromium or set MARKITAI_BROWSER_EXECUTABLE to its executable".into()))?;
     let mut browser = cdp::Browser::launch(&executable, &options)?;
     browser.deadline = Instant::now() + Duration::from_millis(options.timeout);
-    let navigation = browser.call("Page.navigate", json!({"url":source}))?;
+    let navigation = match browser.navigate(source)? {
+        cdp::Navigation::Page(value) => value,
+        cdp::Navigation::Pdf(pdf) => return Ok(BrowserResponse::Pdf(pdf)),
+    };
     if navigation.get("errorText").is_some()
         || navigation.get("isDownload").and_then(Value::as_bool) == Some(true)
     {
@@ -426,13 +469,13 @@ pub(crate) fn fetch(source: &str, cfg: &Value, screenshot: bool) -> Result<Brows
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    Ok(BrowserPage {
+    Ok(BrowserResponse::Page(BrowserPage {
         html,
         final_url,
         title,
         screenshots,
         warnings,
-    })
+    }))
 }
 
 #[cfg(test)]

@@ -120,11 +120,13 @@ explicitly ignored in the ordinary routing gate and exercised by the separate
 quality acceptance driver, which reports a partial result. This is an unresolved
 recognizer error, not successful transcription. No character substitution is
 applied to hide it.
-Static/automatic URL fetches hand requested PDF media directly to this pipeline,
+Static/automatic URL fetches and initial browser PDF responses hand requested
+PDF media directly to this pipeline,
 including redirects and extensionless downloads. The original URL remains the
 source and naming input. URL pure mode sends text even with screenshot-only;
 PDF capture-only output retains Markdown and page references. This deliberately
 extends the reference URL converter, which did not pass local media settings
-through. Explicit browser/remote strategy selection remains unchanged. See
+through. Browser PDFs reuse the authenticated CDP response and preserve their
+`playwright` strategy; remote extraction services retain their own path. See
 [downloaded PDFs](pdf.md#downloaded-pdfs) for the content/identity contract and
 [round-eighteen validation](validation/url-pdf-round18.md) for execution evidence.

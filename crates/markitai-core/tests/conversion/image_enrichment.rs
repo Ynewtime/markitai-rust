@@ -427,6 +427,8 @@ fn structured_failure_uses_custom_caption_and_description_with_all_paid_usage() 
     std::fs::write(&source, png()).unwrap();
     let server = Server::new(vec![
         Reply::model("not JSON"),
+        Reply::model("still not JSON"),
+        Reply::model("finally not JSON"),
         Reply::model("Fallback caption"),
         Reply::model("Fallback details"),
     ]);
@@ -443,15 +445,15 @@ fn structured_failure_uses_custom_caption_and_description_with_all_paid_usage() 
         config["prompts"][name] = json!(path);
     }
     let output = run(source.to_str().unwrap(), config, None).unwrap();
-    assert_eq!(output.usage.requests, 3);
-    assert_eq!(output.usage.input_tokens, 21);
-    assert_eq!(output.usage.output_tokens, 15);
-    assert_eq!(output.images[0]["llm_usage"]["mock"]["requests"], 3);
+    assert_eq!(output.usage.requests, 5);
+    assert_eq!(output.usage.input_tokens, 35);
+    assert_eq!(output.usage.output_tokens, 25);
+    assert_eq!(output.images[0]["llm_usage"]["mock"]["requests"], 5);
     assert!(body(&output).contains("Fallback caption"));
     assert!(body(&output).contains("Fallback details"));
     let calls = requests(&server);
-    assert_eq!(calls.len(), 3);
-    for (index, marker) in [(1, "CAPTION_USER"), (2, "DESCRIPTION_USER")] {
+    assert_eq!(calls.len(), 5);
+    for (index, marker) in [(3, "CAPTION_USER"), (4, "DESCRIPTION_USER")] {
         assert!(
             calls[index]["messages"][1]["content"][0]["text"]
                 .as_str()

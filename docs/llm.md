@@ -209,14 +209,12 @@ time. Only enhanced output receives generated description/tags; base metadata is
 retained separately. A source identified as a social post requests metadata while
 preserving its body verbatim.
 
-The native transport currently uses provider-neutral JSON instructions, accepting
-a bare JSON object or a complete Markdown JSON fence. An invalid schema, damaged
-structural marker or implausible cleaning gets at most two validation retries,
-in addition to the established transport retry policy. All HTTP attempts share
-the document budget and paid response usage is retained. Arbitrary plain Markdown
-is not silently promoted into successful structured metadata. This includes
-custom document prompts. Pure text and standalone image analysis keep their
-separate contracts.
+Typed document requests use the capability ladder below. The final JSON-text
+mode accepts a bare JSON object or a complete Markdown JSON fence. Arbitrary
+plain Markdown is not promoted into successful metadata, including with custom
+document prompts. Every decoded mode passes the same metadata and source-content
+checks. Pure text retains its separate plain contract; image analysis uses its
+caption/description/text schema through the same ladder.
 
 Before a request, fenced and indented code, inline code, math, links/images,
 reference definitions and HTML/comment markup are replaced by collision-safe
@@ -247,8 +245,67 @@ Both local and ordinary URL text use the [typed persistent cache](cache.md).
 Cache hits require no model request and have zero new usage; bypass controls still
 refresh successful answers. Pure text and standalone caption/description analysis
 bypass this document cache. Non-pure page/browser vision uses its own image-aware
-batch namespace, described below. Provider tool/JSON-schema negotiation and
-speculative JSON repair remain separate, unimplemented capabilities.
+batch namespace, described below. The cache stores validated semantic data, never
+a provider tool-call envelope. Round twenty-four changes the prompt-contract
+fingerprint so older protocol rows remain on disk without being admitted as new
+results. The randomly selected model deployment and successful protocol rung do
+not enter this semantic fingerprint.
+
+## Structured provider protocols
+
+Document chunks, the first non-pure visual batch and image caption/description
+analysis select a common wire mode from the actual reachable model pool. Positive
+weight, resolved deployment credentials, configured fallback groups and explicit
+vision exclusions retain their existing routing behavior. A missing referenced
+environment variable removes that deployment; a credential-free configured
+endpoint remains a candidate because it may be a local server. Capability
+selection itself sends no requests, and a valid cache hit does not need it.
+
+The initial exact capability table is deliberately small:
+
+| Provider and exact model IDs | Available modes before JSON text |
+|---|---|
+| OpenAI `gpt-4.1`, `gpt-4.1-2025-04-14` | Named tools, JSON schema |
+| Anthropic `claude-haiku-4-5`, `claude-haiku-4-5-20251001` | Named tools, native JSON schema |
+| Anthropic `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-1`, `claude-mythos-5-1` | Native JSON schema; these models restrict forced named tools |
+| Gemini `gemini-3.8-flash` through its OpenAI-compatible endpoint | JSON schema |
+| Other or unknown IDs, including Azure deployment aliases | JSON text |
+
+The [official capability evidence](planning/after-round23-structured-transport.md)
+records model/protocol sources and limits. Neither a model-name prefix nor
+`supports_vision` establishes structured support. Tool and schema support are
+independent bits: intersect them across all reachable candidates, then visit
+supported modes in the order tools → schema → text. A pool containing an unknown
+model therefore starts at text. No new public capability options are introduced.
+A custom endpoint may reject the optional fields even for a documented model.
+
+Chat tools use a forced, named function and decode exactly one expected
+`tool_calls[].function.arguments`. Anthropic uses `input_schema`, native tool
+choice and exactly one matching `tool_use.input`. Tool data is never executed.
+Missing, wrong-name or multiple results fail validation. Chat schema mode uses
+`response_format.json_schema`; Anthropic uses `output_config.format`. Both then
+validate the decoded object with the same application-owned contract. Tool
+responses may have no text body; this is valid when their typed data is valid.
+
+Each non-final mode gets one schema-validation attempt. Rejection of tools/schema
+parameters with HTTP 400/422 descends without resending the same shape. Unrelated
+invalid-input errors, explicit refusal, token-limit truncation, quota and budget
+failures stop the ladder; authentication failures retain configured routing
+fallbacks before stopping. Transport retries stay inside the router. Exhausted network/HTTP transport errors
+stop the ladder in every mode and do not trigger image caption/description fallback.
+The final JSON-text mode gets three validation attempts total. Response-size
+limits are terminal resource errors, not invalid JSON to retry or downgrade. All actual HTTP attempts
+use the same document budget, runtime permit and paid-usage accounting. Structured
+fatal responses publish cancellation before releasing their permit.
+
+After the final invalid JSON-text candidate, a local repair may remove trailing
+commas immediately before existing object/array closing tokens, outside strings.
+It runs only for responses up to 1 MiB and must pass all schema and content guards.
+It adds no HTTP request. It never invents quotes, missing closers, fields, metadata
+or document content; truncated/refused responses never enter repair. More general
+Python-style JSON, free-text extraction and incomplete-object repair remain
+unsupported. Image analysis retains its existing plain caption/description
+fallback after nonfatal ladder exhaustion, within the same accounting scope.
 
 ## Structured visual documents
 
@@ -286,8 +343,9 @@ refusals, repetitive degraded output, blank results and token-limit truncation
 are rejected. These are conservative safeguards, not proof of correct OCR or
 semantic fidelity; model accuracy still needs independent evaluation.
 
-Malformed typed output or violated content guards can consume up to three
-validation attempts, within the shared request budget. The known minimum number
+The first typed visual batch follows the provider ladder above. Later plain
+cleaning batches retain at most three validation attempts for malformed output
+or violated content guards, within the shared request budget. The known minimum number
 of uncached batches must fit the remaining budget before the first request.
 Transport retries, visual validation, document fallback and image analysis use
 that same budget; zero still means unlimited. Paid error and invalid responses
@@ -331,16 +389,24 @@ URL cache hits without credentials, partial-failure retry, preflight admission,
 shared retry budgets, custom prompts and unchanged pure behavior. Chunk/cache
 unit checks cover typed namespaces, Unicode tails and malformed metadata.
 
-Round twenty-three adds `tests/conversion/vision_processing.rs`: loopback HTTP
+`tests/conversion/vision_processing.rs` contains loopback HTTP
 cases for 21-frame bounded concurrency/order, eleven-frame cache reuse and pixel
 changes, paid authentication failure, later failure with partial-cache retry,
 zero-request budget rejection, and queued-batch cancellation. Module tests cover
 page/slide boundaries, code-literal examples, cache content guards and actual
-vision-model eligibility. These newly authored cases await the coordinator's
-integrated gate; the test source alone is not execution evidence.
+vision-model eligibility. Executed round-twenty-three results are recorded in
+[its validation report](validation/vision-auth-cli-round23.md).
+
+Round twenty-four adds `tests/conversion/structured_transport.rs`: actual loopback
+HTTP exercises named tools, native Anthropic shapes, schema/text descent with
+paid errors, conservative pool capabilities, cache reuse without credentials,
+protected literals, bounded repair, fatal errors, a shared request budget,
+image-analysis sidecars and first-visual-versus-later-cleaner behavior. These new
+cases pass the coordinator's source-frozen R24 gate; live-provider compatibility
+and installed-release evidence are separate checks.
 
 HTTP tests bind loopback listeners, capture request headers and JSON, return
-scripted responses, and use bounded socket timeouts. Retry sleeps are injected
-as a recorder; tests never wait for real backoff and never contact a live model
-provider. The project operations record contains the actual executed build and
+scripted responses, and use bounded socket timeouts. Low-level retry tests inject sleeps as a recorder; integration fixtures avoid
+retryable transport failures or use bounded local behavior. They never contact a
+live model provider. The project operations record contains the actual executed build and
 test results.

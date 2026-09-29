@@ -19,8 +19,9 @@ whitespace-only values leave configuration unchanged. The default is disabled.
 Stdout Markdown, dry runs, empty work and invalid single-file inputs create no
 archive. JSON disk-output mode can record history without adding JSON fields or
 printing a success message. Ordinary mode prints the saved path to stderr unless
-quiet. The `serve` command is still unimplemented; archives are currently read
-as files. Native bindings do not invoke the CLI archive writer.
+quiet. The native `serve` command reads completed archives in place and exposes
+results, assets and downloads; see [service history](serve.md). Native bindings
+do not invoke the CLI archive writer.
 
 ## Which outcomes are saved
 
@@ -139,5 +140,7 @@ Current source tests exercise the native recorder and isolated real CLI processe
 The [round-ten release audit](validation/history-round10.md) passes five authored
 archive contract pairs, four strictly after declared identity/time normalization.
 The failed-notebook pair retains its existing parser diagnostic difference.
-Broader paired coverage, cross-platform execution and consuming these archives
-through the future native server remain separate acceptance work.
+Native service history consumption is implemented and covered by actual HTTP
+tests. Broader paired coverage, cross-platform execution and the remaining
+[legacy filename adaptation](planning/after-round24-state-interop.md) still need
+their own acceptance evidence.

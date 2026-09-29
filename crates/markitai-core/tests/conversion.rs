@@ -34,6 +34,18 @@ mod vision_processing;
 #[path = "conversion/browser_auth.rs"]
 mod browser_auth;
 
+#[path = "conversion/structured_transport.rs"]
+mod structured_transport;
+
+#[path = "conversion/workbook_media.rs"]
+mod workbook_media;
+
+#[path = "conversion/browser_pdf.rs"]
+mod browser_pdf;
+
+#[path = "conversion/browser_identity.rs"]
+mod browser_identity;
+
 fn options() -> ConvertOptions {
     ConvertOptions {
         config: Some(json!({})),
@@ -672,18 +684,4 @@ fn local_image_ocr_reads_original_pixels_and_blank_images_are_explicit() {
             .any(|warning| warning.contains("no readable text"))
     );
     assert!(result.output_path.is_none() && result.assets.is_empty());
-}
-
-#[test]
-fn explicit_browser_screenshot_only_memory_rejects_before_fetching() {
-    let error = convert(
-        "http://127.0.0.1:9/canvas",
-        ConvertOptions {
-            config: Some(json!({"fetch":{"strategy":"playwright"},"llm":{"enabled":false},"screenshot":{"screenshot_only":true}})),
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
-    assert_eq!(error.code(), "invalid_input");
-    assert!(error.to_string().contains("output_dir"));
 }

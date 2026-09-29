@@ -23,9 +23,6 @@ pub(crate) fn prepare(
     cfg: &Value,
     vlm_disabled: bool,
 ) -> Result<(Vec<Asset>, bool)> {
-    if kind == OfficeKind::Spreadsheet {
-        return Err(Error::Unsupported("Spreadsheet page screenshots and OCR are not supported; convert the native tables without screenshot or OCR options".into()));
-    }
     if !crate::pdf_raster::available() {
         return Err(Error::Unsupported(
             "Office page capture requires an available native PDF page renderer on this platform"

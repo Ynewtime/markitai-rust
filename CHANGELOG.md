@@ -4,6 +4,11 @@
 
 ### Added
 
+- Capability-aware structured model tools/schema/text transport, bounded repair and shared paid usage across validation attempts.
+- Same-session authenticated browser PDF streaming into the native document and page-media pipeline.
+- Complete spreadsheet sheet canvases through isolated LibreOffice, including hidden and empty sheets.
+- Explicit native installation of the official Chrome headless shell with verified startup and atomic activation through `doctor --fix`.
+
 - Typed visual document metadata, complete ordered ten-page batches and persistent caches keyed by actual page image content.
 - Origin-scoped native browser Basic authentication and configuration-aware runtime diagnostics.
 - Guided terminal conversion through the ordinary CLI pipeline.

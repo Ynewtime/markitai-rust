@@ -1,0 +1,38 @@
+{
+  "provenance": "Original Markitai Rust fixtures, project license; deterministic standard-library ZIP/XML authoring. No user workbook or third-party input.",
+  "files": {
+    "whole-workbook.xlsx": {
+      "bytes": 3760,
+      "sha256": "c393d1986f52aa42bd109ae9c1993588f5f985e1db852d2f36db0b7e83aff4ef"
+    },
+    "whole-workbook.ods": {
+      "bytes": 1658,
+      "sha256": "977789cce550199cc503782de1b3966b6feecf577beb0d386d1c50dc7bae8895"
+    },
+    "whole-workbook.xls": {
+      "bytes": 7680,
+      "sha256": "9a538e7151e22f368216881bd3ccb1248b0eb56259d5459aae2b6088db7e670f",
+      "provenance": "Derived from the original whole-workbook.xlsx with installed LibreOffice, filter xls:MS Excel 97; no third-party workbook content. Full import/export evidence retained at .local/workbook-round24/imports-r1/record.json."
+    }
+  },
+  "source_sheet_order": [
+    "Wide 宽表",
+    "Hidden",
+    "Empty",
+    "Last"
+  ],
+  "expected": {
+    "first": [
+      "VISIBLE FIRST",
+      "OUTSIDE PRINT AREA"
+    ],
+    "second": [
+      "HIDDEN MIDDLE"
+    ],
+    "third": "empty sheet",
+    "fourth": [
+      "LAST SHEET"
+    ]
+  },
+  "print_settings": "First sheet has a limited print area, manual row break and wide content; ordinary paper pagination differs from whole-sheet export."
+}

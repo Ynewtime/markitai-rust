@@ -95,10 +95,9 @@ fn office_all_page_vision_limit_fails_before_any_model_request() {
 }
 
 #[test]
-fn spreadsheets_cannot_silently_succeed_when_full_page_capture_is_requested() {
+fn malformed_workbook_cannot_succeed_when_full_page_capture_is_requested() {
     let dir = tempfile::tempdir().unwrap();
-    // Detection precedes any spreadsheet parsing; no valid workbook is needed to reject this capability.
-    let input = source(dir.path(), "xlsx", b"unsupported-rendering-fixture");
+    let input = source(dir.path(), "xlsx", b"malformed-workbook-fixture");
     let error = convert(
         input.to_str().unwrap(),
         ConvertOptions {
@@ -109,7 +108,8 @@ fn spreadsheets_cannot_silently_succeed_when_full_page_capture_is_requested() {
     )
     .err()
     .unwrap();
-    assert!(matches!(error, Error::Unsupported(_)), "{error}");
+    assert!(!error.to_string().is_empty());
+    assert!(!dir.path().join("out").exists());
 }
 
 #[test]

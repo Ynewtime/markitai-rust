@@ -149,6 +149,11 @@ impl Process {
     }
 }
 
+pub(super) enum Navigation {
+    Page(Value),
+    Pdf(super::BrowserPdf),
+}
+
 pub(super) struct Browser {
     socket: WebSocket<TcpStream>,
     _process: Option<Process>,
@@ -162,6 +167,10 @@ pub(super) struct Browser {
     pub main_frame: Option<String>,
     pub status: Option<u64>,
     pub navigation_failed: bool,
+    navigation_id: Option<u64>,
+    navigation_reply: Option<Value>,
+    document_response_seen: bool,
+    paused_document: Option<super::download::Response>,
 }
 impl Drop for Browser {
     fn drop(&mut self) {
@@ -208,6 +217,10 @@ impl Browser {
             main_frame: None,
             status: None,
             navigation_failed: false,
+            navigation_id: None,
+            navigation_reply: None,
+            document_response_seen: false,
+            paused_document: None,
         };
         let target = browser.call("Target.createTarget", json!({"url":"about:blank"}))?;
         let target_id = target
@@ -231,7 +244,7 @@ impl Browser {
         browser.call("Browser.setDownloadBehavior", json!({"behavior":"deny"}))?;
         browser.call(
             "Fetch.enable",
-            json!({"patterns":[{"urlPattern":"*","requestStage":"Request"}],"handleAuthRequests":browser.auth.enabled()}),
+            json!({"patterns":[{"urlPattern":"*","requestStage":"Request"},{"urlPattern":"*","resourceType":"Document","requestStage":"Response"}],"handleAuthRequests":browser.auth.enabled()}),
         )?;
         browser.call("Emulation.setDeviceMetricsOverride", json!({"width":options.width,"height":options.height,"deviceScaleFactor":1,"mobile":false}))?;
         if !options.headers.is_empty() {
@@ -265,6 +278,10 @@ impl Browser {
         Ok(id)
     }
     fn event(&mut self, message: &Value) -> Result<()> {
+        if self.navigation_id.is_some() && message["id"].as_u64() == self.navigation_id {
+            self.navigation_reply = Some(message.clone());
+            return Ok(());
+        }
         if message.get("sessionId").and_then(Value::as_str) != Some(self.session.as_str()) {
             return Ok(());
         }
@@ -291,6 +308,24 @@ impl Browser {
                         json!({"requestId":id,"errorReason":"BlockedByClient"}),
                     )?;
                 } else {
+                    let main_document = self.navigation_id.is_some()
+                        && params["resourceType"].as_str() == Some("Document")
+                        && self.main_frame.as_deref() == params["frameId"].as_str();
+                    if main_document && params.get("responseStatusCode").is_some() {
+                        let status = params["responseStatusCode"].as_u64().unwrap_or(0);
+                        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                            self.document_response_seen = true;
+                            self.status = Some(status);
+                            if let Some(response) = super::download::Response::candidate(params)? {
+                                if self.paused_document.replace(response).is_some() {
+                                    return Err(failure(
+                                        "Chromium paused overlapping document downloads",
+                                    ));
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
                     self.send("Fetch.continueRequest", json!({"requestId":id}))?;
                 }
             }
@@ -323,6 +358,106 @@ impl Browser {
         }
         Ok(())
     }
+    /// Response interception precedes Page.navigate completion. Pump both here
+    /// so taking a body stream cannot deadlock behind the paused navigation.
+    pub fn navigate(&mut self, source: &str) -> Result<Navigation> {
+        let tree = self.call("Page.getFrameTree", json!({}))?;
+        self.main_frame = Some(
+            tree.pointer("/frameTree/frame/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| failure("Chromium returned no main frame"))?
+                .to_owned(),
+        );
+        self.document_response_seen = false;
+        self.navigation_reply = None;
+        self.navigation_id = Some(self.send("Page.navigate", json!({"url":source}))?);
+        loop {
+            if let Some(response) = self.paused_document.take() {
+                let body = self.read_document(&response)?;
+                response.validate_length(&body)?;
+                if response.is_pdf(&body) {
+                    self.call(
+                        "Fetch.failRequest",
+                        json!({"requestId":response.id,"errorReason":"Aborted"}),
+                    )?;
+                    self.navigation_id = None;
+                    self.navigation_reply = None;
+                    return Ok(Navigation::Pdf(response.pdf(body)));
+                }
+                self.call("Fetch.fulfillRequest", response.fulfilled(&body))?;
+            }
+            if let Some(reply) = self.navigation_reply.as_ref() {
+                if reply.get("error").is_some() {
+                    return Err(failure("Chromium protocol rejected Page.navigate"));
+                }
+                let result = reply.get("result").cloned().unwrap_or_else(|| json!({}));
+                if self.document_response_seen
+                    || result.get("errorText").is_some()
+                    || result["isDownload"].as_bool() == Some(true)
+                {
+                    self.navigation_id = None;
+                    self.navigation_reply = None;
+                    return Ok(Navigation::Page(result));
+                }
+            }
+            if let Some(message) = self.receive()? {
+                self.event(&message)?;
+            }
+        }
+    }
+
+    fn read_document(&mut self, response: &super::download::Response) -> Result<Vec<u8>> {
+        let result = self.call(
+            "Fetch.takeResponseBodyAsStream",
+            json!({"requestId":response.id}),
+        )?;
+        let handle = result["stream"]
+            .as_str()
+            .filter(|handle| !handle.is_empty() && handle.len() <= 4096)
+            .ok_or_else(|| failure("Chromium returned no download stream"))?;
+        let read = |browser: &mut Self| -> Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            loop {
+                let chunk = browser.call(
+                    "IO.read",
+                    json!({"handle":handle,"size":super::download::CHUNK}),
+                )?;
+                if super::download::append_chunk(&mut bytes, &chunk)? {
+                    return Ok(bytes);
+                }
+            }
+        };
+        let bytes = read(self);
+        let closed = self.call("IO.close", json!({"handle":handle}));
+        match bytes {
+            Ok(bytes) => {
+                closed?;
+                Ok(bytes)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn receive(&mut self) -> Result<Option<Value>> {
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| failure("Browser operation timed out"))?;
+        self.socket.get_mut().set_read_timeout(Some(remaining))?;
+        match self
+            .socket
+            .read()
+            .map_err(|_| failure("Browser operation timed out or connection closed"))?
+        {
+            Message::Text(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|_| failure("Invalid Chromium protocol response")),
+            Message::Ping(_) | Message::Pong(_) => Ok(None),
+            Message::Close(_) => Err(failure("Chromium closed its page")),
+            _ => Err(failure("Unexpected Chromium protocol frame")),
+        }
+    }
+
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         let remaining = self
             .deadline
@@ -444,6 +579,10 @@ mod tests {
                 main_frame: Some("main".into()),
                 status: None,
                 navigation_failed: false,
+                navigation_id: None,
+                navigation_reply: None,
+                document_response_seen: false,
+                paused_document: None,
             },
             worker,
         )

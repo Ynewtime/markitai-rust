@@ -29,12 +29,14 @@ pub(crate) struct VisionRequest<'a> {
 pub(crate) struct VisionFailure {
     pub error: Error,
     pub allow_text_fallback: bool,
+    pub(super) kind: FailureKind,
 }
 impl VisionFailure {
     pub(super) fn blocked(error: Error) -> Self {
         Self {
             error,
             allow_text_fallback: false,
+            kind: FailureKind::Blocked,
         }
     }
 }
@@ -44,6 +46,7 @@ impl From<Error> for VisionFailure {
         Self {
             error,
             allow_text_fallback,
+            kind: FailureKind::Validation,
         }
     }
 }
@@ -384,8 +387,14 @@ fn visual_prompts(
     } else {
         "paged-document"
     };
-    let scope =
-        llm_cache::prompt_scope(&["visual-json-text-v1", kind, &system, &user, rules, COMMON]);
+    let scope = llm_cache::prompt_scope(&[
+        "visual-structured-transport-v2",
+        kind,
+        &system,
+        &user,
+        rules,
+        COMMON,
+    ]);
     let timestamp = chrono::Local::now().to_rfc3339();
     let render = |template: &str| {
         template
@@ -554,6 +563,23 @@ fn run_batch(
                 .collect(),
         ),
     };
+    if item.first {
+        return structured::run(
+            structured::Request {
+                prompts: &prompts,
+                schema: structured::Schema::Document,
+                stop: Some(stop),
+            },
+            cfg,
+            env,
+            Some(runtime),
+            |value| {
+                let answer = document::parse_value(value, false)?;
+                checked_answer(item, answer.markdown, Some(answer.metadata))
+            },
+        )
+        .map(|(answer, _)| answer);
+    }
     let mut failure = Error::Conversion("Invalid visual response".into());
     for attempt in 0..3 {
         let (text, _) = run_controlled(
@@ -564,12 +590,7 @@ fn run_batch(
             Some(runtime),
             Some(stop),
         )?;
-        let parsed = if item.first {
-            document::parse_answer(&text)
-                .and_then(|answer| checked_answer(item, answer.markdown, Some(answer.metadata)))
-        } else {
-            checked_answer(item, text, None)
-        };
+        let parsed = checked_answer(item, text, None);
         match parsed {
             Ok(answer) => return Ok(answer),
             Err(error) => failure = error,

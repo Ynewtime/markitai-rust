@@ -41,7 +41,7 @@ markitai -c isolated.json doctor --json
 - 初始化只检测当前核心支持的 API 环境配置和 `MODEL`，不发模型请求，不保存凭据明文，生成配置默认关闭 LLM。不检测订阅登录、不安装运行时、不创建参考版 `.env` 模板；可用环境变量或现有隔离 home 下的 `.env` 配置凭据。交互编辑/初始化与其他新功能的验证状态以调度中心为准。
 - `-I/--interactive` 引导选择文件、目录或 URL、输出目录、LLM、alt/desc/pure、OCR 与截图，确认后复用普通转换、报告和批量流程。显式配置、preset 和命令行开关成为向导默认值；Enter 保留当前有效值，y/n 显式启用/关闭，摘要显示最终效果。这比参考版仅发送勾选的正向开关更明确，也保留了参考版重新启动 CLI 时会丢失的显式配置。缺少模型时可设置仅用于本次运行的 API 模型/环境引用/隐藏密钥、重试检测或关闭 LLM；不写配置，不调用订阅 CLI。提示与摘要写 stderr，不改变转换 stdout。q、EOF、拒绝确认退出 0；Unix 向导提示期间 Ctrl-C 同样退出 0并恢复密钥输入回显，转换开始后使用普通中断行为。非 Unix 中断状态依终端平台，尚未实机验证。`-I --json`、向导与子命令混用、非终端输入均退出 2。
 - `doctor [--json]` 恢复参考的顶层检查字典：`playwright/libreoffice/rapidocr/anydoc/serve/llm-api/vision-model/vlm-ocr`，配置订阅模型时追加对应 SDK/auth 项。每项包含 `name/description/status/message/install_hint`，状态为 `ok/warning/missing/error`，按检查需要附 `path/optional/models`；保留旧 key，但描述实际原生后端，不声称安装了同名 Python 包。Chromium 实际执行私有 profile 的 about:blank/CDP 启停，LibreOffice 有界执行隔离的 `--version`；这不证明网页/文档完整兼容。OCR 检查平台 API 可用性，不预热模型；LLM 只核对本地配置、环境引用和路由资格，不联系 provider。
-- doctor 缺少可选组件退出 0；活跃模型缺少环境引用或不可用、配置明确要求的浏览器不可启动时退出 1，weight=0 的模型不阻断。显式 playwright、截图以及带 HTTP credentials 的 auto 抓取要求浏览器，显式 static 不因该凭据字段而要求浏览器。VLM OCR 项显示 `MARKITAI_NO_VLM_OCR` 的实际选择。`doctor --fix` 运行诊断并给人工修复提示；原生自动 Chromium 安装仍未实现，浏览器不可用时返回 1且不执行安装器。`--json --fix` 返回 2，Python 专属 `--suggest-extras` 明确未支持。
+- doctor 缺少可选组件退出 0；活跃模型缺少环境引用或不可用、配置明确要求的浏览器不可启动时退出 1，weight=0 的模型不阻断。显式 playwright、截图以及带 HTTP credentials、非空 cookies 或额外 HTTP headers 的 auto 抓取要求浏览器，显式 static 不因该凭据字段而要求浏览器。VLM OCR 项显示 `MARKITAI_NO_VLM_OCR` 的实际选择。`doctor --fix` 在浏览器不可用时，通过原生安装器下载官方 Chrome headless shell，私有启动验证后原子启用；已有浏览器正常则不下载。显式 `MARKITAI_BROWSER_EXECUTABLE` 会阻止自动替换该路径。详见[浏览器安装](browser-installation.md)。`--json --fix` 返回 2，Python 专属 `--suggest-extras` 明确未支持。
 - `serve` 启动原生 REST 服务，支持提交文件/URL、任务快照与 SSE、结果/资产/ZIP 下载及持久历史。沿用 host、port、no-open、no-auth、allowed-host 参数；完整工作区界面和其他未迁移接口见 [REST 服务](serve.md)。
 - `mcp` 通过标准输入/输出提供 `convert_document`、`convert_url`、`batch_convert`、`job_status` 四个工具。配置与文件输出沿用同一核心，批处理任务保存在当前 MCP 进程内；协议和结果边界见 [MCP 服务](mcp.md)。
 - `--dry-run` 仅枚举输入和目标，不调用转换器、不创建输出目录。
@@ -56,7 +56,7 @@ markitai -c isolated.json doctor --json
 
 ## 明确的迁移缺口
 
-URL 抓取的其他策略、非 Unix 断点恢复、Batch API、原生自动浏览器安装、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；文本、独立图片与分页视觉请求的缓存范围分别见 [LLM 处理](llm.md)，不能将一次命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 演示与文字文档可通过可选的独立 LibreOffice 安装获得全页截图和 OCR 补充，详见 [Office 渲染](office-rendering.md)；表格截图和其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
+URL 抓取的其他策略、非 Unix 断点恢复、Batch API、订阅登录、serve 完整工作区仍有迁移缺口。pure 按参考行为绕过 LLM 缓存；文本、独立图片与分页视觉请求的缓存范围分别见 [LLM 处理](llm.md)，不能将一次命中理解成所有输入已支持缓存。其余未实现的开关/命令请求会失败并说明原因。Office 演示与文字文档可通过可选的独立 LibreOffice 安装获得全页截图和 OCR 补充，详见 [Office 渲染](office-rendering.md)；XLS/XLSX/ODS 支持每张完整工作表一页，包含隐藏和空表；Numbers 完整画布和其他平台本地 OCR/PDF 渲染仍未完成；未实现的选项只在遇到相关格式或图片时拒绝，不应阻断纯文本转换。独立栅格图片、完整多页 TIFF 和 SVG 可经 LLM 视觉模型读取。alt/desc 已接入真实图片引用、结构化分析及 images.json 合并，详见[图片分析](image-enrichment.md)；需要启用 LLM。rich/standard preset 仍不是对所有格式可用的完整模式。
 
 持久报告、可选历史导出和 Unix 批量恢复已实现；单项和非 Unix 恢复仍明确拒绝。普通非 Unix 转换保留既有行为，但尚未完成实机验证。混合目录分别应用文件与 URL 并发上限。URL 列表的自定义文件名只允许一个安全 basename；旧实现的名称清理细节尚待配对验收。CLI 帮助布局、移除选项迁移提示、非 Unix 进程中断清理及全部非 ASCII 终端行为仍需专门测试。
 

@@ -4,7 +4,7 @@ use lopdf::{Object, Stream, dictionary};
 const PRESENTATION: &[u8] = include_bytes!("fixtures/hidden-blank-three.pptx");
 const WORD: &[u8] = include_bytes!("fixtures/blank-middle-three.docx");
 
-fn pdf(count: usize) -> Vec<u8> {
+pub(super) fn pdf(count: usize) -> Vec<u8> {
     let mut pdf = lopdf::Document::with_version("1.5");
     let pages = pdf.new_object_id();
     let content = pdf.add_object(Stream::new(dictionary! {}, Vec::new()));
@@ -21,7 +21,7 @@ fn pdf(count: usize) -> Vec<u8> {
 }
 
 #[test]
-fn all_existing_office_aliases_are_classified_without_spreadsheet_claims() {
+fn all_existing_office_aliases_include_workbooks() {
     for extension in ["ppt", "pps", "pot", "PPTX", "pptm", "ppsx", "ppsm", "odp"] {
         assert_eq!(kind(extension), Some(OfficeKind::Presentation));
     }
@@ -33,7 +33,7 @@ fn all_existing_office_aliases_are_classified_without_spreadsheet_claims() {
     }
     assert_eq!(kind("pdf"), None);
     assert!(matches!(
-        export_pdf(Path::new("missing.xlsx"), OfficeKind::Spreadsheet),
+        export_pdf(Path::new("source.numbers"), OfficeKind::Spreadsheet),
         Err(Error::Unsupported(_))
     ));
 }
@@ -269,4 +269,136 @@ fn diagnostic_checks_startup_without_export_and_bounds_hung_programs() {
     let start = Instant::now();
     assert!(process::diagnose(&hung, &profile, start + Duration::from_millis(150)).is_err());
     assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn workbook_export_selects_whole_sheet_mode_and_rejects_lost_sheets() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("source.xlsx");
+    fs::write(&input, include_bytes!("fixtures/whole-workbook.xlsx")).unwrap();
+    let fixture = directory.path().join("pages.pdf");
+    fs::write(&fixture, pdf(4)).unwrap();
+    let program = mock(
+        directory.path(),
+        &format!(
+            "found=no\nfor value in \"$@\"; do\n case \"$value\" in *calc_pdf_Export*SinglePageSheets*true*) found=yes;; esac\ndone\n[ \"$found\" = yes ]\ncp {} \"$out/document.pdf\"",
+            quote(&fixture)
+        ),
+    );
+    let result = export_with(
+        &program,
+        &input,
+        OfficeKind::Spreadsheet,
+        Duration::from_secs(5),
+        MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(result.pages, 4);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("print areas"))
+    );
+    fs::write(&fixture, pdf(3)).unwrap();
+    let error = export_with(
+        &program,
+        &input,
+        OfficeKind::Spreadsheet,
+        Duration::from_secs(5),
+        MAX_BYTES,
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("every workbook sheet"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Requires installed LibreOffice and native macOS renderer; run explicitly"]
+fn installed_libreoffice_whole_sheets_keep_wide_hidden_empty_and_last_content() {
+    for (extension, bytes) in [
+        (
+            "xlsx",
+            include_bytes!("fixtures/whole-workbook.xlsx").as_slice(),
+        ),
+        (
+            "ods",
+            include_bytes!("fixtures/whole-workbook.ods").as_slice(),
+        ),
+        (
+            "xls",
+            include_bytes!("fixtures/whole-workbook.xls").as_slice(),
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory
+            .path()
+            .join(format!("工作簿 original.{extension}"));
+        fs::write(&source, bytes).unwrap();
+        let result = export_pdf(&source, OfficeKind::Spreadsheet).unwrap();
+        assert_eq!(result.pages, 4, "{extension}");
+        let document = lopdf::Document::load_mem(&result.bytes).unwrap();
+        assert!(
+            document
+                .extract_text(&[1])
+                .unwrap()
+                .contains("VISIBLE FIRST")
+        );
+        assert!(
+            document
+                .extract_text(&[1])
+                .unwrap()
+                .contains("OUTSIDE PRINT AREA")
+        );
+        assert!(
+            document
+                .extract_text(&[2])
+                .unwrap()
+                .contains("HIDDEN MIDDLE")
+        );
+        assert!(document.extract_text(&[3]).unwrap().trim().is_empty());
+        assert!(document.extract_text(&[4]).unwrap().contains("LAST SHEET"));
+        let session = crate::pdf_raster::PdfRasterSession::open(&result.bytes).unwrap();
+        let first = session.render(1, 72.).unwrap();
+        assert!(
+            first.width() > 700 && first.height() > 700,
+            "full sheet was reduced to paper size"
+        );
+        for color in [[255, 0, 0], [0, 0, 255]] {
+            assert!(
+                first
+                    .pixels()
+                    .filter(|pixel| pixel
+                        .0
+                        .into_iter()
+                        .zip(color)
+                        .all(|(actual, expected)| (i16::from(actual) - expected as i16).abs() < 8))
+                    .count()
+                    > 100,
+                "{extension}: missing cell background {color:?}"
+            );
+        }
+        for (page, color) in [(2, [0, 255, 0]), (4, [255, 204, 0])] {
+            let image = session.render(page, 72.).unwrap();
+            assert!(
+                image
+                    .pixels()
+                    .filter(|pixel| pixel
+                        .0
+                        .into_iter()
+                        .zip(color)
+                        .all(|(actual, expected)| (i16::from(actual) - expected as i16).abs() < 8))
+                    .count()
+                    > 100,
+                "{extension}: page {page}"
+            );
+        }
+        // Calc keeps the genuinely empty sheet as a very thin page; preserve
+        // that geometry instead of inventing an A4/Letter canvas or dropping it.
+        let blank = session.render(3, 72.).unwrap();
+        assert!(blank.pixels().all(|pixel| pixel.0 == [255, 255, 255]));
+        assert_eq!(fs::read(source).unwrap(), bytes);
+    }
 }

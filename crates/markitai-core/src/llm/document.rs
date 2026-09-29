@@ -243,7 +243,7 @@ fn document_prompts(
         "Keep all meaningful source content and its original order. Remove only genuine extraction noise."
     };
     let cache_scope = llm_cache::prompt_scope(&[
-        "document-json-v1-chunks32000-protection1",
+        "document-json-v2-transport-chunks32000-protection1",
         kind,
         &system,
         &user,
@@ -276,16 +276,17 @@ fn run_chunk(
     env: &HashMap<String, String>,
     runtime: &LlmRuntime,
 ) -> Result<Answer> {
-    let mut failure = Error::Conversion("Invalid structured document response".into());
-    for attempt in 0..3 {
-        let (text, _) = run_with_runtime(
-            &item.prompts,
-            cfg,
-            env,
-            &mut std::thread::sleep,
-            Some(runtime),
-        )?;
-        match parse_answer(&text).and_then(|answer| {
+    structured::run(
+        structured::Request {
+            prompts: &item.prompts,
+            schema: structured::Schema::Document,
+            stop: None,
+        },
+        cfg,
+        env,
+        Some(runtime),
+        |value| {
+            let answer = parse_value(value, false)?;
             validate_answer(
                 protected,
                 &item.source,
@@ -294,15 +295,10 @@ fn run_chunk(
                 multiple,
             )?;
             Ok(answer)
-        }) {
-            Ok(answer) => return Ok(answer),
-            Err(error) => failure = error,
-        }
-        if attempt < 2 && document_exhausted() {
-            break;
-        }
-    }
-    Err(failure)
+        },
+    )
+    .map(|(answer, _)| answer)
+    .map_err(|failure| failure.error)
 }
 
 fn validate_answer(
@@ -319,7 +315,8 @@ fn validate_answer(
     Ok(())
 }
 
-pub(super) fn parse_answer(text: &str) -> Result<Answer> {
+#[cfg(test)]
+fn parse_answer(text: &str) -> Result<Answer> {
     let text = text.trim();
     let text = if text.starts_with("```json\n") || text.starts_with("```\n") {
         text.split_once('\n')

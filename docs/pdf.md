@@ -15,7 +15,9 @@ downloads need no temporary input file or second download when media is enabled.
 The original URL remains the public source and naming input. A redirected final
 URL is recorded with sensitive components redacted. PDF responses are never stored
 as extracted HTML/text cache entries, including when subsequent PDF parsing fails.
-Explicit browser and remote strategies retain their selected backend.
+Explicit browser PDF responses stream through the same authenticated CDP
+session into the native reader, retaining `playwright` strategy metadata.
+Remote extraction services retain their selected backend.
 
 Downloaded PDFs support requested native OCR and page screenshots. Screenshot-only
 PDF output retains its Markdown and page references, unlike webpage capture-only

@@ -1,5 +1,6 @@
 mod asset_store;
 mod browser;
+mod browser_install;
 pub mod config;
 mod fetch;
 pub mod fetch_cache;
@@ -43,6 +44,11 @@ pub fn office_render_available() -> bool {
 /// Launch and close an isolated browser session; no document or provider request is made.
 pub fn browser_diagnostic() -> Result<Option<PathBuf>> {
     browser::diagnostic()
+}
+
+/// Explicitly install and validate the official headless browser in Markitai's private home.
+pub fn install_browser() -> Result<PathBuf> {
+    browser_install::install()
 }
 
 /// Check that the optional Office executable starts within a bounded deadline.
@@ -190,9 +196,6 @@ pub fn convert_with_publication(
             input_path.file_name().unwrap_or_default().to_string_lossy()
         )));
     }
-    if office_media_requested && office_kind == Some(office_render::OfficeKind::Spreadsheet) {
-        return Err(Error::Unsupported("Spreadsheet page screenshots and OCR are not supported; convert the native tables without screenshot or OCR options".into()));
-    }
     let name = if is_url {
         output::url_name(source, &Default::default())
     } else {
@@ -271,7 +274,7 @@ pub fn convert_with_publication(
                 document.metadata.insert("format".into(), "PDF".into());
                 document
                     .metadata
-                    .insert("fetch_strategy".into(), "static".into());
+                    .insert("fetch_strategy".into(), downloaded.strategy.into());
                 if downloaded.final_url != source {
                     document.metadata.insert(
                         "source_url".into(),

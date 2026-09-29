@@ -121,6 +121,7 @@ pub(crate) struct DownloadedPdf {
     pub bytes: Vec<u8>,
     pub final_url: String,
     pub warnings: Vec<String>,
+    pub strategy: &'static str,
 }
 
 impl FetchContent {
@@ -168,21 +169,17 @@ pub(crate) fn fetch_with_context(
     let capture = config::enabled(cfg, "/screenshot/enabled")
         || config::enabled(cfg, "/screenshot/screenshot_only");
     match strategy {
-        "playwright" => {
-            require_capture_output(cfg, output_available)?;
-            fetch_browser(source, cfg, capture)
-        }
+        "playwright" => fetch_browser(source, cfg, capture, output_available),
         // A configured browser identity must not read an anonymous cache entry
         // or send an unauthenticated PDF probe before challenge authentication.
-        "auto" if browser::http_credentials_configured(cfg) => {
-            require_capture_output(cfg, output_available)?;
-            fetch_browser(source, cfg, capture)
+        "auto" if browser::identity_configured(cfg) => {
+            fetch_browser(source, cfg, capture, output_available)
         }
         "auto" if capture => match probe_pdf(source, &url, cfg, explicit_strategy)? {
             Some(outcome) => Ok(outcome),
             None => {
                 require_capture_output(cfg, output_available)?;
-                fetch_browser(source, cfg, true)
+                fetch_browser(source, cfg, true, output_available)
             }
         },
         "static" if capture => {
@@ -191,7 +188,7 @@ pub(crate) fn fetch_with_context(
             let mut outcome = match fetch_static(source, &url, cfg, explicit_strategy) {
                 Err(error) if visual_only(cfg) && browser_quality_failure(&error) => {
                     require_capture_output(cfg, output_available)?;
-                    return fetch_browser(source, cfg, true);
+                    return fetch_browser(source, cfg, true, output_available);
                 }
                 result => result?,
             };
@@ -203,7 +200,7 @@ pub(crate) fn fetch_with_context(
         }
         "auto" => match fetch_static(source, &url, cfg, explicit_strategy) {
             Err(error) if browser_quality_failure(&error) && browser::available() => {
-                fetch_browser(source, cfg, false)
+                fetch_browser(source, cfg, false, output_available)
             }
             result => result,
         },
@@ -307,10 +304,16 @@ fn browser_quality_failure(error: &Error) -> bool {
 
 fn attach_screenshot(source: &str, cfg: &Value, outcome: &mut FetchOutcome) -> Result<()> {
     match browser::fetch(source, cfg, true) {
-        Ok(page) => {
+        Ok(browser::BrowserResponse::Page(page)) => {
             outcome.screenshots = page.screenshots;
             outcome.content.warnings_mut().extend(page.warnings);
         }
+        Ok(browser::BrowserResponse::Pdf(_)) if visual_only(cfg) => {
+            return Err(Error::Fetch("Browser received a PDF instead of the selected webpage; use the playwright strategy to convert that PDF".into()));
+        }
+        Ok(browser::BrowserResponse::Pdf(_)) => outcome.content.warnings_mut().push(
+            "Browser received a PDF instead of a webpage screenshot; retained the selected text representation.".into(),
+        ),
         Err(error) if visual_only(cfg) => return Err(error),
         Err(_) => outcome
             .content
@@ -320,8 +323,36 @@ fn attach_screenshot(source: &str, cfg: &Value, outcome: &mut FetchOutcome) -> R
     Ok(())
 }
 
-fn fetch_browser(source: &str, cfg: &Value, capture: bool) -> Result<FetchOutcome> {
-    browser_outcome(browser::fetch(source, cfg, capture)?, cfg)
+fn fetch_browser(
+    source: &str,
+    cfg: &Value,
+    capture: bool,
+    output_available: bool,
+) -> Result<FetchOutcome> {
+    browser_response_outcome(browser::fetch(source, cfg, capture)?, cfg, output_available)
+}
+
+fn browser_response_outcome(
+    response: browser::BrowserResponse,
+    cfg: &Value,
+    output_available: bool,
+) -> Result<FetchOutcome> {
+    match response {
+        browser::BrowserResponse::Page(page) => {
+            require_capture_output(cfg, output_available)?;
+            browser_outcome(page, cfg)
+        }
+        browser::BrowserResponse::Pdf(pdf) => Ok(FetchOutcome {
+            content: FetchContent::Pdf(DownloadedPdf {
+                bytes: pdf.bytes,
+                final_url: pdf.final_url,
+                warnings: pdf.warnings,
+                strategy: "playwright",
+            }),
+            cache_hit: false,
+            screenshots: Vec::new(),
+        }),
+    }
 }
 
 fn browser_outcome(page: browser::BrowserPage, cfg: &Value) -> Result<FetchOutcome> {
@@ -728,6 +759,7 @@ impl StaticResponse {
 
     fn into_pdf(self) -> DownloadedPdf {
         DownloadedPdf {
+            strategy: "static",
             bytes: self.bytes,
             final_url: self.effective_url.into(),
             warnings: Vec::new(),

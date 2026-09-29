@@ -25,8 +25,9 @@ cannot conceal a URL that now downloads a PDF. The `playwright` strategy uses
 [native Chromium CDP](browser.md) for JavaScript and captures; the complete
 reference fallback policy and SPA-domain learning remain unfinished. `jina` and
 `defuddle` keep explicit remote-consent and target checks and do not use this
-cache. Explicit browser and remote strategies retain their selected backend;
-they do not perform this native PDF handoff. Unsupported strategies fail before cache lookup, so an old page cannot
+cache. Explicit browser retrieval also hands initial PDF document responses
+to the native reader using bytes streamed from the same CDP session. Remote
+strategies retain their selected extraction service and do not use that handoff. Unsupported strategies fail before cache lookup, so an old page cannot
 make an unsupported strategy appear to work.
 
 ## Downloaded PDF media
@@ -57,8 +58,10 @@ For screenshot-only requests without LLM or an output directory, static/auto
 must classify the response before deciding whether the request is a PDF text
 conversion or an unobservable browser capture. Non-PDF content is rejected before
 starting the browser. This makes classification HTTP errors observable before
-the missing-output error. Explicit browser/remote requests reject that combination
-before making their selected fetch.
+the missing-output error. Explicit browser and credentialed auto requests must
+first classify their authenticated response; a rendered HTML result then enforces
+the same output requirement, while PDF bytes follow the native PDF contract.
+Remote services reject that combination before making their selected fetch.
 
 ## Stored results and identity
 
@@ -175,7 +178,8 @@ owned-asset, stale-fallback and request-coalescing work.
 
 ## Browser HTTP credentials
 
-When `fetch.playwright.http_credentials` is non-null, `auto` selects the browser
+When `fetch.playwright.http_credentials` is non-null, or browser cookies/extra
+HTTP headers are nonempty, `auto` selects the browser
 before consulting anonymous page cache or sending a PDF classification probe.
 This avoids reusing a public page for a configured private identity. Browser
 responses continue to bypass static cache reads and writes; removing credentials
@@ -187,6 +191,7 @@ The browser answers bounded Basic challenges only within the configured exact
 origin. Omitting origin binds credentials to the initial scheme/host/effective
 port; this intentionally narrows the reference's unrestricted default. The
 reference also tries anonymous static retrieval first in auto mode; the native
-authenticated path intentionally selects its configured identity first. Browser
-authenticated PDF downloads, proxy authentication and persistent sessions remain
-separate capabilities. See [browser contracts](browser.md).
+authenticated path intentionally selects its configured identity first. Initial
+PDF document responses, including redirects and extensionless attachments, stream
+from that session without a second GET and retain `playwright` strategy metadata.
+Proxy authentication and persistent sessions remain separate capabilities. See [browser contracts](browser.md).

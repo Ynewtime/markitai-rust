@@ -13,6 +13,7 @@ mod process;
 mod slides;
 #[cfg(test)]
 mod tests;
+mod workbooks;
 
 const MAX_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_PAGES: usize = 1000;
@@ -134,8 +135,11 @@ pub(crate) fn diagnostic() -> Result<Option<PathBuf>> {
 }
 
 pub(crate) fn export_pdf(input: &Path, requested_kind: OfficeKind) -> Result<OfficePdf> {
-    if requested_kind == OfficeKind::Spreadsheet {
-        return Err(Error::Unsupported("Spreadsheet screenshots are not implemented; Office PDF export currently supports presentations and word-processing documents".into()));
+    if input
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("numbers"))
+    {
+        return Err(Error::Unsupported("Numbers complete-sheet screenshots are not supported by this LibreOffice adapter; native Numbers table reading remains available without screenshot or OCR options".into()));
     }
     let program = discover().ok_or_else(|| Error::Unsupported("Office screenshots require an installed LibreOffice (soffice on PATH) and the native PDF page renderer".into()))?;
     export_with(&program, input, requested_kind, TIMEOUT, MAX_BYTES)
@@ -179,7 +183,7 @@ fn export_with(
         .and_then(|v| v.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if kind(&extension) != Some(requested_kind) || requested_kind == OfficeKind::Spreadsheet {
+    if kind(&extension) != Some(requested_kind) {
         return Err(failure("unsupported or mismatched Office document type"));
     }
     let deadline = Instant::now() + timeout;
@@ -204,11 +208,17 @@ fn export_with(
         {
             Some(crate::formats::extract_presentation_count(&bytes)?)
         }
+        OfficeKind::Spreadsheet if extension == "ods" => Some(workbooks::ods(&bytes)?),
+        OfficeKind::Spreadsheet if matches!(extension.as_str(), "xlsx" | "xlsm") => {
+            Some(workbooks::xlsx(&bytes)?)
+        }
         _ => None,
     };
     drop(bytes);
     if expected.is_some_and(|count| count == 0 || count > MAX_PAGES) {
-        return Err(failure("slide count exceeds 1,000 or is empty"));
+        return Err(failure(
+            "source page or sheet count exceeds 1,000 or is empty",
+        ));
     }
     let mut render_source = source;
     let mut remaining_output = byte_limit;
@@ -236,6 +246,31 @@ fn export_with(
         render_source = normalized.join("document.pptx");
         warnings.push("Legacy presentation slide count was verified against LibreOffice's imported PPTX model before PDF export".into());
     }
+    if requested_kind == OfficeKind::Spreadsheet {
+        if expected.is_none() {
+            // Binary Excel and Numbers have different container models. Count the
+            // complete private import rather than assuming one exported page.
+            let normalized = workspace.path().join("normalized");
+            fs::create_dir(&normalized)?;
+            process::convert(
+                program,
+                &render_source,
+                &normalized,
+                &profile,
+                "ods:calc8",
+                deadline,
+                byte_limit,
+            )?;
+            let converted = expected_file(&normalized, "document.ods", byte_limit)?;
+            remaining_output = byte_limit
+                .checked_sub(converted.len() as u64)
+                .ok_or_else(|| failure("normalized workbook exhausted export byte limit"))?;
+            expected = Some(workbooks::ods(&converted)?);
+            render_source = normalized.join("document.ods");
+            warnings.push("Workbook sheet count was verified against LibreOffice's imported ODS model; this does not establish complete source-format import fidelity".into());
+        }
+        warnings.push("Workbook screenshots use complete-sheet export: all sheets, including hidden and empty sheets, retain their full content bounds; paper sizes, print areas and manual print pagination are ignored. Oversized sheets fail the native page-pixel limits rather than being truncated.".into());
+    }
     let filter = match requested_kind {
         OfficeKind::Presentation => {
             r#"pdf:impress_pdf_Export:{"ExportHiddenSlides":{"type":"boolean","value":"true"},"ExportNotesPages":{"type":"boolean","value":"false"}}"#
@@ -243,7 +278,9 @@ fn export_with(
         OfficeKind::WordProcessing => {
             r#"pdf:writer_pdf_Export:{"IsSkipEmptyPages":{"type":"boolean","value":"false"}}"#
         }
-        OfficeKind::Spreadsheet => unreachable!(),
+        OfficeKind::Spreadsheet => {
+            r#"pdf:calc_pdf_Export:{"SinglePageSheets":{"type":"boolean","value":"true"}}"#
+        }
     };
     process::convert(
         program,
@@ -255,7 +292,11 @@ fn export_with(
         remaining_output,
     )?;
     let bytes = expected_file(&output_dir, "document.pdf", remaining_output)?;
-    let pages = validate_pdf(&bytes, expected)?;
+    let pages = if requested_kind == OfficeKind::Spreadsheet {
+        workbooks::validate_pdf(&bytes, expected.expect("workbook import was counted"))?
+    } else {
+        validate_pdf(&bytes, expected)?
+    };
     Ok(OfficePdf {
         bytes,
         pages,

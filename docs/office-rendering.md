@@ -9,8 +9,12 @@ having LibreOffice installed does not make unsupported PDF platforms available.
 
 The adapter accepts existing presentation aliases `ppt`, `pps`, `pot`, `pptx`,
 `pptm`, `ppsx`, `ppsm`, `odp`, and word-processing aliases `doc`, `docx`, `docm`,
-`odt`, `rtf`. Spreadsheet screenshots return an explicit unsupported error.
-Calc print areas do not establish a complete-workbook rendering contract.
+`odt`, `rtf`. Workbook capture accepts `xls`, `xlsx`, `xlsm`, `xlsb` and `ods`
+through Calc's complete-sheet export. XLSX, XLS and ODS have dedicated authored
+fixtures; XLSM/XLSB import fidelity has not been independently established.
+Numbers screenshots remain explicitly unsupported: the installed LibreOffice
+could not import the retained Numbers sample. Native Numbers table reading is
+still available without screenshot/OCR options.
 
 For presentations, the ordered source slide list includes hidden and blank
 slides. OOXML relationships and ODP presentation elements provide the count.
@@ -21,6 +25,46 @@ contain exactly that many pages. Hidden-slide export is enabled and notes pages
 are disabled. Word exports all pages with blank-page omission disabled; it has no
 reliable source paragraph-to-page mapping. These export options are described by
 [LibreOffice's PDF parameter documentation](https://help.libreoffice.org/latest/en-US/text/shared/guide/pdf_params.html).
+
+## Complete workbook sheets
+
+Workbook capture deliberately uses `calc_pdf_Export` with `SinglePageSheets=true`.
+The [official export contract](https://help.libreoffice.org/latest/en-US/text/shared/01/ref_pdf_export_general.html)
+includes hidden sheets and ignores paper sizes, print areas and manual print
+pagination, fitting each entire sheet to its own PDF page. This is a complete
+sheet canvas, not a reproduction of the workbook's printed pages. No `PageRange`
+or current-sheet selection is supplied. A worksheet configured to print on
+several paper pages therefore produces one full-sized canvas by this explicit
+mode; its bottom/right content is not silently discarded or forced into A4.
+
+Hidden sheets can consequently appear in screenshots and, when visual LLM
+processing is enabled, in model requests. Hidden rows/columns retain the imported
+document's display behavior; complete-sheet export does not promise to reveal
+every hidden cell. Native table text remains the original Rust extraction, so
+its saved values and inclusion rules can differ from LibreOffice's displayed
+or recalculated values. A runtime warning explains complete-sheet capture and
+its printing differences.
+
+XLSX/XLSM sheet lists and ODS tables are counted from bounded source XML, including
+hidden and empty sheets. Binary XLS/XLSB is first imported into a private ODS copy,
+whose ordered sheet model supplies the expected count. Matching that import is
+not proof that LibreOffice imported every source feature correctly. The exported
+PDF must contain exactly one page per counted sheet; fewer or additional pages
+fail explicitly. The original file is never modified. The reference Python
+XLSX/XLS readers extract tables rather than sheet screenshots, so this is a new
+native capability, not an assertion of reference screenshot parity.
+
+The tested LibreOffice preserves a genuinely empty sheet as an extremely thin
+white PDF page. Its actual positive page dimensions are retained and the native
+rasterizer rounds up to at least one pixel; no arbitrary paper-sized page is
+inserted. An exporter that omits an empty sheet fails the count check instead of
+reporting complete capture. Blank content cannot serve as proof of OCR accuracy.
+
+The native rasterizer validates the full page dimensions before allocating or
+applying output-image compression: a sheet over the per-page or document pixel
+budget fails, and the caller receives no truncated success. Existing user image
+size/format options still control the encoded screenshots after admission. This
+does not establish legibility after a user-requested reduction of a large sheet.
 
 The existing document body is preserved. Ordered Slide/Page screenshot comments
 are appended in an explicit appendix, rather than inventing a correspondence
@@ -45,9 +89,13 @@ covers admission and both legacy normalization/PDF export subprocesses. A timeou
 kills and waits for the child; Unix uses a dedicated process group to include
 launcher descendants. Windows process-tree termination is implemented but has not
 been validated on a Windows host. Output growth is polled every 25 ms. Inputs are
-limited to 100 MiB; normalized PPTX plus exported PDF share a 100 MiB budget.
-Presentations and resulting PDFs have a 1,000-page limit. XML parts used for source
-counting retain existing bounded readers.
+limited to 100 MiB; normalized PPTX/ODS plus exported PDF share a 100 MiB budget.
+Presentations, workbooks and resulting PDFs have a 1,000-slide/sheet/page limit.
+Workbook ZIP packages allow at most 16,384 entries and the sheet-index XML at
+most 32 MiB, with nesting capped at 128. Missing/ambiguous sheet-index parts,
+document types, incomplete XML and empty sheet lists are rejected. These bounds
+apply before requesting PDF export; the optional LibreOffice importer still has
+its own internal allocations.
 
 A successful exit alone is insufficient: exactly one expected regular output
 file must exist, the PDF signature and document structure must parse, encryption
@@ -68,6 +116,26 @@ from text checks. Fault tests cover missing, malformed, short, unexpected and
 symlinked PDFs, input preservation, timeout descendant cleanup and byte limits.
 Optional installed-LibreOffice tests are explicitly ignored in the default gate;
 they must be run separately and cannot count as success when the backend is absent.
+
+Workbook fixtures are independently authored ZIP/XML packages:
+`whole-workbook.xlsx` and `whole-workbook.ods`. Their first sheet has a narrow
+print area, manual pagination, a wide canvas and a far bottom-right marker; the
+following sheets are hidden, truly empty and visible, in that order. The XLS
+fixture is derived from the authored XLSX using LibreOffice's `MS Excel 97`
+export filter. The generator and `workbooks-provenance.json` retain source hashes
+and provenance; they contain no user document data.
+
+The initial isolated export probe confirms why ordinary printing is insufficient:
+both XLSX and ODS export only two ordinary print pages, omitting the hidden sheet
+and the far marker. Complete-sheet export produces four correctly ordered pages;
+the XLS→ODS import path retains the same four sheets. These are direct exporter
+observations under `.local/workbook-round24`. The subsequent source-frozen
+R24 gate also passes the real Rust/core and public API workbook cases.
+New optional Rust tests cover full canvas colors and dimensions, empty-page
+retention, unchanged native tables, complete page references, model-budget
+rejection before any request, and pure/visual-only routing. Their final execution
+status is recorded by the coordinator in [CONTROL](CONTROL.md).
+
 Round 22's r4 validation passed the full gate and explicitly ran all six installed
 backend tests: two core tests and four public API tests on macOS. These verify
 hidden/blank slide order and full-frame pixels, the blank middle Word page,

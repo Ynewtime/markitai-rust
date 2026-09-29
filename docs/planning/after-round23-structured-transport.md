@@ -1,8 +1,12 @@
 # Structured transport after visual batching
 
-This is an implementation contract, not evidence that these protocols already
-work. Round twenty-three's JSON-text processing and pure requests remain intact
-while the transport is extended. No new public configuration is needed.
+Round twenty-four implements this contract in the private `llm/structured.rs`
+module. This document preserves the capability evidence and scope decisions;
+[the LLM guide](../llm.md#structured-provider-protocols) describes current behavior.
+Implementation and test source alone are not execution evidence; the coordinator
+records the integrated gate and retained-binary checks. Pure and later visual
+cleaning requests keep their existing plain transport. No public configuration
+fields were added.
 
 ## Existing configuration and reference behavior
 
@@ -135,8 +139,10 @@ mode without resending that rejected shape. Inspect bounded structured error
 codes/parameter names and retain only a sanitized classification. Unrelated
 invalid-image/input errors do not become capability evidence. Configuration,
 authentication after routing fallback, quota and budget failure do not descend.
-Temporary transport failures retain current bounded retry/fallback behavior;
-validation failure can descend after the single non-final attempt. Final JSON
+Temporary transport failures retain current bounded retry/fallback behavior inside
+the router; once exhausted, they stop the protocol ladder without reopening it in
+a different mode. Only explicit mode rejection and validation failure descend
+after the single non-final attempt. Final JSON
 text gets the existing total of three validation attempts. Preserve cancellation
 publication while still holding the HTTP permit, including fatal structured
 responses, so queued visual siblings cannot bypass the stop flag.
@@ -167,3 +173,41 @@ contribute once to the authoritative document usage.
 
 These fixtures prove native wire shapes, accounting and failure behavior. They
 do not establish live-vendor availability, model accuracy or pricing accuracy.
+
+## Round twenty-four implementation boundary
+
+The actual private API is `structured::run(Request { prompts, schema, stop },
+cfg, env, runtime, validate)`, returning a validated value and usage delta through
+the existing internal `VisionFailure` boundary. The public conversion and binding
+interfaces do not change. `VisionFailure` gains a private failure classification
+so protocol rejection, validation, unrelated input errors, refusal, truncation and
+budget cancellation are never inferred from user-facing error strings.
+
+`run_mode` retains the existing weighted router and fallback groups. Its bounded
+HTTP reader records usage before expected-mode decoding. Application validation
+lives outside the transport retry loop. Cache writes remain in document/vision
+workers and contain only validated semantic data. Prompt-contract fingerprints
+move to version two; old rows are retained. The SQLite cache/storage layer is
+unchanged.
+
+Local repair is intentionally narrower than the reference repair library: only
+trailing commas before already present object/array closers, outside strings, at
+most 1 MiB. Validation and source preservation still apply. It cannot complete a
+truncated object. Image analysis now uses the final text rung's three validation
+attempts before its established nonfatal caption/description fallback; the old
+single-invalid-answer fixture is adjusted to preserve that fallback assertion.
+
+A deployment with an unresolved explicit credential environment reference is
+excluded by the existing resolver. A credential-free custom/local endpoint is
+still routable under the existing contract and therefore participates in the
+capability intersection. We do not remove a real router candidate only from
+capability selection, which could send an unsupported wire mode to that candidate.
+No live provider, paid model, pricing accuracy or broader model catalog support
+is established by the new local HTTP tests.
+
+The final implementation deliberately limits descent to mode rejection and
+schema/content validation. Exhausted transport errors retain their classification
+through JSON-text mode, and image analysis does not reinterpret them as a reason
+to start caption/description calls. Response limits are terminal resource errors.
+This prevents protocol modes from multiplying an already exhausted retry policy;
+it is a bounded-retry refinement over the reference's broad nonfatal descent.
