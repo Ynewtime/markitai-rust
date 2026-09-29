@@ -132,8 +132,9 @@ were checked; the native debug CLI also successfully reports both as signed out.
 That official check exposed and corrected Copilot's connect field names and
 separate cache-home routing. It does not establish a real login or authenticated
 inference. Authored fixtures cover actual native conversion and failure accounting
-without sending provider requests. Round 32 release/install verification is tracked
-in [CONTROL](CONTROL.md) until its final artifact record is published.
+without sending provider requests. Round 32 optimized CLI and installed dynamic/static bindings pass at `dc0343b`;
+see [delivery evidence](validation/integration-round32.md). Completed-item resume
+preserves terminal diagnostics independently of the old minimal success aggregate.
 
 `auth chatgpt status` still reports unsupported readiness while the official-runtime
 adapter is developed. No private OAuth protocol or API-equivalent subscription
