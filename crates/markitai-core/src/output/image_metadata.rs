@@ -10,7 +10,14 @@ fn invalid(message: &str) -> Error {
     Error::Conversion(message.into())
 }
 
-fn lock(directory: &Path, allow_symlinks: bool) -> Result<File> {
+struct ImageMetadataLock(File);
+impl Drop for ImageMetadataLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock(directory: &Path, allow_symlinks: bool) -> Result<ImageMetadataLock> {
     let path = directory.join(".images.lock");
     check_path(&path, allow_symlinks)?;
     if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
@@ -52,6 +59,7 @@ fn lock(directory: &Path, allow_symlinks: bool) -> Result<File> {
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
     }
+    let held = ImageMetadataLock(file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -61,7 +69,7 @@ fn lock(directory: &Path, allow_symlinks: bool) -> Result<File> {
             return Err(invalid("Image metadata lock changed during publication"));
         }
     }
-    Ok(file)
+    Ok(held)
 }
 
 fn read(path: &Path, allow_symlinks: bool) -> Result<Option<Value>> {

@@ -23,6 +23,28 @@ struct MemberFile {
     path: PathBuf,
     identity: Identity,
     file: File,
+    acquired: bool,
+}
+
+impl MemberFile {
+    fn acquire(&mut self) -> Result<()> {
+        self.file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => Error::Busy,
+            TryLockError::Error(error) => Error::Io(error),
+        })?;
+        self.acquired = true;
+        Ok(())
+    }
+}
+
+impl Drop for MemberFile {
+    fn drop(&mut self) {
+        // Planning-only descriptors never unlock. Partial acquisition and path
+        // validation errors release exactly the members successfully claimed.
+        if self.acquired {
+            let _ = self.file.unlock();
+        }
+    }
 }
 
 /// Each descriptor excludes only the document names this conversion can publish.
@@ -34,12 +56,9 @@ pub(crate) struct MemberLeases {
 
 impl MemberLeases {
     pub(crate) fn acquire(parent: &Path, members: &[String], allow_symlinks: bool) -> Result<Self> {
-        let prepared = PreparedMembers::open(parent, members, allow_symlinks)?;
-        for member in &prepared.files {
-            member.file.try_lock().map_err(|error| match error {
-                TryLockError::WouldBlock => Error::Busy,
-                TryLockError::Error(error) => Error::Io(error),
-            })?;
+        let mut prepared = PreparedMembers::open(parent, members, allow_symlinks)?;
+        for member in &mut prepared.files {
+            member.acquire()?;
         }
         prepared.check_paths()?;
         Ok(Self { prepared })
@@ -190,6 +209,7 @@ impl PreparedMembers {
                 path,
                 identity: file_identity,
                 file,
+                acquired: false,
             });
         }
         prepared.check_paths()?;
@@ -699,5 +719,60 @@ mod tests {
         loop {
             std::thread::sleep(Duration::from_secs(1));
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../file_lock_test.rs"]
+mod fork_lock_test;
+
+#[cfg(all(test, target_os = "linux"))]
+mod inherited_lock_tests {
+    use super::*;
+    #[test]
+    fn member_family_releases_before_inherited_child_exits() {
+        let root = tempfile::tempdir().unwrap();
+        let members = vec!["a.md".to_owned(), "a.llm.md".to_owned()];
+        let owner = MemberLeases::acquire(root.path(), &members, false).unwrap();
+        assert!(matches!(
+            MemberLeases::acquire(root.path(), &members, false),
+            Err(Error::Busy)
+        ));
+        // A reservation lookup must not release another active claim.
+        reserve_keys(root.path(), &members, false).unwrap();
+        assert!(matches!(
+            MemberLeases::acquire(root.path(), &members, false),
+            Err(Error::Busy)
+        ));
+        let mut child = fork_lock_test::InheritedChild::start();
+        drop(owner);
+        let reopened = MemberLeases::acquire(root.path(), &members, false);
+        child.finish();
+        assert!(reopened.is_ok(), "member locks outlived their owner");
+    }
+    #[test]
+    fn partial_family_acquisition_releases_only_acquired_members() {
+        let root = tempfile::tempdir().unwrap();
+        let second = vec!["b.md".to_owned()];
+        let blocker = MemberLeases::acquire(root.path(), &second, false).unwrap();
+        let mut prepared =
+            PreparedMembers::open(root.path(), &["a.md".into(), "b.md".into()], false).unwrap();
+        prepared.files[0].acquire().unwrap();
+        let mut child = fork_lock_test::InheritedChild::start();
+        assert!(matches!(prepared.files[1].acquire(), Err(Error::Busy)));
+        drop(prepared);
+        let first = MemberLeases::acquire(root.path(), &["a.md".into()], false);
+        let second_still_busy = matches!(
+            MemberLeases::acquire(root.path(), &second, false),
+            Err(Error::Busy)
+        );
+        child.finish();
+        assert!(first.is_ok(), "failed acquisition pinned the first member");
+        assert!(
+            second_still_busy,
+            "failed acquisition released someone else's member"
+        );
+        drop(blocker);
+        MemberLeases::acquire(root.path(), &second, false).unwrap();
     }
 }

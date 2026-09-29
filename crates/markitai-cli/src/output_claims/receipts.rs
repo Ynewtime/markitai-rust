@@ -1,4 +1,5 @@
 //! A synced prepared receipt survives publication without a second metadata commit.
+pub(super) mod group;
 use super::{Error, MemberLeases, Owner, Policy, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

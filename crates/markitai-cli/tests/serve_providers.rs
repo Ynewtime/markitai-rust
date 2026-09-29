@@ -158,10 +158,14 @@ impl Provider {
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .unwrap();
+                        let mut request_reader = bounded_fixture_io::Reader::new(
+                            &stream,
+                            std::time::Instant::now() + Duration::from_secs(3),
+                        );
                         let mut bytes = Vec::new();
                         let mut buf = [0; 4096];
                         loop {
-                            let n = stream.read(&mut buf).unwrap();
+                            let n = request_reader.read(&mut buf).unwrap();
                             assert!(n > 0);
                             bytes.extend_from_slice(&buf[..n]);
                             if let Some(end) =
@@ -302,4 +306,12 @@ fn actual_service_discovers_cached_models_and_probes_stored_or_draft_without_mut
         original
     );
     assert!(!server.logs.lock().unwrap().contains("private-provider-key"));
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

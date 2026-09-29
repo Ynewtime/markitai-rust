@@ -112,18 +112,20 @@ impl Drop for Server {
         }
     }
 }
-fn read_request(mut stream: &TcpStream) -> Option<Request> {
+fn read_request(stream: &TcpStream) -> Option<Request> {
     stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
+    let mut request_reader =
+        bounded_fixture_io::Reader::new(stream, std::time::Instant::now() + Duration::from_secs(2));
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     let mut bytes = Vec::new();
     let mut buffer = [0; 1024];
     while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
-        let read = stream.read(&mut buffer).ok()?;
+        let read = request_reader.read(&mut buffer).ok()?;
         if read == 0 || bytes.len() + read > 32 * 1024 {
             return None;
         }
@@ -314,4 +316,12 @@ fn diagnostic_failure_does_not_expose_the_selected_path() {
         error,
         "Chromium diagnostic could not initialize a private blank page"
     );
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

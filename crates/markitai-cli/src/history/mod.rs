@@ -243,6 +243,7 @@ impl Plan {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error),
             }
         }
+        let _publication = PublicationLock(lock);
         let (job_id, target) = loop {
             let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
             let target = self.jobs_root.join(&id);
@@ -507,6 +508,13 @@ fn private_file(path: &Path, exclusive: bool) -> io::Result<File> {
         }
     }
     Ok(file)
+}
+
+struct PublicationLock(File);
+impl Drop for PublicationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 fn publication_lock(root: &Path) -> io::Result<File> {

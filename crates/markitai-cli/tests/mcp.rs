@@ -522,8 +522,9 @@ impl Pages {
                 workers.push(thread::spawn(move || {
                     stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+                    let mut request_reader = bounded_fixture_io::Reader::new(&stream, std::time::Instant::now() + Duration::from_secs(8));
                     let mut request = [0;8192];
-                    let read = stream.read(&mut request).unwrap();
+                    let read = request_reader.read(&mut request).unwrap();
                     let request = String::from_utf8_lossy(&request[..read]);
                     if request.starts_with("GET /slow ") {
                         let (lock, changed) = &*release;
@@ -601,4 +602,12 @@ fn url_tool_and_background_polling_preserve_source_order() {
     assert_eq!(status["results"][0]["source"], slow);
     assert_eq!(status["results"][1]["source"], fast);
     client.stop();
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

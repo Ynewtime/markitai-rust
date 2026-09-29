@@ -240,8 +240,12 @@ fn url_batch_overwrite_preserves_both_custom_named_results() {
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(10)))
                 .unwrap();
+            let mut request_reader = bounded_fixture_io::Reader::new(
+                &stream,
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            );
             let mut buffer = [0u8; 8192];
-            let count = stream.read(&mut buffer).unwrap();
+            let count = request_reader.read(&mut buffer).unwrap();
             let request = String::from_utf8_lossy(&buffer[..count]);
             let body = if request.contains("?id=first") {
                 "First result\n"
@@ -499,4 +503,12 @@ fn config_display_omits_model_nulls_but_direct_null_and_dictionary_null_remain()
     );
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "null");
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

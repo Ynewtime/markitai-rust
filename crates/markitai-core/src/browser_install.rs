@@ -198,7 +198,14 @@ fn private_directory(path: &Path) -> Result<()> {
     }
 }
 
-fn lock(root: &Path) -> Result<File> {
+struct InstallLock(File);
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock(root: &Path) -> Result<InstallLock> {
     let path = root.join("install.lock");
     if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file() || m.file_type().is_symlink()) {
         return Err(failure("installation lock is not a regular file"));
@@ -217,7 +224,7 @@ fn lock(root: &Path) -> Result<File> {
         .map_err(|_| failure("cannot open installation lock"))?;
     file.try_lock()
         .map_err(|_| failure("another browser installation is active or locking is unavailable"))?;
-    Ok(file)
+    Ok(InstallLock(file))
 }
 
 fn download(client: &Client, url: &str, limit: u64, output: &mut impl Write) -> Result<String> {

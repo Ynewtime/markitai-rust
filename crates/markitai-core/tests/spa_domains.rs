@@ -163,11 +163,12 @@ impl Site {
                 active.push(std::thread::spawn(move || {
                     stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut request_reader = bounded_fixture_io::Reader::new(&stream, std::time::Instant::now() + Duration::from_secs(2));
                     stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
                     let mut bytes = Vec::new();
                     while !bytes.windows(4).any(|value| value == b"\r\n\r\n") {
                         let mut buffer = [0u8; 4096];
-                        let Ok(n) = stream.read(&mut buffer) else { return };
+                        let Ok(n) = request_reader.read(&mut buffer) else { return };
                         if n == 0 { return }
                         bytes.extend_from_slice(&buffer[..n]);
                         assert!(bytes.len() <= 32 * 1024);
@@ -405,4 +406,12 @@ fn invalid_browser_results_do_not_teach_routes_and_corrupt_store_is_only_a_warni
             .unwrap()
             .contains("private corrupt")
     );
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

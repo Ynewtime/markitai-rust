@@ -223,10 +223,14 @@ fn llm_server(status: u16, payload: &'static str) -> (String, std::thread::JoinH
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
+        let mut request_reader = bounded_fixture_io::Reader::new(
+            &stream,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
         let mut bytes = Vec::new();
         let request = loop {
             let mut chunk = [0; 4096];
-            let count = stream.read(&mut chunk).unwrap();
+            let count = request_reader.read(&mut chunk).unwrap();
             assert!(count > 0);
             bytes.extend_from_slice(&chunk[..count]);
             if let Some(offset) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
@@ -552,8 +556,12 @@ fn cached_url_reuses_extracted_content_without_changing_binding_json() {
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
+        let mut request_reader = bounded_fixture_io::Reader::new(
+            &stream,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
         let mut request = [0; 8192];
-        let _ = stream.read(&mut request).unwrap();
+        let _ = request_reader.read(&mut request).unwrap();
         let body = "<html><title>Page title</title><article><p>Shared page content. 世界</p></article></html>";
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     });
@@ -697,3 +705,11 @@ mod copilot;
 
 #[path = "conversion/claude.rs"]
 mod claude;
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
+}

@@ -600,13 +600,17 @@ fn oversized_response_header_stops_before_body_read_or_protocol_retry() {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
+            let mut request_reader = bounded_fixture_io::Reader::new(
+                &stream,
+                std::time::Instant::now() + Duration::from_secs(5),
+            );
             stream
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut bytes = Vec::new();
             let mut buffer = [0u8; 8192];
             loop {
-                let n = stream.read(&mut buffer).unwrap();
+                let n = request_reader.read(&mut buffer).unwrap();
                 assert!(n > 0);
                 bytes.extend_from_slice(&buffer[..n]);
                 if let Some(at) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
@@ -643,4 +647,12 @@ fn oversized_response_header_stops_before_body_read_or_protocol_retry() {
             .iter()
             .any(|warning| warning.contains("100 MiB"))
     );
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

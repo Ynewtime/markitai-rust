@@ -49,7 +49,14 @@ fn read(path: &Path) -> io::Result<Value> {
     }
     Ok(value)
 }
-fn lock(directory: &Path) -> io::Result<File> {
+pub(super) struct ImageMetadataLock(File);
+impl Drop for ImageMetadataLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock(directory: &Path) -> io::Result<ImageMetadataLock> {
     store::private_dir(directory)?;
     let path = directory.join(".images.lock");
     markitai_core::output::check_path(&path, false).map_err(io::Error::other)?;
@@ -87,6 +94,7 @@ fn lock(directory: &Path) -> io::Result<File> {
             Err(TryLockError::Error(e)) => return Err(e),
         }
     }
+    let held = ImageMetadataLock(file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -96,7 +104,7 @@ fn lock(directory: &Path) -> io::Result<File> {
             return Err(io::Error::other("image metadata lock changed"));
         }
     }
-    Ok(file)
+    Ok(held)
 }
 fn rows(value: &Value) -> impl Iterator<Item = &Value> {
     value
@@ -107,7 +115,7 @@ fn rows(value: &Value) -> impl Iterator<Item = &Value> {
         .into_iter()
         .flatten()
 }
-pub(super) fn prepare(staged: &Path, final_out: &Path) -> io::Result<Vec<File>> {
+pub(super) fn prepare(staged: &Path, final_out: &Path) -> io::Result<Vec<ImageMetadataLock>> {
     let mut locks = Vec::new();
     for prefix in [".markitai/assets", "assets"] {
         let path = staged.join(prefix).join("images.json");
@@ -183,7 +191,7 @@ pub(super) fn prune(
     staged: &Path,
     final_out: &Path,
     removed: &std::collections::HashSet<String>,
-) -> io::Result<Vec<File>> {
+) -> io::Result<Vec<ImageMetadataLock>> {
     let mut locks = Vec::new();
     for prefix in [".markitai/assets", "assets"] {
         let directory = final_out.join(prefix);

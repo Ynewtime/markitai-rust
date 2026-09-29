@@ -664,7 +664,7 @@ fn merged_checkpoint_and_active_claim_precede_http_and_survive_process_kill() {
     assert_eq!(target.file_name().unwrap(), "hold.md");
     assert_eq!(
         published_entry(&out, "url", &format!("{queued} queued"))["status"],
-        "pending"
+        "in_progress"
     );
     assert_eq!(server.count("GET", "/queued"), 0);
     assert!(!running.kill().status.success());
@@ -1510,7 +1510,7 @@ fn moving_a_directory_url_list_preserves_pending_and_failed_output_provenance() 
             let running =
                 Running::spawn(root.path(), root.path(), &["input", "-o", "out", "--json"]);
             server.wait("GET", "/a-provenance-gate", 1);
-            assert_eq!(published_entry(&out, "url", &key)["status"], "pending");
+            assert_eq!(published_entry(&out, "url", &key)["status"], "in_progress");
             assert_eq!(server.count("GET", "/moved-item"), 0);
             assert!(!running.kill().status.success());
             server.release("GET", "/a-provenance-gate");

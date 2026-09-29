@@ -232,6 +232,7 @@ pub(super) async fn create(
         markitai_core::output::check_path(&lockpath, false).map_err(ApiError::internal)?;
         let lock = lock_options.open(lockpath).map_err(ApiError::internal)?;
         lock.lock().map_err(ApiError::internal)?;
+        let _publication = PublicationLock(lock);
         let mut registry = publication_state.jobs.lock().unwrap();
         if publication_state.closing.load(Ordering::SeqCst) {
             return Err(ApiError::new(503, "server is shutting down"));
@@ -409,6 +410,13 @@ fn remove_registered(
     std::fs::remove_dir_all(&job.folder).map_err(ApiError::internal)?;
     registry.lock().unwrap().remove(id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+struct PublicationLock(std::fs::File);
+impl Drop for PublicationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 #[cfg(test)]

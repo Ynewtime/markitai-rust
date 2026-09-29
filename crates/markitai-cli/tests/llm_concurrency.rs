@@ -22,10 +22,14 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
+    let mut request_reader = bounded_fixture_io::Reader::new(
+        stream,
+        std::time::Instant::now() + Duration::from_secs(10),
+    );
     let mut bytes = Vec::new();
     loop {
         let mut chunk = [0; 4096];
-        let count = stream.read(&mut chunk).unwrap();
+        let count = request_reader.read(&mut chunk).unwrap();
         assert_ne!(count, 0, "incomplete mock request");
         bytes.extend_from_slice(&chunk[..count]);
         assert!(bytes.len() < 1024 * 1024);
@@ -249,4 +253,12 @@ fn model_content(request: &Value, markdown: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

@@ -1144,10 +1144,14 @@ mod cache_tests {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
+                    let mut request_reader = bounded_fixture_io::Reader::new(
+                        &stream,
+                        std::time::Instant::now() + Duration::from_secs(5),
+                    );
                     let mut request = Vec::new();
                     let mut chunk = [0; 1024];
                     while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                        let size = stream.read(&mut chunk).unwrap();
+                        let size = request_reader.read(&mut chunk).unwrap();
                         if size == 0 {
                             break;
                         }
@@ -1595,3 +1599,11 @@ mod cache_tests {
 
 #[cfg(test)]
 mod pdf_tests;
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
+}

@@ -1004,6 +1004,14 @@ impl Directory {
         Ok(())
     }
 }
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        // Job, index and submission ownership ends here even when a concurrently
+        // forked child temporarily retains this open file description.
+        let _ = self.file.unlock();
+    }
+}
+
 impl HeldLock {
     fn open(path: &Path) -> Result<Self> {
         if let Ok(metadata) = fs::symlink_metadata(path) {
@@ -1024,6 +1032,7 @@ impl HeldLock {
         if metadata.len() != 0 {
             return Err(Error::Invalid("Provider batch lock is not empty"));
         }
+        let identity = identity(&metadata)?;
         file.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => Error::Busy,
             TryLockError::Error(_) => Error::Io,
@@ -1031,7 +1040,7 @@ impl HeldLock {
         let held = Self {
             path: path.into(),
             file,
-            identity: identity(&metadata)?,
+            identity,
         };
         held.validate()?;
         held.file.sync_all()?;
@@ -1736,3 +1745,43 @@ fn merge_usage(total: &mut ConversionUsage, value: &ConversionUsage) -> Result<(
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../file_lock_test.rs"]
+mod fork_lock_test;
+
+#[cfg(all(test, target_os = "linux"))]
+mod inherited_lock_tests {
+    use super::*;
+    #[test]
+    fn batch_lock_kinds_release_before_inherited_child_exits() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["job.lock", "index.lock", "submission.lock"] {
+            let path = root.path().join(name);
+            let held = HeldLock::open(&path).unwrap();
+            assert!(matches!(HeldLock::open(&path), Err(Error::Busy)));
+            let mut child = fork_lock_test::InheritedChild::start();
+            drop(held);
+            let reopened = HeldLock::open(&path);
+            child.finish();
+            assert!(reopened.is_ok(), "batch lock outlived its owner: {name}");
+        }
+    }
+    #[test]
+    fn validation_failure_still_releases_the_owned_batch_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("job.lock");
+        let held = HeldLock::open(&path).unwrap();
+        let mut child = fork_lock_test::InheritedChild::start();
+        let moved = root.path().join("previous.lock");
+        fs::rename(&path, &moved).unwrap();
+        assert!(held.validate().is_err());
+        drop(held);
+        let recovered = HeldLock::open(&moved);
+        child.finish();
+        assert!(
+            recovered.is_ok(),
+            "validation failure pinned the original inode"
+        );
+    }
+}

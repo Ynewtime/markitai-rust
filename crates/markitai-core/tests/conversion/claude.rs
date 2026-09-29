@@ -384,3 +384,100 @@ fn unsupported_subscription_overrides_fail_before_starting_official_runtime() {
     }
     assert!(calls().is_empty());
 }
+
+#[test]
+fn preparation_retains_base_and_paid_failure_without_early_publication() {
+    if isolated("preparation_retains_base_and_paid_failure_without_early_publication") {
+        return;
+    }
+    struct Writer;
+    impl markitai_core::output::Publication for Writer {
+        fn skip_existing(&self) -> bool {
+            false
+        }
+        fn publish(&self, path: &std::path::Path, bytes: &[u8]) -> markitai_core::Result<()> {
+            std::fs::write(path, bytes)?;
+            Ok(())
+        }
+    }
+    mode("aggregate-paid-error");
+    let path = source();
+    let make = |directory: &str| {
+        markitai_core::prepare_with_publication(
+            path.to_str().unwrap(),
+            ConvertOptions {
+                output_dir: Some(root().join(directory)),
+                config: Some(config()),
+                ..Default::default()
+            },
+            ConvertContext::default(),
+            &Writer,
+        )
+    };
+    let mut prepared = make("deferred");
+    assert_eq!(sends(), 1);
+    assert_eq!(prepared.members().len(), 1);
+    assert!(!prepared.members()[0].path.exists());
+    let members = prepared.take_members();
+    for member in &members {
+        std::fs::write(&member.path, &member.bytes).unwrap();
+    }
+    let failure = prepared.finish_after_publication().unwrap_err();
+    assert_eq!(
+        (
+            failure.usage.requests,
+            failure.usage.input_tokens,
+            failure.usage.output_tokens
+        ),
+        (0, 16, 7)
+    );
+    assert_eq!(
+        failure.usage.by_model["claude-agent/claude-fixture-1"]["incomplete_request_observations"],
+        1
+    );
+    assert!(!failure.usage.cost_complete());
+    assert!(
+        std::fs::read_to_string(&members[0].path)
+            .unwrap()
+            .contains("THE END")
+    );
+
+    let prepared = make("publication-failed");
+    let destination = prepared.members()[0].path.clone();
+    let failure = prepared.fail_publication(markitai_core::Error::Conversion(
+        "authored publication refusal".into(),
+    ));
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("authored publication refusal")
+    );
+    assert_eq!(
+        (
+            failure.usage.requests,
+            failure.usage.input_tokens,
+            failure.usage.output_tokens
+        ),
+        (0, 16, 7)
+    );
+    assert!(!destination.exists());
+
+    let prepared = make("immediate");
+    let destination = prepared.members()[0].path.clone();
+    let failure = prepared.publish_immediately(&Writer).unwrap_err();
+    assert_eq!(
+        (
+            failure.usage.requests,
+            failure.usage.input_tokens,
+            failure.usage.output_tokens
+        ),
+        (0, 16, 7)
+    );
+    assert!(
+        std::fs::read_to_string(destination)
+            .unwrap()
+            .contains("THE END")
+    );
+    assert_eq!(sends(), 3);
+}

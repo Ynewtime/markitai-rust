@@ -924,13 +924,17 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
+            let mut request_reader = bounded_fixture_io::Reader::new(
+                &stream,
+                std::time::Instant::now() + Duration::from_secs(5),
+            );
             stream
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut bytes = Vec::new();
             let request = loop {
                 let mut buffer = [0; 4096];
-                let count = stream.read(&mut buffer).unwrap();
+                let count = request_reader.read(&mut buffer).unwrap();
                 assert_ne!(count, 0);
                 bytes.extend_from_slice(&buffer[..count]);
                 assert!(bytes.len() < 2 * 1024 * 1024);
@@ -1058,4 +1062,12 @@ mod tests {
         let decoded = image::load_from_memory(&vision[0].bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (80, 120));
     }
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

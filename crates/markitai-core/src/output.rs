@@ -394,6 +394,41 @@ pub trait Publication: Send + Sync {
     fn publish(&self, path: &Path, bytes: &[u8]) -> Result<()>;
 }
 
+/// Exact final document bytes awaiting an explicitly owned publication.
+#[doc(hidden)]
+pub struct RenderedMember {
+    pub path: std::path::PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+pub(crate) struct PreparedOutput {
+    pub(crate) members: Vec<RenderedMember>,
+    metadata: Option<PreparedImageMetadata>,
+}
+struct PreparedImageMetadata {
+    directory: std::path::PathBuf,
+    images: Vec<Value>,
+    source: String,
+    allow_symlinks: bool,
+}
+impl PreparedOutput {
+    pub(crate) fn finalize(self) -> Result<()> {
+        if let Some(metadata) = self.metadata {
+            let _guard = OUTPUT_LOCK
+                .lock()
+                .map_err(|_| Error::Conversion("Output lock poisoned".into()))?;
+            image_metadata::publish(
+                &metadata.directory,
+                &metadata.images,
+                &metadata.source,
+                metadata.allow_symlinks,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 pub fn write(
     dir: &Path,
     name: &str,
@@ -439,6 +474,38 @@ pub(crate) fn write_document(
     cfg: &Value,
     publication: Option<&dyn Publication>,
 ) -> Result<()> {
+    write_document_mode(
+        dir,
+        name,
+        result,
+        assets,
+        screenshots,
+        cfg,
+        WritePolicy {
+            publication,
+            prepared: None,
+        },
+    )
+}
+
+pub(crate) struct WritePolicy<'a, 'b> {
+    pub(crate) publication: Option<&'a dyn Publication>,
+    pub(crate) prepared: Option<&'b mut PreparedOutput>,
+}
+
+pub(crate) fn write_document_mode(
+    dir: &Path,
+    name: &str,
+    result: &mut ConversionOutput,
+    assets: &[Asset],
+    screenshots: Screenshots<'_>,
+    cfg: &Value,
+    policy: WritePolicy<'_, '_>,
+) -> Result<()> {
+    let WritePolicy {
+        publication,
+        mut prepared,
+    } = policy;
     let _guard = OUTPUT_LOCK
         .lock()
         .map_err(|_| Error::Conversion("Output lock poisoned".into()))?;
@@ -558,7 +625,12 @@ pub(crate) fn write_document(
     if !capture_only && (result.llm_markdown.is_none() || config::enabled(cfg, "/llm/keep_base")) {
         let path = dir.join(format!("{stem}.md"));
         let content = content(result, cfg, false)?;
-        if let Some(publication) = publication {
+        if let Some(prepared) = prepared.as_deref_mut() {
+            prepared.members.push(RenderedMember {
+                path: path.clone(),
+                bytes: content.into_bytes(),
+            });
+        } else if let Some(publication) = publication {
             publication.publish(&path, content.as_bytes())?;
         } else {
             atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
@@ -572,7 +644,12 @@ pub(crate) fn write_document(
             dir.join(format!("{stem}.llm.md"))
         };
         let content = content(result, cfg, true)?;
-        if let Some(publication) = publication {
+        if let Some(prepared) = prepared.as_deref_mut() {
+            prepared.members.push(RenderedMember {
+                path: path.clone(),
+                bytes: content.into_bytes(),
+            });
+        } else if let Some(publication) = publication {
             publication.publish(&path, content.as_bytes())?;
         } else {
             atomic_write(&path, content.as_bytes(), mode == "overwrite")?;
@@ -592,12 +669,21 @@ pub(crate) fn write_document(
         } else {
             result.source.clone()
         };
-        image_metadata::publish(
-            &dir.join(asset_prefix),
-            &result.images,
-            &source,
-            allow_symlinks,
-        )?;
+        if let Some(prepared) = prepared {
+            prepared.metadata = Some(PreparedImageMetadata {
+                directory: dir.join(asset_prefix),
+                images: result.images.clone(),
+                source,
+                allow_symlinks,
+            });
+        } else {
+            image_metadata::publish(
+                &dir.join(asset_prefix),
+                &result.images,
+                &source,
+                allow_symlinks,
+            )?;
+        }
     }
     Ok(())
 }
@@ -1114,5 +1200,79 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+    struct NoPublish;
+    impl Publication for NoPublish {
+        fn skip_existing(&self) -> bool {
+            false
+        }
+        fn publish(&self, _: &Path, _: &[u8]) -> Result<()> {
+            panic!("preparation must not acknowledge immediate publication");
+        }
+    }
+    #[test]
+    fn prepared_images_wait_for_document_commit_and_keep_current_sidecar_on_failure() {
+        for corrupt in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut cfg = config::defaults();
+            cfg["image"]["desc_enabled"] = json!(true);
+            let mut result = ConversionOutput {
+                source: "authored.txt".into(),
+                markdown: "![authored](.markitai/assets/image.bin)".into(),
+                images: vec![
+                    json!({"asset":".markitai/assets/image.bin","description":"authored description"}),
+                ],
+                ..Default::default()
+            };
+            let mut plan = PreparedOutput::default();
+            write_document_mode(
+                root.path(),
+                "authored",
+                &mut result,
+                &[Asset {
+                    name: "image.bin".into(),
+                    bytes: b"authored pixels".to_vec(),
+                }],
+                Screenshots::New(&[]),
+                &cfg,
+                WritePolicy {
+                    publication: Some(&NoPublish),
+                    prepared: Some(&mut plan),
+                },
+            )
+            .unwrap();
+            assert_eq!(plan.members.len(), 1);
+            assert!(!plan.members[0].path.exists());
+            assert_eq!(result.assets.len(), 1);
+            assert!(result.assets[0].is_file());
+            let sidecar = root.path().join(".markitai/assets/images.json");
+            assert!(!sidecar.exists());
+            for member in std::mem::take(&mut plan.members) {
+                std::fs::write(member.path, member.bytes).unwrap();
+            }
+            if corrupt {
+                std::fs::write(&sidecar, b"authored invalid prior index").unwrap();
+            }
+            let finalized = plan.finalize();
+            if corrupt {
+                assert!(finalized.is_err());
+                assert_eq!(
+                    std::fs::read(&sidecar).unwrap(),
+                    b"authored invalid prior index"
+                );
+                assert!(result.output_path.unwrap().is_file());
+            } else {
+                finalized.unwrap();
+                let index: Value =
+                    serde_json::from_slice(&std::fs::read(sidecar).unwrap()).unwrap();
+                assert_eq!(index["images"][0]["description"], "authored description");
+                assert_eq!(index["images"][0]["source"], "authored.txt");
+            }
+        }
     }
 }

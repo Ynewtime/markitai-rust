@@ -343,10 +343,14 @@ mod terminal {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+                let mut request_reader = bounded_fixture_io::Reader::new(
+                    &stream,
+                    std::time::Instant::now() + Duration::from_secs(5),
+                );
                 let mut bytes = Vec::new();
                 let mut buf = [0; 4096];
                 let split = loop {
-                    let n = stream.read(&mut buf).unwrap();
+                    let n = request_reader.read(&mut buf).unwrap();
                     assert!(n > 0);
                     bytes.extend_from_slice(&buf[..n]);
                     assert!(bytes.len() < 1024 * 1024);
@@ -364,7 +368,7 @@ mod terminal {
                     })
                     .unwrap_or(0);
                 while bytes.len() < split + length {
-                    let n = stream.read(&mut buf).unwrap();
+                    let n = request_reader.read(&mut buf).unwrap();
                     assert!(n > 0);
                     bytes.extend_from_slice(&buf[..n]);
                 }
@@ -451,4 +455,12 @@ mod terminal {
         assert!(!dir.path().join("home").exists());
         assert!(!dir.path().join("markitai.json").exists());
     }
+}
+
+#[cfg(all(test, unix))]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

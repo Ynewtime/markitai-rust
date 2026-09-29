@@ -100,13 +100,15 @@ fn request(stream: &mut TcpStream) -> Option<Request> {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
+    let mut request_reader =
+        bounded_fixture_io::Reader::new(stream, std::time::Instant::now() + Duration::from_secs(3));
     stream
         .set_write_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     let mut bytes = Vec::new();
     let mut buffer = [0; 4096];
     while !bytes.windows(4).any(|value| value == b"\r\n\r\n") {
-        let count = stream.read(&mut buffer).ok()?;
+        let count = request_reader.read(&mut buffer).ok()?;
         if count == 0 {
             return None;
         }
@@ -530,4 +532,12 @@ fn all_owned_pages_close_before_a_context_is_reused() {
         runtime.close();
         gone(&processes[0]);
     }
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

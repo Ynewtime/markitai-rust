@@ -128,18 +128,20 @@ impl Drop for Server {
         }
     }
 }
-fn read_request(mut stream: &TcpStream) -> Option<Request> {
+fn read_request(stream: &TcpStream) -> Option<Request> {
     stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
+    let mut request_reader =
+        bounded_fixture_io::Reader::new(stream, std::time::Instant::now() + Duration::from_secs(2));
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     let mut bytes = Vec::new();
     let mut buf = [0; 4096];
     while !bytes.windows(4).any(|s| s == b"\r\n\r\n") {
-        let n = stream.read(&mut buf).ok()?;
+        let n = request_reader.read(&mut buf).ok()?;
         if n == 0 || bytes.len() + n > 32 * 1024 {
             return None;
         }
@@ -340,4 +342,12 @@ fn installed_chromium_download_limits_and_incomplete_body_fail_closed() {
     });
     assert!(fetch(&truncated.url("/short"), &cfg(), false).is_err());
     assert_eq!(truncated.requests().len(), 1);
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

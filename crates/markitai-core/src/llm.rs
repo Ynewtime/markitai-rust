@@ -1760,13 +1760,17 @@ mod tests {
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
+        let mut request_reader = bounded_fixture_io::Reader::new(
+            stream,
+            std::time::Instant::now() + Duration::from_secs(3),
+        );
         stream
             .set_write_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let mut bytes = Vec::new();
         let mut buffer = [0u8; 4096];
         let header_end = loop {
-            let read = stream.read(&mut buffer).unwrap();
+            let read = request_reader.read(&mut buffer).unwrap();
             assert!(read > 0);
             bytes.extend_from_slice(&buffer[..read]);
             assert!(bytes.len() < 1024 * 1024);
@@ -1785,7 +1789,7 @@ mod tests {
             .unwrap();
         assert!(length < 1024 * 1024);
         while bytes.len() < header_end + length {
-            let read = stream.read(&mut buffer).unwrap();
+            let read = request_reader.read(&mut buffer).unwrap();
             assert!(read > 0);
             bytes.extend_from_slice(&buffer[..read]);
         }
@@ -2827,4 +2831,12 @@ mod tests {
         assert_eq!(usage.input_tokens, 60);
         assert_eq!(usage.output_tokens, 2);
     }
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

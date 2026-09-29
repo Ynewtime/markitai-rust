@@ -86,13 +86,15 @@ fn read(stream: &mut TcpStream) -> Request {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let mut request_reader =
+        bounded_fixture_io::Reader::new(stream, std::time::Instant::now() + Duration::from_secs(5));
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
     let end = loop {
-        let count = stream.read(&mut buffer).unwrap();
+        let count = request_reader.read(&mut buffer).unwrap();
         assert!(count > 0);
         bytes.extend_from_slice(&buffer[..count]);
         assert!(bytes.len() < 2_000_000);
@@ -111,7 +113,7 @@ fn read(stream: &mut TcpStream) -> Request {
         .unwrap();
     assert!(length < 2_000_000);
     while bytes.len() < end + length {
-        let count = stream.read(&mut buffer).unwrap();
+        let count = request_reader.read(&mut buffer).unwrap();
         assert!(count > 0);
         bytes.extend_from_slice(&buffer[..count]);
     }
@@ -452,4 +454,12 @@ fn typed_cache_hits_do_not_reserve_a_deployment_or_add_usage() {
     assert_eq!(second.usage.requests, 0);
     assert!(second.llm_cache_hit());
     assert_eq!(server.requests().len(), 1);
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

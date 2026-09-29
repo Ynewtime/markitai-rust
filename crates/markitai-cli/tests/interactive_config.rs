@@ -79,7 +79,7 @@ fn noninteractive_edit_and_wizard_refuse_but_quick_init_preserves_existing_setti
 #[cfg(unix)]
 fn terminal(root: &Path, args: &[&str], script: &[u8]) -> (std::process::ExitStatus, String) {
     use std::io::{Read, Write};
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     let (mut master, mut slave) = (-1, -1);
     assert_eq!(
         unsafe {
@@ -96,11 +96,28 @@ fn terminal(root: &Path, args: &[&str], script: &[u8]) -> (std::process::ExitSta
     let mut master = unsafe { std::fs::File::from_raw_fd(master) };
     let slave = unsafe { std::fs::File::from_raw_fd(slave) };
     let mut reader = master.try_clone().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let read = std::thread::spawn(move || {
         let mut all = Vec::new();
         let mut buf = [0; 4096];
-        loop {
+        while std::time::Instant::now() < deadline {
+            let mut descriptor = libc::pollfd {
+                fd: reader.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut descriptor, 1, 100) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            if ready == 0 {
+                continue;
+            }
             match reader.read(&mut buf) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Ok(0) | Err(_) => break,
                 Ok(n) => all.extend_from_slice(&buf[..n]),
             }
@@ -115,12 +132,11 @@ fn terminal(root: &Path, args: &[&str], script: &[u8]) -> (std::process::ExitSta
         .spawn()
         .unwrap();
     master.write_all(script).unwrap();
-    let start = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
-        if start.elapsed() > std::time::Duration::from_secs(15) {
+        if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             panic!("Interactive CLI did not finish");

@@ -131,13 +131,17 @@ impl Server {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+                let mut request_reader = bounded_fixture_io::Reader::new(
+                    &stream,
+                    std::time::Instant::now() + Duration::from_secs(5),
+                );
                 stream
                     .set_write_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
                 let mut bytes = Vec::new();
                 let request = loop {
                     let mut chunk = [0; 8192];
-                    let count = stream.read(&mut chunk).unwrap();
+                    let count = request_reader.read(&mut chunk).unwrap();
                     assert!(count > 0, "truncated mock request");
                     bytes.extend_from_slice(&chunk[..count]);
                     assert!(
@@ -817,4 +821,12 @@ fn cached_main_document_with_new_image_analysis_is_not_a_full_cache_hit() {
     );
     assert_eq!(vision_bytes(&calls[1]), vec![bytes.clone()]);
     assert_eq!(vision_bytes(&calls[2]), vec![bytes]);
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

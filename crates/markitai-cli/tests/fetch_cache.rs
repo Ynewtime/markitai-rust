@@ -40,10 +40,14 @@ impl Server {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+                let mut request_reader = bounded_fixture_io::Reader::new(
+                    &stream,
+                    std::time::Instant::now() + Duration::from_secs(5),
+                );
                 let mut bytes = Vec::new();
                 loop {
                     let mut chunk = [0u8; 4096];
-                    let n = stream.read(&mut chunk).unwrap();
+                    let n = request_reader.read(&mut chunk).unwrap();
                     assert!(n > 0, "request ended before complete headers/body");
                     bytes.extend_from_slice(&chunk[..n]);
                     if let Some(split) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
@@ -351,4 +355,12 @@ fn model_content(request: &Value, markdown: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     json!({"cleaned_markdown":format!("{markdown}\n\n{source}"),"frontmatter":{"description":"Local test document","tags":["fixture"]}}).to_string()
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

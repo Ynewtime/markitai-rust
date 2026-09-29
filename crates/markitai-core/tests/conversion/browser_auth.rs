@@ -35,10 +35,14 @@ impl Site {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
+                let mut request_reader = bounded_fixture_io::Reader::new(
+                    &stream,
+                    std::time::Instant::now() + Duration::from_secs(3),
+                );
                 let mut bytes = Vec::new();
                 while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
                     let mut chunk = [0; 4096];
-                    let Ok(count) = stream.read(&mut chunk) else {
+                    let Ok(count) = request_reader.read(&mut chunk) else {
                         break;
                     };
                     if count == 0 {
@@ -327,4 +331,12 @@ fn web_visual_validation_falls_back_to_typed_text_with_shared_usage_but_auth_doe
             .iter()
             .any(|warning| warning.contains("structured text processing"))
     );
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

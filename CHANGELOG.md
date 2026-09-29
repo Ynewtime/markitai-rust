@@ -84,7 +84,13 @@
 - Revision-checked provider/deployment settings, private atomic configuration saves and per-job configuration snapshots.
 - Bounded native model discovery with credential-scoped caching, plus single-model connection probes without document conversion.
 
+### Changed
+
+- Bounded directory and URL-list publication groups retain durable receipts, recovery ordering and paid failure usage while sharing macOS full-cache flushes; dispatch admission is persisted in bounded windows.
+
 ### Fixed
+
+- Explicitly release owned file locks before inherited child descriptors close, including partial acquisition and validation failures.
 
 - Correct Copilot protocol connect fields and its independent cache directory, verified against the pinned official runtime offline.
 - Release checkpoint locks explicitly across fork/exec inheritance; retry interrupted fixture/runtime reads without extending deadlines.

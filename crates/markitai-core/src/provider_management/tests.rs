@@ -71,10 +71,14 @@ impl Drop for Mock {
     }
 }
 fn read(stream: &mut TcpStream) -> String {
+    let mut request_reader = bounded_fixture_io::Reader::new(
+        stream,
+        std::time::Instant::now() + std::time::Duration::from_secs(3),
+    );
     let mut bytes = Vec::new();
     let mut block = [0; 2048];
     loop {
-        let n = stream.read(&mut block).unwrap();
+        let n = request_reader.read(&mut block).unwrap();
         assert!(n > 0);
         bytes.extend_from_slice(&block[..n]);
         assert!(bytes.len() < 65536);
@@ -403,4 +407,12 @@ fn requests_validate_types_urls_without_echoing_values() {
         discover(&json!({"provider":"claude-agent"})).unwrap()["status"],
         "unavailable"
     );
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

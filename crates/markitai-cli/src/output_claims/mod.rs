@@ -1,6 +1,8 @@
 //! Cooperating CLI writers claim real document members before conversion.
 mod leases;
 mod receipts;
+mod sync_group;
+pub(crate) use receipts::group::{PreparedDocument, PublicationGroup, RenderedMember};
 
 pub(crate) use leases::{MemberLeases, reserve_keys};
 pub(crate) use receipts::{adopt_owner, reservation_members};

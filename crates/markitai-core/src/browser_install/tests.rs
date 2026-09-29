@@ -262,8 +262,12 @@ fn streaming_download_checks_actual_bytes_and_records_digest() {
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
+            let mut request_reader = bounded_fixture_io::Reader::new(
+                &stream,
+                std::time::Instant::now() + Duration::from_secs(3),
+            );
             let mut buffer = [0; 8192];
-            let count = stream.read(&mut buffer).unwrap();
+            let count = request_reader.read(&mut buffer).unwrap();
             assert!(count > 0);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
@@ -288,4 +292,12 @@ fn streaming_download_checks_actual_bytes_and_records_digest() {
     let (url, task) = serve(b"oversized browser");
     assert!(download(&client, &url, 7, &mut Vec::new()).is_err());
     task.join().unwrap();
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

@@ -19,7 +19,10 @@ pub mod output;
 mod output_profiles;
 mod pdf_media;
 mod pdf_raster;
+mod preparation;
 mod pricing;
+#[doc(hidden)]
+pub use preparation::{PreparedConversion, prepare_with_publication};
 #[doc(hidden)]
 pub mod provider_batch;
 pub mod provider_management;
@@ -130,7 +133,7 @@ pub fn convert_with_publication_detailed(
     publication: Option<&dyn output::Publication>,
 ) -> DetailedResult<ConversionOutput> {
     let mut scope = None;
-    let result = convert_inner(source, options, context, publication, &mut scope);
+    let result = convert_inner(source, options, context, publication, &mut scope, None);
     result.map_err(|error| ConversionFailure {
         error,
         usage: scope
@@ -146,6 +149,7 @@ fn convert_inner(
     context: ConvertContext<'_>,
     publication: Option<&dyn output::Publication>,
     document_scope: &mut Option<llm::DocumentScope>,
+    mut prepared: Option<&mut output::PreparedOutput>,
 ) -> Result<ConversionOutput> {
     let start = Instant::now();
     if source.trim().is_empty() {
@@ -637,7 +641,7 @@ fn convert_inner(
                 if cfg["llm"]["on_failure"] == "fail" {
                     output::apply_profiles(&mut result, &cfg);
                     if let Some(dir) = &output_dir {
-                        output::write_document(
+                        output::write_document_mode(
                             dir,
                             &name,
                             &mut result,
@@ -648,7 +652,10 @@ fn convert_inner(
                                 output::Screenshots::New(&screenshots)
                             },
                             &cfg,
-                            publication,
+                            output::WritePolicy {
+                                publication,
+                                prepared: prepared.as_deref_mut(),
+                            },
                         )?;
                     }
                     return Err(error);
@@ -676,7 +683,7 @@ fn convert_inner(
         if cfg["llm"]["on_failure"] == "fail" {
             output::apply_profiles(&mut result, &cfg);
             if let Some(dir) = &output_dir {
-                output::write_document(
+                output::write_document_mode(
                     dir,
                     &name,
                     &mut result,
@@ -687,7 +694,10 @@ fn convert_inner(
                         output::Screenshots::New(&screenshots)
                     },
                     &cfg,
-                    publication,
+                    output::WritePolicy {
+                        publication,
+                        prepared: prepared.as_deref_mut(),
+                    },
                 )?;
             }
             return Err(error);
@@ -707,7 +717,7 @@ fn convert_inner(
     }
     output::apply_profiles(&mut result, &cfg);
     if let Some(dir) = output_dir {
-        output::write_document(
+        output::write_document_mode(
             &dir,
             &name,
             &mut result,
@@ -718,7 +728,10 @@ fn convert_inner(
                 output::Screenshots::New(&screenshots)
             },
             &cfg,
-            publication,
+            output::WritePolicy {
+                publication,
+                prepared,
+            },
         )?;
     }
     result.duration = start.elapsed().as_secs_f64();

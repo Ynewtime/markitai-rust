@@ -320,8 +320,12 @@ fn auto_probe_does_not_hide_status_or_body_limits_behind_browser_fallback() {
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
+        let mut request_reader = bounded_fixture_io::Reader::new(
+            &stream,
+            std::time::Instant::now() + Duration::from_secs(3),
+        );
         let mut request = [0u8; 4096];
-        assert!(stream.read(&mut request).unwrap() > 0);
+        assert!(request_reader.read(&mut request).unwrap() > 0);
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", MAX_RESPONSE + 1).unwrap();
     });
     let result = fetch_with_context(&url, &cfg, None, true);
@@ -333,4 +337,12 @@ fn auto_probe_does_not_hide_status_or_body_limits_behind_browser_fallback() {
             .to_string()
             .contains("Response exceeds 100 MiB")
     );
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

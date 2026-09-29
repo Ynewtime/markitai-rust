@@ -1,8 +1,8 @@
 //! The coordinator owns recovery mutations and admits work only after durable claims.
 use super::*;
 use crate::output_claims::{
-    Claim, Error as ClaimError, MemberLeases, Owner, Policy, adopt_owner, reservation_members,
-    reserve_keys,
+    Claim, Error as ClaimError, MemberLeases, Owner, Policy, PreparedDocument, PublicationGroup,
+    RenderedMember, adopt_owner, reservation_members, reserve_keys,
 };
 use crate::run_state::{
     self, Entry, ItemKey, Limits, LoadOutcome, Mode, Scope, Snapshot, StateStore, Status, codec,
@@ -227,8 +227,224 @@ fn terminal(store: &mut StateStore, task: &Task, record: &RunItem) -> Result<(),
 struct Work {
     index: usize,
     task: Task,
-    claim: Claim,
+    claim: Arc<Claim>,
     previous: Entry,
+}
+
+fn restore_unsent(work: Work, store: &mut StateStore, fatal: &mut Option<String>) {
+    if let Err(error) = store.record(
+        item_key(&work.task),
+        json!({
+            "status":work.previous.status, "target":work.previous.target,
+            "output":work.previous.output, "error":work.previous.error,
+            "diagnostics":work.previous.observations.get("diagnostics")
+        }),
+    ) {
+        fatal.get_or_insert_with(|| error.to_string());
+    }
+    drop(work);
+}
+
+fn admit_window(
+    admitted: Vec<Work>,
+    queued: &mut VecDeque<Work>,
+    store: &mut StateStore,
+    fatal: &mut Option<String>,
+) {
+    if admitted.is_empty() {
+        return;
+    }
+    if fatal.is_none()
+        && let Err(error) = store.flush()
+    {
+        *fatal = Some(error.to_string());
+    }
+    for work in admitted {
+        if fatal.is_some() || crate::signals::interrupted().is_some() {
+            restore_unsent(work, store, fatal);
+        } else {
+            queued.push_back(work);
+        }
+    }
+}
+
+// Bound retained claims independently of configured concurrency. A conversion
+// slot is released when preparation finishes, so serial batches can share a
+// durability fence without keeping a worker blocked on publication.
+const PUBLICATION_WINDOW: usize = 16;
+const PUBLICATION_DELAY: Duration = Duration::from_millis(100);
+
+struct Completion {
+    work: Work,
+    result: Result<PreparedItem, RunItem>,
+}
+
+struct CompletionSink<'a> {
+    cfg: &'a Value,
+    store: &'a mut StateStore,
+    records: &'a mut Vec<RunItem>,
+    fatal: &'a mut Option<String>,
+}
+impl CompletionSink<'_> {
+    fn record(&mut self, work: Work, record: RunItem) {
+        if let Err(error) = terminal(self.store, &work.task, &record) {
+            self.fatal.get_or_insert_with(|| error.to_string());
+        }
+        self.records.push(record);
+        // Keep this independent Arc even when group commit has returned an
+        // error and already dropped its own copy of the claim.
+        drop(work);
+    }
+
+    fn finish(
+        &mut self,
+        work: Work,
+        item: PreparedItem,
+        publish: impl FnOnce(
+            markitai_core::PreparedConversion,
+        ) -> markitai_core::DetailedResult<ConversionOutput>,
+    ) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let PreparedItem {
+                progress,
+                conversion,
+            } = item;
+            let result = image_only_result(&work.task, publish(conversion));
+            complete_item(&work.task, work.index, self.cfg, progress, result).0
+        }));
+        let record = result.unwrap_or_else(|_| {
+            failure(
+                &work.task,
+                work.index,
+                "Conversion publication panicked".into(),
+            )
+        });
+        self.record(work, record);
+    }
+}
+
+struct PendingPublications {
+    group: PublicationGroup,
+    items: Vec<(Work, PreparedItem)>,
+    opened: Option<Instant>,
+}
+impl PendingPublications {
+    fn new() -> Self {
+        Self {
+            group: PublicationGroup::new(),
+            items: Vec::new(),
+            opened: None,
+        }
+    }
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+    fn due(&self) -> bool {
+        self.len() >= PUBLICATION_WINDOW
+            || self
+                .opened
+                .is_some_and(|opened| opened.elapsed() >= PUBLICATION_DELAY)
+    }
+    fn wait(&self) -> Duration {
+        self.opened
+            .map(|opened| PUBLICATION_DELAY.saturating_sub(opened.elapsed()))
+            .unwrap_or(Duration::from_millis(50))
+            .min(Duration::from_millis(50))
+    }
+
+    fn commit(&mut self, sink: &mut CompletionSink<'_>) {
+        if self.is_empty() {
+            return;
+        }
+        let group = std::mem::replace(&mut self.group, PublicationGroup::new());
+        let items = std::mem::take(&mut self.items);
+        self.opened = None;
+        let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| group.commit()));
+        match committed {
+            Ok(Ok(claims)) => {
+                for (work, item) in items {
+                    sink.finish(
+                        work,
+                        item,
+                        markitai_core::PreparedConversion::finish_after_publication,
+                    );
+                }
+                // Group-returned claims are additionally retained through every
+                // terminal projection; each Work also owned its own Arc.
+                drop(claims);
+            }
+            failure => {
+                let message = match failure {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => "Output publication group panicked".into(),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                for (work, item) in items {
+                    sink.finish(work, item, |conversion| {
+                        Err(conversion
+                            .fail_publication(markitai_core::Error::Conversion(message.clone())))
+                    });
+                }
+            }
+        }
+    }
+
+    fn accept(&mut self, completion: Completion, sink: &mut CompletionSink<'_>) {
+        let Completion { work, result } = completion;
+        let mut item = match result {
+            Ok(item) => item,
+            Err(record) => {
+                sink.record(work, record);
+                return;
+            }
+        };
+        let bytes = item
+            .conversion
+            .members()
+            .iter()
+            .try_fold(0_usize, |sum, member| sum.checked_add(member.bytes.len()));
+        if item.conversion.members().is_empty()
+            || !bytes.is_some_and(|bytes| PublicationGroup::new().can_fit(bytes))
+        {
+            self.commit(sink);
+            let claim = Arc::clone(&work.claim);
+            sink.finish(work, item, |conversion| {
+                conversion.publish_immediately(claim.as_ref())
+            });
+            return;
+        }
+        let bytes = bytes.expect("bounded document size was checked");
+        if !self.group.can_fit(bytes) {
+            self.commit(sink);
+        }
+        let members = item
+            .conversion
+            .take_members()
+            .into_iter()
+            .map(|member| RenderedMember {
+                path: member.path,
+                bytes: member.bytes,
+            })
+            .collect();
+        let prepared =
+            PreparedDocument::prepare(Arc::clone(&work.claim), members).and_then(|document| {
+                debug_assert_eq!(document.staged_bytes(), bytes);
+                self.group.push(document)
+            });
+        match prepared {
+            Ok(()) => {
+                self.opened.get_or_insert_with(Instant::now);
+                self.items.push((work, item));
+            }
+            Err(error) => sink.finish(work, item, |conversion| {
+                Err(conversion
+                    .fail_publication(markitai_core::Error::Conversion(error.to_string())))
+            }),
+        }
+    }
 }
 
 // An older directory scan may have persisted work inside a package. Reject
@@ -579,13 +795,16 @@ pub(super) fn run(
         .min(pending_files.len())
         .saturating_add(url_limit.min(pending_urls.len()))
         .max(1);
+    let admission_window = PUBLICATION_WINDOW.max(count);
     let seconds = cfg["batch"]["state_flush_interval_seconds"]
         .as_u64()
         .unwrap_or(0);
     let interval = Duration::from_secs(if seconds > 0 { seconds } else { 5 });
     let (jobs, job_receiver) = mpsc::channel::<Work>();
     let job_receiver = Arc::new(Mutex::new(job_receiver));
-    let (finished, receiver) = mpsc::channel::<(usize, RunItem)>();
+    let (finished, receiver) = mpsc::channel::<Completion>();
+    let mut publications = PendingPublications::new();
+    let mut queued = VecDeque::<Work>::new();
     let mut records = Vec::new();
     let mut fatal = None;
     let mut signal = None;
@@ -604,12 +823,12 @@ pub(super) fn run(
                     };
                     let Ok(work) = work else { break };
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        convert_item(&work.task, work.index, cfg, context, Some(&work.claim)).0
-                    }));
-                    let record = result.unwrap_or_else(|_| {
+                        prepare_item(&work.task, cfg, context, work.claim.as_ref())
+                    }))
+                    .map_err(|_| {
                         failure(&work.task, work.index, "Conversion worker panicked".into())
                     });
-                    if finished.send((work.index, record)).is_err() {
+                    if finished.send(Completion { work, result }).is_err() {
                         break;
                     }
                 }
@@ -626,20 +845,26 @@ pub(super) fn run(
                     fatal.get_or_insert_with(|| error.to_string());
                 }
             }
+            if signal.is_some() || fatal.is_some() {
+                for work in queued.drain(..) {
+                    restore_unsent(work, &mut store, &mut fatal);
+                }
+            }
             let mut admitted = Vec::new();
-            if signal.is_none() && fatal.is_none() {
+            if signal.is_none() && fatal.is_none() && queued.is_empty() {
                 loop {
-                    if crate::signals::interrupted().is_some() {
+                    if crate::signals::interrupted().is_some()
+                        || active_files
+                            + active_urls
+                            + publications.len()
+                            + queued.len()
+                            + admitted.len()
+                            >= admission_window
+                    {
                         break;
                     }
-                    let file = pending_files
-                        .front()
-                        .copied()
-                        .filter(|_| active_files < file_limit);
-                    let url = pending_urls
-                        .front()
-                        .copied()
-                        .filter(|_| active_urls < url_limit);
+                    let file = pending_files.front().copied();
+                    let url = pending_urls.front().copied();
                     let index = match (file, url) {
                         (Some(file), Some(url)) if file < url => pending_files.pop_front().unwrap(),
                         (Some(_), Some(_)) | (None, Some(_)) => pending_urls.pop_front().unwrap(),
@@ -706,70 +931,107 @@ pub(super) fn run(
                             .or_default()
                             .insert(item_key(&tasks[index]));
                     }
-                    if is_url(&tasks[index].source) {
-                        active_urls += 1;
-                    } else {
-                        active_files += 1;
-                    }
                     admitted.push(Work {
                         index,
                         task: tasks[index].clone(),
-                        claim,
+                        claim: Arc::new(claim),
                         previous,
                     });
                 }
             }
             if !admitted.is_empty() {
-                if fatal.is_none()
-                    && let Err(error) = store.flush()
-                {
-                    fatal = Some(error.to_string());
-                }
+                admit_window(admitted, &mut queued, &mut store, &mut fatal);
                 last_flush = Instant::now();
-                for work in admitted {
-                    if fatal.is_some() || crate::signals::interrupted().is_some() {
-                        if let Err(error)=store.record(item_key(&work.task),json!({"status":work.previous.status,
-                            "target":work.previous.target,"output":work.previous.output,"error":work.previous.error,"diagnostics":work.previous.observations.get("diagnostics")})) {
-                            fatal.get_or_insert_with(||error.to_string());
-                        }
-                        if is_url(&work.task.source) {
-                            active_urls -= 1;
+            }
+            // Claims and all in_progress reservations are durable before this
+            // queue is dispatched. Selection still obeys both independent
+            // conversion caps, rather than starting the entire reserved window.
+            while signal.is_none() && fatal.is_none() && crate::signals::interrupted().is_none() {
+                let Some(position) = queued.iter().position(|work| {
+                    if is_url(&work.task.source) {
+                        active_urls < url_limit
+                    } else {
+                        active_files < file_limit
+                    }
+                }) else {
+                    break;
+                };
+                let work = queued
+                    .remove(position)
+                    .expect("selected reserved work exists");
+                let url = is_url(&work.task.source);
+                match jobs.send(work) {
+                    Ok(()) => {
+                        if url {
+                            active_urls += 1;
                         } else {
-                            active_files -= 1;
+                            active_files += 1;
                         }
-                    } else if jobs.send(work).is_err() {
-                        fatal = Some("Conversion worker queue closed unexpectedly".into());
-                        break;
+                    }
+                    Err(error) => {
+                        fatal.get_or_insert("Conversion worker queue closed unexpectedly".into());
+                        restore_unsent(error.0, &mut store, &mut fatal);
                     }
                 }
             }
-            if active_files + active_urls == 0
-                && ((pending_files.is_empty() && pending_urls.is_empty())
-                    || signal.is_some()
-                    || fatal.is_some())
-            {
+            if fatal.is_some() || signal.is_some() || crate::signals::interrupted().is_some() {
+                for work in queued.drain(..) {
+                    restore_unsent(work, &mut store, &mut fatal);
+                }
+            }
+            let draining = signal.is_some() || fatal.is_some();
+            let queues_empty =
+                pending_files.is_empty() && pending_urls.is_empty() && queued.is_empty();
+            if publications.due() || draining || (queues_empty && active_files + active_urls == 0) {
+                publications.commit(&mut CompletionSink {
+                    cfg,
+                    store: &mut store,
+                    records: &mut records,
+                    fatal: &mut fatal,
+                });
+            }
+            if active_files + active_urls == 0 && (queues_empty || draining) {
                 break;
             }
-            match receiver.recv_timeout(Duration::from_millis(50)) {
+            // A finished preparation opens a conversion slot even while its
+            // staged output awaits the next group fence. Never wait for a
+            // completion when the only remaining work has not been dispatched.
+            if active_files + active_urls == 0 {
+                continue;
+            }
+            match receiver.recv_timeout(publications.wait()) {
                 Ok(first) => {
-                    // Drain ready completions together so the next durable admission can fill several slots with one flush.
                     let mut ready = Some(first);
-                    while let Some((index, record)) = ready {
-                        if is_url(&tasks[index].source) {
+                    while let Some(completion) = ready {
+                        if is_url(&completion.work.task.source) {
                             active_urls -= 1;
                         } else {
                             active_files -= 1;
                         }
-                        if let Err(error) = terminal(&mut store, &tasks[index], &record) {
-                            fatal.get_or_insert_with(|| error.to_string());
-                        }
-                        records.push(record);
+                        publications.accept(
+                            completion,
+                            &mut CompletionSink {
+                                cfg,
+                                store: &mut store,
+                                records: &mut records,
+                                fatal: &mut fatal,
+                            },
+                        );
                         ready = receiver.try_recv().ok();
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => (),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     fatal.get_or_insert("Conversion workers stopped unexpectedly".into());
+                    for work in queued.drain(..) {
+                        restore_unsent(work, &mut store, &mut fatal);
+                    }
+                    publications.commit(&mut CompletionSink {
+                        cfg,
+                        store: &mut store,
+                        records: &mut records,
+                        fatal: &mut fatal,
+                    });
                     break;
                 }
             }
@@ -891,4 +1153,377 @@ pub(super) fn run(
     } else {
         0
     })
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::fs;
+
+    struct Fixture {
+        directory: tempfile::TempDir,
+        cfg: Value,
+        scope: Scope,
+        hash: String,
+        store: StateStore,
+        tasks: Vec<Task>,
+    }
+    impl Fixture {
+        fn new(names: &[&str]) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("input");
+            fs::create_dir(&input).unwrap();
+            let scope = Scope::new(Mode::Directory, &input, &directory.path().join("out")).unwrap();
+            let cfg = config::normalize(&json!({
+                "llm":{"enabled":false},"ocr":{"enabled":false},
+                "screenshot":{"enabled":false},"image":{"alt_enabled":false,"desc_enabled":false},
+                "history":{"record":false},"log":{"dir":null},
+                "prompts":{"dir":directory.path().join("prompts")},
+                "cache":{"enabled":false,"global_dir":directory.path().join("cache")},
+                "output":{"on_conflict":"rename"}
+            }))
+            .unwrap();
+            let tasks: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    let source = scope.input.join(name);
+                    fs::write(&source, format!("Complete authored {name} text 🚀.\n")).unwrap();
+                    Task {
+                        source: source.to_string_lossy().into_owned(),
+                        display: (*name).into(),
+                        report_key: (*name).into(),
+                        output: Some(scope.output.clone()),
+                        filename: None,
+                        reserved_stem: None,
+                        source_file: None,
+                    }
+                })
+                .collect();
+            let hash = codec::task_hash(&scope, &json!({})).unwrap();
+            let mut store =
+                StateStore::open(scope.clone(), &hash, false, Limits::default()).unwrap();
+            store.begin(discovered(&tasks, json!({}))).unwrap();
+            Self {
+                directory,
+                cfg,
+                scope,
+                hash,
+                store,
+                tasks,
+            }
+        }
+        fn work(&mut self, index: usize) -> Work {
+            let work = self.unflushed_work(index);
+            self.store.flush().unwrap();
+            work
+        }
+        fn unflushed_work(&mut self, index: usize) -> Work {
+            let mut task = self.tasks[index].clone();
+            let checkpoint = self.store.snapshot().unwrap().checkpoint.as_ref().unwrap();
+            let identity = owner(&self.scope, &checkpoint.generation, &task);
+            let claim = Arc::new(
+                claim(
+                    &mut task,
+                    &self.cfg,
+                    Some(identity),
+                    None,
+                    &Reservations::new(),
+                )
+                .unwrap()
+                .unwrap(),
+            );
+            self.store.record(item_key(&task), json!({"status":"in_progress",
+                "target":claim.parent().join(format!("{}.md", task.reserved_stem.as_ref().unwrap())),
+                "output":null,"error":null,"diagnostics":null})).unwrap();
+            Work {
+                index,
+                task,
+                claim,
+                previous: Entry::default(),
+            }
+        }
+        fn sink<'a>(
+            &'a mut self,
+            records: &'a mut Vec<RunItem>,
+            fatal: &'a mut Option<String>,
+        ) -> CompletionSink<'a> {
+            CompletionSink {
+                cfg: &self.cfg,
+                store: &mut self.store,
+                records,
+                fatal,
+            }
+        }
+    }
+    fn prepare(work: &Work, cfg: &Value) -> PreparedItem {
+        prepare_item(
+            &work.task,
+            cfg,
+            ConvertContext::default(),
+            work.claim.as_ref(),
+        )
+    }
+
+    #[test]
+    fn serial_preparations_publish_exact_bytes_once_then_record_and_recover_completed() {
+        let mut fixture = Fixture::new(&["a.txt", "b.txt"]);
+        let mut pending = PendingPublications::new();
+        let mut records = Vec::new();
+        let mut fatal = None;
+        let mut expected = Vec::new();
+        for index in 0..2 {
+            let work = fixture.work(index);
+            let prepared = prepare(&work, &fixture.cfg);
+            assert_eq!(prepared.conversion.members().len(), 1);
+            let member = &prepared.conversion.members()[0];
+            expected.push((member.path.clone(), member.bytes.clone()));
+            fs::remove_file(&work.task.source).unwrap();
+            pending.accept(
+                Completion {
+                    work,
+                    result: Ok(prepared),
+                },
+                &mut fixture.sink(&mut records, &mut fatal),
+            );
+            assert!(records.is_empty());
+            assert!(expected.iter().all(|(path, _)| !path.exists()));
+            assert_eq!(
+                fixture.store.snapshot().unwrap().documents
+                    [fixture.tasks[index].report_key.as_str()]
+                .status,
+                Status::InProgress
+            );
+        }
+        pending.commit(&mut fixture.sink(&mut records, &mut fatal));
+        assert!(fatal.is_none());
+        assert_eq!(records.len(), 2);
+        for (index, (path, bytes)) in expected.iter().enumerate() {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+            assert_eq!(records[index].status, ItemStatus::Completed);
+            assert_eq!(records[index].output.as_ref(), Some(path));
+            assert_eq!(records[index].usage.requests, 0);
+            assert!(records[index].diagnostics.is_none());
+            MemberLeases::acquire(
+                path.parent().unwrap(),
+                &[path.file_name().unwrap().to_string_lossy().into_owned()],
+                false,
+            )
+            .unwrap();
+        }
+        fixture.store.compact().unwrap();
+        let Fixture {
+            directory,
+            scope,
+            hash,
+            store,
+            ..
+        } = fixture;
+        drop(store);
+        let mut reopened = StateStore::open(scope, &hash, false, Limits::default()).unwrap();
+        let LoadOutcome::Loaded { snapshot, warnings } = reopened.load().unwrap() else {
+            panic!("completed checkpoint missing")
+        };
+        assert!(warnings.is_empty());
+        assert!(
+            snapshot
+                .documents
+                .values()
+                .all(|entry| entry.status == Status::Completed)
+        );
+        assert_eq!(
+            snapshot.documents["a.txt"].output.as_ref(),
+            Some(&expected[0].0)
+        );
+        drop(reopened);
+        drop(directory);
+    }
+
+    #[test]
+    fn group_failure_preserves_foreign_bytes_and_records_no_provisional_success() {
+        let mut fixture = Fixture::new(&["a.txt", "b.txt"]);
+        let mut pending = PendingPublications::new();
+        let mut records = Vec::new();
+        let mut fatal = None;
+        let mut paths = Vec::new();
+        for index in 0..2 {
+            let work = fixture.work(index);
+            let prepared = prepare(&work, &fixture.cfg);
+            paths.push(prepared.conversion.members()[0].path.clone());
+            pending.accept(
+                Completion {
+                    work,
+                    result: Ok(prepared),
+                },
+                &mut fixture.sink(&mut records, &mut fatal),
+            );
+        }
+        fs::write(&paths[0], b"foreign replacement").unwrap();
+        pending.commit(&mut fixture.sink(&mut records, &mut fatal));
+        assert!(fatal.is_none());
+        assert_eq!(fs::read(&paths[0]).unwrap(), b"foreign replacement");
+        assert!(!paths[1].exists());
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| record.status == ItemStatus::Failed
+                    && record.output.is_none()
+                    && record.error.is_some())
+        );
+        assert!(
+            fixture
+                .store
+                .snapshot()
+                .unwrap()
+                .documents
+                .values()
+                .all(|entry| entry.status == Status::Failed && entry.output.is_none())
+        );
+    }
+
+    #[test]
+    fn missing_source_error_flushes_prepared_neighbors_without_reconverting_them() {
+        let mut fixture = Fixture::new(&["a.txt", "b.txt"]);
+        let mut pending = PendingPublications::new();
+        let mut records = Vec::new();
+        let mut fatal = None;
+        let a = fixture.work(0);
+        let prepared = prepare(&a, &fixture.cfg);
+        let path = prepared.conversion.members()[0].path.clone();
+        let bytes = prepared.conversion.members()[0].bytes.clone();
+        fs::remove_file(&a.task.source).unwrap();
+        pending.accept(
+            Completion {
+                work: a,
+                result: Ok(prepared),
+            },
+            &mut fixture.sink(&mut records, &mut fatal),
+        );
+        let b = fixture.work(1);
+        fs::remove_file(&b.task.source).unwrap();
+        let prepared = prepare(&b, &fixture.cfg);
+        assert!(prepared.conversion.members().is_empty());
+        pending.accept(
+            Completion {
+                work: b,
+                result: Ok(prepared),
+            },
+            &mut fixture.sink(&mut records, &mut fatal),
+        );
+        assert!(pending.is_empty());
+        assert!(fatal.is_none());
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].status, ItemStatus::Completed);
+        assert_eq!(records[1].status, ItemStatus::Failed);
+        assert!(records[1].output.is_none());
+        assert_eq!(
+            fixture.store.snapshot().unwrap().documents["b.txt"].status,
+            Status::Failed
+        );
+    }
+
+    #[test]
+    fn dropping_uncommitted_group_keeps_in_progress_state_and_releases_claims() {
+        let mut fixture = Fixture::new(&["a.txt"]);
+        let work = fixture.work(0);
+        let claim = Arc::downgrade(&work.claim);
+        let prepared = prepare(&work, &fixture.cfg);
+        let path = prepared.conversion.members()[0].path.clone();
+        let mut pending = PendingPublications::new();
+        let mut records = Vec::new();
+        let mut fatal = None;
+        pending.accept(
+            Completion {
+                work,
+                result: Ok(prepared),
+            },
+            &mut fixture.sink(&mut records, &mut fatal),
+        );
+        assert!(claim.upgrade().is_some());
+        assert!(matches!(
+            MemberLeases::acquire(path.parent().unwrap(), &["a.txt.md".into()], false),
+            Err(ClaimError::Busy)
+        ));
+        drop(pending);
+        assert!(claim.upgrade().is_none());
+        assert!(!path.exists());
+        assert!(records.is_empty());
+        assert_eq!(
+            fixture.store.snapshot().unwrap().documents["a.txt"].status,
+            Status::InProgress
+        );
+        MemberLeases::acquire(path.parent().unwrap(), &["a.txt.md".into()], false).unwrap();
+    }
+
+    #[test]
+    fn first_window_flush_failure_dispatches_no_work_or_document() {
+        let mut fixture = Fixture::new(&["a.txt", "b.txt"]);
+        let a = fixture.unflushed_work(0);
+        let b = fixture.unflushed_work(1);
+        let claims = [Arc::downgrade(&a.claim), Arc::downgrade(&b.claim)];
+        let journal = fixture.scope.output.join(format!(
+            ".markitai/states/markitai.{}.state.jsonl",
+            fixture.hash
+        ));
+        assert!(!journal.exists());
+        fs::create_dir(&journal).unwrap();
+        let mut queued = VecDeque::new();
+        let mut fatal = None;
+        admit_window(vec![a, b], &mut queued, &mut fixture.store, &mut fatal);
+        assert!(fatal.is_some());
+        assert!(
+            queued.is_empty(),
+            "a failed durable admission must never reach a worker"
+        );
+        assert!(claims.iter().all(|claim| claim.upgrade().is_none()));
+        assert!(!fixture.scope.output.join("a.txt.md").exists());
+        assert!(!fixture.scope.output.join("b.txt.md").exists());
+        assert!(
+            journal.is_dir(),
+            "the obstructing foreign object must be preserved"
+        );
+    }
+
+    #[test]
+    fn unsent_reservation_restores_every_previous_terminal_field() {
+        let mut fixture = Fixture::new(&["a.txt"]);
+        let mut work = fixture.work(0);
+        let diagnostics = crate::diagnostics::AttemptDiagnostics::failed(
+            crate::diagnostics::Operation::Convert,
+            "earlier paid failure",
+            ConversionUsage {
+                requests: 1,
+                input_tokens: 16,
+                output_tokens: 7,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        work.previous = Entry {
+            status: Status::Failed,
+            target: Some(fixture.scope.output.join("a.txt.md")),
+            output: Some(fixture.scope.output.join("a.txt.llm.md")),
+            error: Some("earlier paid failure".into()),
+            observations: serde_json::from_value(json!({"diagnostics": diagnostics})).unwrap(),
+            ..Entry::default()
+        };
+        let previous = work.previous.clone();
+        let weak = Arc::downgrade(&work.claim);
+        let mut fatal = None;
+        restore_unsent(work, &mut fixture.store, &mut fatal);
+        assert!(fatal.is_none());
+        fixture.store.flush().unwrap();
+        let restored = &fixture.store.snapshot().unwrap().documents["a.txt"];
+        assert_eq!(restored.status, previous.status);
+        assert_eq!(restored.target, previous.target);
+        assert_eq!(restored.output, previous.output);
+        assert_eq!(restored.error, previous.error);
+        assert_eq!(
+            restored.observations["diagnostics"],
+            previous.observations["diagnostics"]
+        );
+        assert!(weak.upgrade().is_none());
+        assert!(!fixture.scope.output.join("a.txt.md").exists());
+    }
 }

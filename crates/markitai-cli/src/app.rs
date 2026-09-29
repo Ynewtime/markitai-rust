@@ -898,12 +898,7 @@ fn reserve_batch_names(tasks: &mut [Task], cfg: &Value) -> CliResult<()> {
     Ok(())
 }
 
-fn convert_task(
-    task: &Task,
-    cfg: &Value,
-    context: ConvertContext<'_>,
-    publication: Option<&dyn markitai_core::output::Publication>,
-) -> Result<ConversionOutput, markitai_core::ConversionFailure> {
+fn task_config(task: &Task, cfg: &Value) -> Value {
     let mut cfg = cfg.clone();
     if let Some(name) = &task.reserved_stem {
         cfg["output"]["reserved_stem"] = json!(name);
@@ -913,17 +908,14 @@ fn convert_task(
     } else if let Some(name) = &task.filename {
         cfg["output"]["reserved_stem"] = json!(name.strip_suffix(".md").unwrap_or(name));
     }
-    markitai_core::convert_with_publication_detailed(
-        &task.source,
-        ConvertOptions {
-            output_dir: task.output.clone(),
-            config: Some(cfg),
-            ..Default::default()
-        },
-        context,
-        publication,
-    )
-    .or_else(|failure| {
+    cfg
+}
+
+fn image_only_result(
+    task: &Task,
+    result: markitai_core::DetailedResult<ConversionOutput>,
+) -> markitai_core::DetailedResult<ConversionOutput> {
+    result.or_else(|failure| {
         if matches!(failure.error, markitai_core::Error::ImageOnly(_)) {
             let mut result = ConversionOutput::default();
             result.source = task.source.clone();
@@ -935,8 +927,82 @@ fn convert_task(
         }
     })
 }
+
+fn convert_task(
+    task: &Task,
+    cfg: &Value,
+    context: ConvertContext<'_>,
+    publication: Option<&dyn markitai_core::output::Publication>,
+) -> markitai_core::DetailedResult<ConversionOutput> {
+    image_only_result(
+        task,
+        markitai_core::convert_with_publication_detailed(
+            &task.source,
+            ConvertOptions {
+                output_dir: task.output.clone(),
+                config: Some(task_config(task, cfg)),
+                ..Default::default()
+            },
+            context,
+            publication,
+        ),
+    )
+}
 fn timestamp() -> String {
     Local::now().to_rfc3339_opts(SecondsFormat::Micros, false)
+}
+
+struct ItemProgress {
+    clock: Instant,
+    started_at: String,
+    history_enabled: bool,
+    history_eligible: bool,
+}
+
+fn begin_item(task: &Task, cfg: &Value) -> ItemProgress {
+    let clock = Instant::now();
+    let started_at = timestamp();
+    let history_enabled = task.output.is_some() && config::enabled(cfg, "/history/record");
+    let history_eligible = history_enabled && crate::history::eligible(&task.source);
+    logging::event(logging::Level::Info, format!("Converting {}", task.display));
+    ItemProgress {
+        clock,
+        started_at,
+        history_enabled,
+        history_eligible,
+    }
+}
+
+// The batch coordinator owns this provisional value until publication is durable.
+// Neither preparation nor transfer emits a completed record or log entry.
+#[cfg(unix)]
+struct PreparedItem {
+    progress: ItemProgress,
+    conversion: markitai_core::PreparedConversion,
+}
+
+#[cfg(unix)]
+fn prepare_item(
+    task: &Task,
+    cfg: &Value,
+    context: ConvertContext<'_>,
+    publication: &dyn markitai_core::output::Publication,
+) -> PreparedItem {
+    let progress = begin_item(task, cfg);
+    let conversion = markitai_core::prepare_with_publication(
+        &task.source,
+        ConvertOptions {
+            output_dir: task.output.clone(),
+            config: Some(task_config(task, cfg)),
+            ..Default::default()
+        },
+        context,
+        publication,
+    );
+    PreparedItem {
+        progress,
+        conversion,
+    }
 }
 
 fn convert_item(
@@ -945,18 +1011,21 @@ fn convert_item(
     cfg: &Value,
     context: ConvertContext<'_>,
     publication: Option<&dyn markitai_core::output::Publication>,
-) -> (
-    RunItem,
-    Result<ConversionOutput, markitai_core::ConversionFailure>,
-) {
-    let clock = Instant::now();
-    let started_at = timestamp();
-    let history_enabled = task.output.is_some() && config::enabled(cfg, "/history/record");
-    let history_eligible = history_enabled && crate::history::eligible(&task.source);
-    logging::event(logging::Level::Info, format!("Converting {}", task.display));
+) -> (RunItem, markitai_core::DetailedResult<ConversionOutput>) {
+    let progress = begin_item(task, cfg);
     let result = convert_task(task, cfg, context, publication);
-    let mut record = recorded(task, index, clock, started_at, &result);
-    record.history_eligible = history_eligible;
+    complete_item(task, index, cfg, progress, result)
+}
+
+fn complete_item(
+    task: &Task,
+    index: usize,
+    cfg: &Value,
+    progress: ItemProgress,
+    result: markitai_core::DetailedResult<ConversionOutput>,
+) -> (RunItem, markitai_core::DetailedResult<ConversionOutput>) {
+    let mut record = recorded(task, index, progress.clock, progress.started_at, &result);
+    record.history_eligible = progress.history_eligible;
     match &result {
         Ok(output) => {
             logging::event(
@@ -980,7 +1049,7 @@ fn convert_item(
         }
         Err(error) => logging::event(logging::Level::Error, format!("{}: {error}", task.display)),
     }
-    if history_enabled && record.skip_reason.as_deref() == Some("exists") {
+    if progress.history_enabled && record.skip_reason.as_deref() == Some("exists") {
         record.history_output = task.output.as_ref().map(|directory| {
             let fallback = if is_url(&task.source) {
                 markitai_core::output::url_name(&task.source, &Default::default())

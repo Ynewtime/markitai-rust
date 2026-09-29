@@ -104,9 +104,10 @@ impl Server {
                 workers.push(thread::spawn(move || {
                     stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                    let mut request_reader = bounded_fixture_io::Reader::new(&stream, std::time::Instant::now() + Duration::from_secs(10));
                     stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
                     let mut bytes=Vec::new();let mut buffer=[0;8192];
-                    let head_end=loop {let count=stream.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);if let Some(at)=bytes.windows(4).position(|v|v==b"\r\n\r\n"){break at+4;}assert!(bytes.len()<1_000_000);};
+                    let head_end=loop {let count=request_reader.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);if let Some(at)=bytes.windows(4).position(|v|v==b"\r\n\r\n"){break at+4;}assert!(bytes.len()<1_000_000);};
                     let head=String::from_utf8_lossy(&bytes[..head_end]).to_string();
                     if head.starts_with("GET ") {
                         let body="<!doctype html><title>URL article</title><article><h1>URL article</h1><p>A complete original URL document used by the typed persistent cache.</p></article>";
@@ -114,7 +115,7 @@ impl Server {
                     }
                     let length=head.lines().find_map(|line|line.split_once(':').filter(|(name,_)|name.eq_ignore_ascii_case("content-length")).map(|(_,n)|n.trim().parse::<usize>().unwrap())).unwrap();
                     assert!(length<2_000_000);
-                    while bytes.len()<head_end+length {let n=stream.read(&mut buffer).unwrap();assert!(n>0);bytes.extend_from_slice(&buffer[..n]);}
+                    while bytes.len()<head_end+length {let n=request_reader.read(&mut buffer).unwrap();assert!(n>0);bytes.extend_from_slice(&buffer[..n]);}
                     let request:Value=serde_json::from_slice(&bytes[head_end..head_end+length]).unwrap();
                     let index={let mut values=captured.lock().unwrap();let index=values.len();values.push(request.clone());index};
                     let now=active.fetch_add(1,Ordering::SeqCst)+1;observed.fetch_max(now,Ordering::SeqCst);
@@ -516,4 +517,12 @@ fn later_fatal_response_cancels_queued_batches_before_admission() {
             .iter()
             .any(|w| w.contains("LLM enhancement failed"))
     );
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

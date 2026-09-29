@@ -87,13 +87,15 @@ fn read(stream: &mut TcpStream) -> Request {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let mut request_reader =
+        bounded_fixture_io::Reader::new(stream, std::time::Instant::now() + Duration::from_secs(5));
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
     let end = loop {
-        let count = stream.read(&mut buffer).unwrap();
+        let count = request_reader.read(&mut buffer).unwrap();
         assert!(count > 0);
         bytes.extend_from_slice(&buffer[..count]);
         assert!(bytes.len() < 2_000_000);
@@ -112,7 +114,7 @@ fn read(stream: &mut TcpStream) -> Request {
         .unwrap();
     assert!(length < 2_000_000);
     while bytes.len() < end + length {
-        let count = stream.read(&mut buffer).unwrap();
+        let count = request_reader.read(&mut buffer).unwrap();
         assert!(count > 0);
         bytes.extend_from_slice(&buffer[..count]);
     }
@@ -672,4 +674,12 @@ fn explicit_http_timeout_scores_a_penalty_and_preserves_paid_error_usage() {
     assert_eq!(failures, 1);
     assert_eq!(timeout.requests().len(), 1);
     assert_eq!(good.requests().len(), 2);
+}
+
+#[cfg(test)]
+mod bounded_fixture_io {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/bounded_read.rs"
+    ));
 }

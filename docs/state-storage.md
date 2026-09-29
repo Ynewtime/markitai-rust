@@ -5,6 +5,12 @@ persists merged work and flushes each admitted target before a worker can make
 provider requests; `--resume` retains completed entries and retries unfinished
 work. Reports and optional [history archives](history.md) remain independently
 selectable; history is implemented separately from recovery state.
+Admission may reserve multiple targets in one journal flush. `in_progress` means
+the target is durably admitted; it does not prove that a worker or provider has
+started. Dispatch still obeys the separate file and URL concurrency limits.
+On a controlled interruption or fatal coordinator error, admitted but unsent
+items restore their previous status, target, output, error and attempt diagnostics.
+After an abrupt process kill, unfinished reservations follow ordinary resume.
 The native conversion API and language bindings do not acquire recovery state.
 See [output ownership](output-ownership.md) for the separate publication protocol
 and [the control center](CONTROL.md) for the current validation status.
@@ -132,6 +138,12 @@ retains the loaded generation. Legacy state is upgraded before new events.
 That return value is not a durable claim. `flush` appends pending events and syncs
 the journal and its directory before returning the durable sequence. The scheduler waits for this acknowledgment before starting work that relies on
 recovery, including provider requests. A dropped writer does not pretend to flush.
+The admission window retains at most the greater of 16 and the configured worker
+count for the discovered task classes. A failed admission flush dispatches none
+of that window. Workers can release a conversion slot once exact output bytes
+are prepared; completion is recorded only after the separate
+[group publication protocol](grouped-publication.md) succeeds. Failed preparation
+or publication remains a failed result, including its observed model usage.
 
 Compaction writes the complete snapshot through sequence N to a same-directory
 temporary file, syncs it, replaces the base, syncs the directory, then removes
