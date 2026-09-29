@@ -1,6 +1,7 @@
 //! Native text and image requests with a bounded routing and retry policy.
 mod chunks;
 mod document;
+pub(crate) mod flight;
 mod service_probe;
 mod structured;
 mod vision;

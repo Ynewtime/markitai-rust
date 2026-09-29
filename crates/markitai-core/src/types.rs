@@ -47,6 +47,33 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A failed conversion's existing error category and already recorded model usage.
+/// Costs remain subject to the same pricing limitations as successful results.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct ConversionFailure {
+    #[source]
+    pub error: Error,
+    pub usage: ConversionUsage,
+}
+
+impl From<Error> for ConversionFailure {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            usage: ConversionUsage::default(),
+        }
+    }
+}
+
+impl ConversionFailure {
+    pub fn code(&self) -> &'static str {
+        self.error.code()
+    }
+}
+
+pub type DetailedResult<T> = std::result::Result<T, ConversionFailure>;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LlmCapabilities {
     pub configured: bool,

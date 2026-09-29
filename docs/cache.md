@@ -5,7 +5,7 @@ across invocations and processes. A hit returns the saved typed Markdown and gen
 HTTP request, retry delay, request-budget charge or new token/cost usage. The
 normal output pipeline still applies current metadata, profiles and output paths.
 Pure enhancement and standalone caption/description analysis do not use
-this cache. Non-pure page/browser visual processing uses a separate batch namespace. Fetched response caching is a separate layer. There is no process-memory cache in this implementation.
+this cache. Non-pure page/browser visual processing uses a separate batch namespace. Fetched response caching is a separate layer. There is no completed-answer process-memory cache. Identical active typed requests may share one response within the same caller-owned runtime, as described below.
 
 ## Configuration and CLI behavior
 
@@ -114,8 +114,9 @@ Failed, malformed, structurally damaged and token-truncated answers are not
 stored. A validated boilerplate chunk may have an empty body and still carry
 metadata; the merged whole document must remain valid and nonempty.
 Stored answers also have a 100 MiB entry bound. Separate processes can safely
-write the same database; simultaneous cache misses can still issue duplicate
-provider requests because there is no request coalescing.
+write the same database. Active typed text chunks and first visual batches can
+merge within one shared `LlmRuntime`; independent runtimes and separate processes
+can still send duplicate requests on simultaneous misses.
 
 Capacity counts serialized answer bytes, matching the reference accounting; it
 is not a hard limit on SQLite metadata, free pages or WAL file size. Reducing the
@@ -135,8 +136,30 @@ provider request.
 Each successful chunk is committed separately, including when a sibling chunk
 later fails. The caller still receives a document-level failure and publishes no
 partial enhanced result. A subsequent attempt requests only missing chunks.
-`llm_cache_hit` is true only for a fully cached item with no new paid LLM usage;
+`llm_cache_hit` is true only for an item fully reused from disk or active shared
+requests, with no new paid LLM usage;
 a cache-backed document followed by image-analysis requests is not a full hit.
+
+## Active request sharing
+
+Sharing is enabled only when the ordinary cache is enabled and the source does
+not match `no_cache` or `no_cache_patterns`. Those refresh settings still force a
+new request and save its successful result. No new option is introduced.
+
+The active key is separate from disk keys: it additionally hashes complete
+rendered prompts, image bytes and resolved endpoint/credential/routing policy,
+using a runtime-local salt. It is neither logged nor persisted. Disk rows retain
+the established model/prompt/content identity and can still be read before
+credential resolution. A waiter validates the semantic answer against its own
+source, receives zero newly paid usage, and never inherits the owner's budget or
+error. A failed owner wakes waiters to retry independently. Cache writes occur
+before a successful result is shared; write failures remain warnings.
+
+Sharing is bounded to 128 active identities, 16 MiB per serialized answer and
+64 MiB of retained serialized answers, with ordinary routing as the overflow
+fallback. These are payload bounds, not a heap/RSS limit. Completed entries are
+removed immediately. See [runtime accounting](llm.md) for lifecycle and scope
+limits; persistent cache capacity and SQLite size are unchanged.
 
 ## Inspection
 

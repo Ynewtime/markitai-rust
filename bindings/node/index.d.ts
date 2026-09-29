@@ -34,8 +34,10 @@ export interface ConversionOutput {
 }
 
 export class ConversionError extends Error {
-  constructor(message: string, code: string);
+  constructor(message: string, code: string, usage?: ConversionUsage);
   readonly code: string;
+  /** Absent when the producer recorded no usage; not a zero-cost guarantee. */
+  readonly usage?: ConversionUsage;
 }
 
 export const version: string;

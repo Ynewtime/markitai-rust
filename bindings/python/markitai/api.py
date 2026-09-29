@@ -27,21 +27,27 @@ class ConfigModel(Protocol):
 class ConversionError(RuntimeError):
     """A conversion failed; code retains the native error category."""
 
-    def __init__(self, message: str, *, code: str = "conversion_error") -> None:
+    def __init__(
+        self, message: str, *, code: str = "conversion_error",
+        usage: ConversionUsage | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.usage = usage
 
 
 class FetchError(Exception):
     """An HTTP source could not be fetched."""
 
     code = "fetch_error"
+    usage: ConversionUsage | None = None
 
 
 class NoModelConfiguredError(ValueError):
     """LLM processing was requested without a configured model."""
 
     code = "no_model_configured"
+    usage: ConversionUsage | None = None
 
 
 @dataclass
@@ -91,19 +97,26 @@ def _result(response: str) -> ConversionOutput:
     if not envelope["ok"]:
         error = envelope["error"]
         code, message = error["code"], error["message"]
+        raw_usage = error.get("usage")
+        usage = ConversionUsage(**raw_usage) if raw_usage is not None else None
         if code == "fetch_error":
-            raise FetchError(message)
-        if code == "no_model_configured":
-            raise NoModelConfiguredError(message)
-        if code in {"invalid_input", "invalid_json", "config_error"}:
-            raise ValueError(message)
-        if code == "not_found":
-            raise FileNotFoundError(message)
-        if code == "is_directory":
-            raise IsADirectoryError(message)
-        if code == "io_error":
-            raise OSError(message)
-        raise ConversionError(message, code=code)
+            exception = FetchError(message)
+        elif code == "no_model_configured":
+            exception = NoModelConfiguredError(message)
+        elif code in {"invalid_input", "invalid_json", "config_error"}:
+            exception = ValueError(message)
+        elif code == "not_found":
+            exception = FileNotFoundError(message)
+        elif code == "is_directory":
+            exception = IsADirectoryError(message)
+        elif code == "io_error":
+            exception = OSError(message)
+        else:
+            exception = ConversionError(message, code=code)
+        # Preserve built-in and public exception categories. None means the
+        # producer supplied no accounting, not that the failed call was free.
+        exception.usage = usage
+        raise exception
     data = envelope["result"]
     data["usage"] = ConversionUsage(**data.get("usage", {}))
     for key in ("output_path", "llm_output_path"):

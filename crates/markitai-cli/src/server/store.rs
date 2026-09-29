@@ -163,6 +163,8 @@ pub(super) fn rehydrate(
         if raw_items.len() > 100_000 {
             continue;
         }
+        let bases: HashMap<String, String> =
+            serde_json::from_value(value["native_bases"].clone()).unwrap_or_default();
         let mut items = Vec::new();
         for (index, raw) in raw_items.iter().enumerate() {
             let mut object =
@@ -171,6 +173,25 @@ pub(super) fn rehydrate(
                 target.extend(source.clone());
             }
             if let Ok(mut item) = serde_json::from_value::<Item>(object) {
+                // Older history writers saved the actual enhanced name in both
+                // fields. Adapt the public base name without renaming any file.
+                // Native indexes disambiguate a literal source named notes.llm.
+                if !bases.contains_key(&item.item_id)
+                    && let Some(stem) = item
+                        .output_name
+                        .as_deref()
+                        .and_then(|name| name.strip_suffix(".llm.md"))
+                {
+                    item.output_name = Some(format!("{stem}.md"));
+                }
+                if raw.get("llm_enhanced").is_none() {
+                    item.llm_enhanced = item.output.as_deref().is_some_and(|output| {
+                        bases.get(&item.item_id).map_or_else(
+                            || output.ends_with(".llm.md"),
+                            |base| output == format!("{base}.llm.md"),
+                        )
+                    });
+                }
                 if raw.get("retryable").is_none()
                     && value["options"]["origin"] == "cli"
                     && item.kind == "file"
@@ -205,7 +226,7 @@ pub(super) fn rehydrate(
             options,
             items,
             size,
-            bases: serde_json::from_value(value["native_bases"].clone()).unwrap_or_default(),
+            bases,
             assets: serde_json::from_value(value["native_assets"].clone()).unwrap_or_default(),
             item_options: raw_items
                 .iter()

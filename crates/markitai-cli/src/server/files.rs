@@ -122,11 +122,7 @@ pub(super) async fn result(
         let item=data.items.iter().find(|item|item.item_id==item_id).ok_or_else(||ApiError::new(404,"item not found"))?;
         let selected=item.output.as_deref().filter(|_|item.status=="done").ok_or_else(||ApiError::new(404,"item result not available"))?;
         let out=job.folder.join("out");store::safe_file(&out,selected)?;
-        let base=data.bases.get(&item_id).cloned().unwrap_or_else(||{
-            let source=item.output_name.as_deref().unwrap_or(selected);
-            let stem=source.strip_suffix(".md").unwrap_or(source);
-            if item.llm_enhanced&&item.output_name.is_none(){stem.strip_suffix(".llm").unwrap_or(stem).to_owned()}else{stem.to_owned()}
-        });
+        let base=item_base(&data,item)?;
         let base_name=format!("{base}.md");let enhanced_name=format!("{base}.llm.md");
         let base_path=store::safe_file(&out,&base_name).ok();let enhanced_path=store::safe_file(&out,&enhanced_name).ok();
         let (variant,path)=if item.llm_enhanced&&enhanced_path.is_some(){("llm",enhanced_path.clone().unwrap())}else if let Some(path)=base_path.clone(){("base",path)}else if let Some(path)=enhanced_path.clone(){("llm",path)}else{return Err(ApiError::new(404,"item result not available"));};
@@ -278,41 +274,81 @@ pub(super) async fn history_archive(
     body(file, Some(temp), "application/zip", "markitai-all.zip")
 }
 
-pub(super) fn item_base(data: &super::jobs::JobData, item: &super::types::Item) -> String {
-    if let Some(base) = data.bases.get(&item.item_id) {
-        return base.clone();
+pub(super) fn item_base(
+    data: &super::jobs::JobData,
+    item: &super::types::Item,
+) -> ApiResult<String> {
+    let invalid = || ApiError::new(409, "saved output identity is inconsistent or unsafe");
+    let base = if let Some(base) = data.bases.get(&item.item_id) {
+        base.clone()
+    } else if let Some(name) = &item.output_name {
+        name.strip_suffix(".md").unwrap_or(name).to_owned()
+    } else if let Some(output) = &item.output {
+        let name = if item.llm_enhanced {
+            output.strip_suffix(".llm.md")
+        } else {
+            output.strip_suffix(".md")
+        };
+        name.or_else(|| output.strip_suffix(".md"))
+            .unwrap_or(output)
+            .to_owned()
+    } else {
+        match item.kind.as_str() {
+            "file" => item
+                .name
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("")
+                .to_owned(),
+            "url" => markitai_core::output::url_name(&item.name, &Default::default()),
+            _ => return Err(invalid()),
+        }
+    };
+    if base.is_empty() || base.contains(['/', '\\', '\0']) || matches!(base.as_str(), "." | "..") {
+        return Err(invalid());
     }
-    let inferred =
-        item.output_name
-            .as_deref()
-            .map(str::to_owned)
-            .or_else(|| match item.kind.as_str() {
-                "file" => Some(format!("{}.md", item.name)),
-                "url" => Some(format!(
-                    "{}.md",
-                    markitai_core::output::url_name(&item.name, &Default::default())
-                )),
-                _ => None,
-            });
-    if let Some(name) = inferred {
-        let base = name.strip_suffix(".md").unwrap_or(&name);
-        if item
+    let base_name = format!("{base}.md");
+    let enhanced_name = format!("{base}.llm.md");
+    if item
+        .output_name
+        .as_deref()
+        .is_some_and(|name| name != base_name && name != base)
+        || item
             .output
             .as_deref()
-            .is_none_or(|out| out == format!("{base}.md") || out == format!("{base}.llm.md"))
+            .is_some_and(|name| name.ends_with(".md") && name != base_name && name != enhanced_name)
+    {
+        return Err(invalid());
+    }
+    Ok(base)
+}
+
+/// A filename match may locate a result, but cannot grant two items the same
+/// mutable Markdown member. Asset sharing is handled separately by owned_files.
+pub(super) fn exclusive_item_base(
+    data: &super::jobs::JobData,
+    item: &super::types::Item,
+) -> ApiResult<String> {
+    let base = item_base(data, item)?;
+    let family = [format!("{base}.md"), format!("{base}.llm.md")]
+        .map(|name| caseless::default_case_fold_str(&name));
+    for sibling in data
+        .items
+        .iter()
+        .filter(|other| other.item_id != item.item_id)
+    {
+        let other = item_base(data, sibling)?;
+        if [format!("{other}.md"), format!("{other}.llm.md")]
+            .iter()
+            .any(|name| family.contains(&caseless::default_case_fold_str(name)))
         {
-            return base.into();
+            return Err(ApiError::new(
+                409,
+                "saved output family overlaps another item",
+            ));
         }
     }
-    let name = item
-        .output
-        .as_deref()
-        .or(item.output_name.as_deref())
-        .unwrap_or(&item.name);
-    name.strip_suffix(".llm.md")
-        .or_else(|| name.strip_suffix(".md"))
-        .unwrap_or(name)
-        .into()
+    Ok(base)
 }
 
 /// Native indexes are authoritative. Legacy histories additionally use exact
@@ -322,7 +358,7 @@ pub(super) fn owned_files(
     data: &super::jobs::JobData,
     item: &super::types::Item,
 ) -> ApiResult<HashSet<String>> {
-    let base = item_base(data, item);
+    let base = item_base(data, item)?;
     let out = folder.join("out");
     let mut names = HashSet::new();
     let mut text = String::new();

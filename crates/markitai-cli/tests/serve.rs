@@ -787,3 +787,6 @@ fn legacy_visible_assets_and_multi_history_zip_names_follow_the_saved_contract()
 
 #[path = "serve/rerun.rs"]
 mod rerun;
+
+#[path = "serve/legacy_history.rs"]
+mod legacy_history;

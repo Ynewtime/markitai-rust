@@ -5,8 +5,8 @@ request and response contract. Neither an installed CLI nor a Python worker is
 used for conversion. Feature availability is therefore the same as the core;
 an installed binding does not add missing format, OCR, or browser capabilities.
 
-The latest [installed-package validation](validation/vision-auth-cli-round23.md)
-targets source `f1b1781c3f7d2126eda8743c74303e564538679b` on macOS arm64.
+The latest [installed-package validation](validation/structured-media-round24.md)
+targets source `2d502b9ad4d46edf21fc854997543a79ab74c532` on macOS arm64.
 Python 3.13, Node 24 and Go 1.27.1 checks pass: 16 installed Python tests,
 three installed Node tests and Go source-package race tests. The earlier
 [round-seventeen PDF comparison](validation/pdf-native-round17.md) remains its
@@ -27,12 +27,29 @@ configuration; `false` explicitly disables the feature. An explicit empty
 configuration follows the core's configuration loading rules.
 
 Success is `{"ok":true,"result":{...}}`; failure is
-`{"ok":false,"error":{"code":"...","message":"..."}}`. The typed adapters
+`{"ok":false,"error":{"code":"...","message":"..."}}`, with optional
+`error.usage` when model responses have already been recorded. The typed adapters
 unwrap this envelope into a result or host-language error. Result fields are
 `source`, `markdown`, `llm_markdown`, `frontmatter`, `output_path`,
 `llm_output_path`, `assets`, `screenshots`, `images`, `usage`, `skip_reason`,
 `duration`, and `warnings`. Durations are seconds. In-memory conversions have
 null output paths and empty asset/screenshot path lists.
+
+Terminal usage uses the same `cost_usd`, `requests`, `input_tokens`,
+`output_tokens` and `by_model` fields as successful conversions. Python errors
+raised by the adapter expose `.usage` (`ConversionUsage` or `None`), Node
+`ConversionError.usage` is optional, and Go `ConversionError.Usage` is a nullable
+pointer. Existing constructors, exception categories, code and message stay
+compatible. An absent value differs from a recorded response with zero tokens;
+neither establishes zero provider cost. Pricing remains unimplemented.
+
+Rust callers can use `convert_detailed` and the detailed context/publication
+entrypoints to receive `ConversionFailure { error, usage }`, including final
+publication errors. Existing `convert` variants still return the original
+`Error` variants. Scope accounting remains document-local even with a shared
+runtime. Native panics retain their existing generic boundary handling and do
+not promise detailed usage. CLI/report, REST and MCP terminal diagnostics need
+separate propagation and are not covered by this binding contract.
 
 JSON serialization adds copies at the boundary. Benchmark total host-call time
 separately from native extraction when evaluating this cost. The protocol is
@@ -213,11 +230,11 @@ Node, and Go integration suites load compiled native artifacts and cover
 Unicode, concurrent repeated calls, output files, and structured failures.
 Local HTTP-server tests also verify that Python's GIL and Node's event loop
 remain available while native work runs.
-Conversion tests pass explicit empty config (or a test-owned config object)
-and disable LLM. The missing-model exception test enables LLM only inside an
-empty test environment and directory. No test reads user configuration or
-sends model requests.
-No mock native extension is used. Run each suite against newly rebuilt
+Conversion tests use explicit empty config or test-owned config objects.
+Terminal-usage tests use loopback HTTP fixtures with fake credentials, including
+concurrent paid failures and zero-token responses. They do not contact real model
+providers or read user configuration. Old-producer envelopes are tested separately
+from actual compiled-native error paths. Run each suite against newly rebuilt
 artifacts after core or ABI changes.
 
 Implementation references: [PyO3 function and module interface](https://pyo3.rs/v0.27.2/module.html),

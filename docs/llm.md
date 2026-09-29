@@ -145,6 +145,38 @@ already queued conversions. Hosts with an async event loop should dispatch the
 blocking conversion outside that loop. CLI interruption continues to use the
 batch scheduler's drain behavior.
 
+Clones also merge identical active typed text chunks and first visual batches.
+Identity includes the complete rendered prompts, ordered image bytes and MIME,
+resolved credentials/endpoints/model pool, routing and budget policy, and the
+semantic cache key. A per-runtime salted digest stays in memory and is excluded
+from Debug and disk records. Changing credentials, endpoint, prompt, image bytes
+or policy prevents joining an active request. Ordinary persistent cache lookup
+keeps its existing credential-independent contract.
+
+Only the owner sends HTTP and records paid usage. Waiters consume a successful
+semantic answer after applying their own source/metadata checks; they acquire
+no HTTP permit and record zero new usage. The whole conversion reports a cache
+hit only when every needed chunk/batch was reused and no other stage made a paid
+request. An owner finishes its attempted cache write before publishing to
+waiters. An unwritable cache still warns; a validated answer can be shared with
+already waiting callers without claiming durable persistence.
+
+Owners release and wake waiters on error, cancellation or unwinding. Errors,
+attempt counters and usage are never shared; a surviving waiter may become a new
+owner and recheck the cache under its own budget. Visual cancellation is checked
+while waiting at bounded intervals and detaches only that caller. This adds no
+new public cancellation API or force-cancellation of an active HTTP call.
+
+The temporary table admits at most 128 active identities; each shared answer is
+limited to 16 MiB of serialized JSON and retained answers together to 64 MiB.
+These bound serialized payload retention, not Rust object overhead or process
+RSS. Overflow bypasses merging and runs the existing request path. Completed
+entries leave the table immediately; outstanding waiters retain only their
+answer until consumption. There is no new long-lived in-memory result cache.
+Cache-disabled, refresh and matching bypass-pattern requests do not merge.
+Later visual cleaner batches, pure processing and caption/description analysis
+remain independent; unrelated runtimes and different processes do not merge.
+
 The reference also scopes its shared runtime to a batch or service job; its
 independent processors may own separate semaphores. This implementation does
 not add provider-specific concurrency, rate-per-minute accounting, adaptive
@@ -160,12 +192,15 @@ cache-creation input tokens are included in input totals without adding public
 fields. Costs remain zero because the native build has no pricing catalog.
 Configured cost limits therefore remain unsupported.
 
-A final error cannot return accumulated usage through the existing success-only
-conversion result shape. If conversion itself returns a terminal error, no usage
-object can accompany it. A successful fallback result now retains usage from
-failed main/image stages through the shared scope. Malformed response JSON
-cannot supply trustworthy token counts. These are known
-accounting limits, not evidence that the provider charged nothing.
+Rust's additive `convert_detailed` and detailed context/publication entrypoints
+retain the original error plus its document's already recorded usage. The old
+`convert` signatures and error variants stay unchanged. The C JSON envelope and
+Node/Python/Go errors now carry optional terminal usage, including late publication
+failures. Pre-model errors carry no JSON usage; a recorded zero-token response is
+still distinguishable. Embedded image analysis may retain the established successful
+fallback with warnings; standalone image terminal errors retain their usage too.
+CLI/report, REST and MCP propagation are separate work. This addition does not
+implement pricing or recover usage from native panics.
 
 ## Prompt selection
 

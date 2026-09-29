@@ -118,6 +118,7 @@ pub(crate) fn process_document_with_runtime(
         }
     }
     let total = work.len();
+    let reused = AtomicUsize::new(0);
     let mut answers: Vec<Option<Answer>> = work.iter_mut().map(|item| item.cached.take()).collect();
     let jobs: Vec<_> = work
         .iter()
@@ -152,19 +153,35 @@ pub(crate) fn process_document_with_runtime(
                 let protected = &protected;
                 let cache = &cache;
                 let pool = &pool;
+                let reused = &reused;
                 scope.spawn(move || {
                     let _context = DocumentScope::enter(accounting);
                     loop {
                         let slot = next.fetch_add(1, Ordering::Relaxed);
                         let Some(&(index, item)) = jobs.get(slot) else { break };
-                        let answer = run_chunk(item, protected, metadata_only, total > 1, cfg, environment, runtime);
-                        let mut warning = None;
-                        if let (Ok(answer), Some(cache), Some(key)) = (&answer, cache, &item.key)
-                            && cache.set_json(key, pool, &answer.value()).is_err()
-                        {
-                            warning = Some("Persistent LLM cache could not save a document chunk; processing succeeded.".to_owned());
-                        }
-                        results.lock().unwrap_or_else(|e| e.into_inner()).push((index, answer, warning));
+                        let validate = |value: &Value| {
+                            let answer = parse_value(value, true)?;
+                            validate_answer(protected, &item.source, &answer.markdown, metadata_only, total > 1)?;
+                            Ok(answer)
+                        };
+                        let key = flight::key(runtime, item.key.as_deref(), cache_context, &item.prompts, cfg, environment, std::iter::empty());
+                        let (answer, warning, shared) = flight::execute(
+                            runtime, key, None,
+                            || cache.as_ref().zip(item.key.as_ref()).and_then(|(cache,key)| cache.get_json(key).ok().flatten()).and_then(|value| validate(&value).ok()),
+                            validate, Answer::value,
+                            || {
+                                let answer = run_chunk(item, protected, metadata_only, total > 1, cfg, environment, runtime);
+                                let mut warning = None;
+                                if let (Ok(answer), Some(cache), Some(key)) = (&answer, cache, &item.key)
+                                    && cache.set_json(key, pool, &answer.value()).is_err()
+                                {
+                                    warning = Some("Persistent LLM cache could not save a document chunk; processing succeeded.".to_owned());
+                                }
+                                (answer.map_err(VisionFailure::from), warning)
+                            },
+                        );
+                        if shared { reused.fetch_add(1, Ordering::Relaxed); }
+                        results.lock().unwrap_or_else(|e| e.into_inner()).push((index, answer.map_err(|failure| failure.error), warning));
                     }
                 });
             }
@@ -212,7 +229,7 @@ pub(crate) fn process_document_with_runtime(
     );
     let result = Enhancement {
         markdown: body,
-        cache_hit: misses == 0 && usage.requests == 0,
+        cache_hit: misses == reused.load(Ordering::Relaxed) && usage.requests == 0,
         usage,
         warnings,
         metadata: Some(metadata),

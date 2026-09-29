@@ -3,10 +3,11 @@
 const native = require('./markitai.node');
 
 class ConversionError extends Error {
-  constructor(message, code) {
+  constructor(message, code, usage) {
     super(message);
     this.name = 'ConversionError';
     this.code = code;
+    this.usage = usage ?? undefined;
   }
 }
 
@@ -21,7 +22,7 @@ function request(source, options) {
 function result(response) {
   const envelope = JSON.parse(response);
   if (!envelope.ok) {
-    throw new ConversionError(envelope.error.message, envelope.error.code);
+    throw new ConversionError(envelope.error.message, envelope.error.code, envelope.error.usage);
   }
   return envelope.result;
 }

@@ -46,6 +46,9 @@ mod browser_pdf;
 #[path = "conversion/browser_identity.rs"]
 mod browser_identity;
 
+#[path = "conversion/terminal_usage.rs"]
+mod terminal_usage;
+
 fn options() -> ConvertOptions {
     ConvertOptions {
         config: Some(json!({})),
@@ -685,3 +688,6 @@ fn local_image_ocr_reads_original_pixels_and_blank_images_are_explicit() {
     );
     assert!(result.output_path.is_none() && result.assets.is_empty());
 }
+
+#[path = "conversion/request_coalescing.rs"]
+mod request_coalescing;

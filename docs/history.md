@@ -141,6 +141,48 @@ The [round-ten release audit](validation/history-round10.md) passes five authore
 archive contract pairs, four strictly after declared identity/time normalization.
 The failed-notebook pair retains its existing parser diagnostic difference.
 Native service history consumption is implemented and covered by actual HTTP
-tests. Broader paired coverage, cross-platform execution and the remaining
-[legacy filename adaptation](planning/after-round24-state-interop.md) still need
-their own acceptance evidence.
+tests. Broader paired coverage and cross-platform execution still need their own
+acceptance evidence. The older filename adaptation below has its own focused
+source tests; executed results belong in the current validation record.
+
+## Older enhanced histories
+
+The service reads completed reference histories from the existing job directory;
+there is no import command or required directory move. Some old recorders saved
+the actual enhanced filename, such as `page.html.llm.md`, in both `output` and
+`output_name`. The latter is supposed to identify the base Markdown filename.
+On loading an unindexed legacy item, the service normalizes that field in memory
+to `page.html.md` while keeping the actual `output` and all files unchanged.
+When `llm_enhanced` is missing, the enhanced output suffix supplies the legacy
+default. An explicitly saved false value is retained.
+
+Native `native_bases` entries take precedence over filename inference. In
+particular, a literal source name `notes.llm` can legitimately have
+`notes.llm.md` as its base; the loader does not strip that identity or mark it
+enhanced merely because of the suffix. Result preview, retry and item deletion
+use the same output-family resolver. Inconsistent saved identities return 409;
+mutations also reject Markdown families claimed by another item, including
+case-folded collisions. These checks do not prevent safe direct file downloads
+or whole-job archive downloads for inspecting ambiguous metadata.
+
+For valid legacy jobs without a pending native recovery transaction, startup,
+history listing, preview and download do not rewrite `meta.json`, create native
+indexes or rename output files. Stopping the native service therefore leaves
+the same original history available to the reference service. This is read-time
+compatibility, not a destructive schema migration or permission to run both
+implementations as simultaneous writers.
+
+Explicit retry and deletion retain their ordinary persistence semantics. URL
+items can refetch their original URL; web items with a retained upload can
+reconvert it. CLI file archives without uploads remain nonretryable. A successful
+plain retry writes the correct base filename, removes its stale enhanced sibling
+and persists the resolved native identity. Deleting an item removes its correct
+Markdown pair while preserving assets still claimed by siblings.
+
+A failed retry of a previous successful item preserves its public item fields
+and existing result bytes through the service's staged transaction and recovery
+path. The job's latest options and completion timestamp can still be updated by
+normal finalization; explicit retry is not a promise that the whole metadata
+file stays byte-identical. No automatic undo of a successful retry or deletion
+is added. Focused tests cover authored legacy reads, restart, one loopback URL
+retry, failure preservation, native-name ambiguity and shared-asset deletion.

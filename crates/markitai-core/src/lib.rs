@@ -76,6 +76,11 @@ pub fn convert(source: &str, options: ConvertOptions) -> Result<ConversionOutput
     convert_with_context(source, options, ConvertContext::default())
 }
 
+/// Convert while retaining recorded model usage if a later stage fails.
+pub fn convert_detailed(source: &str, options: ConvertOptions) -> DetailedResult<ConversionOutput> {
+    convert_with_context_detailed(source, options, ConvertContext::default())
+}
+
 /// Shares native run resources without adding fields to binding requests.
 #[doc(hidden)]
 pub fn convert_with_context(
@@ -86,6 +91,16 @@ pub fn convert_with_context(
     convert_with_publication(source, options, context, None)
 }
 
+/// Detailed conversion with the same caller-owned runtime and routing context.
+#[doc(hidden)]
+pub fn convert_with_context_detailed(
+    source: &str,
+    options: ConvertOptions,
+    context: ConvertContext<'_>,
+) -> DetailedResult<ConversionOutput> {
+    convert_with_publication_detailed(source, options, context, None)
+}
+
 /// Native callers may supply an already acquired document publication claim.
 /// Existing conversion and serialized adapter entrypoints remain independent.
 #[doc(hidden)]
@@ -94,6 +109,36 @@ pub fn convert_with_publication(
     options: ConvertOptions,
     context: ConvertContext<'_>,
     publication: Option<&dyn output::Publication>,
+) -> Result<ConversionOutput> {
+    convert_with_publication_detailed(source, options, context, publication)
+        .map_err(|failure| failure.error)
+}
+
+/// Retain recorded usage for failures, including final output publication errors.
+#[doc(hidden)]
+pub fn convert_with_publication_detailed(
+    source: &str,
+    options: ConvertOptions,
+    context: ConvertContext<'_>,
+    publication: Option<&dyn output::Publication>,
+) -> DetailedResult<ConversionOutput> {
+    let mut scope = None;
+    let result = convert_inner(source, options, context, publication, &mut scope);
+    result.map_err(|error| ConversionFailure {
+        error,
+        usage: scope
+            .as_ref()
+            .map(llm::DocumentScope::usage)
+            .unwrap_or_default(),
+    })
+}
+
+fn convert_inner(
+    source: &str,
+    options: ConvertOptions,
+    context: ConvertContext<'_>,
+    publication: Option<&dyn output::Publication>,
+    document_scope: &mut Option<llm::DocumentScope>,
 ) -> Result<ConversionOutput> {
     let start = Instant::now();
     if source.trim().is_empty() {
@@ -218,8 +263,7 @@ pub fn convert_with_publication(
             ..Default::default()
         });
     }
-    let document_scope =
-        config::enabled(&cfg, "/llm/enabled").then(|| llm::DocumentScope::new(&cfg));
+    *document_scope = config::enabled(&cfg, "/llm/enabled").then(|| llm::DocumentScope::new(&cfg));
     let mut vision = Vec::new();
     let mut screenshots = Vec::new();
     let mut fetch_cache_hit = false;
@@ -651,7 +695,7 @@ pub fn convert_with_publication(
             "Image analysis failed; base Markdown and assets retained: {error}"
         ));
     }
-    if let Some(scope) = document_scope {
+    if let Some(scope) = document_scope.as_ref() {
         result.usage = scope.usage();
         if result.usage.requests > 0 {
             result.llm_cache_hit = false;
@@ -721,12 +765,21 @@ pub fn is_url(source: &str) -> bool {
 /// Shared native adapter protocol. Errors are values; no host stdout is used.
 pub fn convert_json(request: &str) -> String {
     let result = serde_json::from_str::<Request>(request)
-        .map_err(Error::from)
-        .and_then(|r| convert(&r.source, r.options));
+        .map_err(|error| ConversionFailure::from(Error::from(error)))
+        .and_then(|r| convert_detailed(&r.source, r.options));
     match result {
         Ok(result) => json!({"ok":true,"result":result}).to_string(),
-        Err(error) => json!({"ok":false,"error":{"code":error.code(),"message":error.to_string()}})
-            .to_string(),
+        Err(failure) => {
+            let mut error = json!({"code":failure.code(),"message":failure.to_string()});
+            if failure.usage.requests > 0
+                || failure.usage.input_tokens > 0
+                || failure.usage.output_tokens > 0
+                || !failure.usage.by_model.is_empty()
+            {
+                error["usage"] = json!(failure.usage);
+            }
+            json!({"ok":false,"error":error}).to_string()
+        }
     }
 }
 

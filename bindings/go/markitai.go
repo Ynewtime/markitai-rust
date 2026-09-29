@@ -57,6 +57,8 @@ type ConversionOutput struct {
 type ConversionError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Nil means no accounting was supplied; it does not establish a free call.
+	Usage *ConversionUsage `json:"usage,omitempty"`
 }
 
 func (err *ConversionError) Error() string { return err.Message }

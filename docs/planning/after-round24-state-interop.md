@@ -1,5 +1,9 @@
 # R24 后：旧增强历史的原位读取与重试
 
+Implementation status: the contracts selected here have source validation in
+[round 25](../validation/runtime-history-round25.md). The proposal below preserves
+its original design reasoning; broader follow-up work is tracked separately.
+
 状态：**下一任务设计，尚未实施或执行验收**。2026-09-29 根据 R24 工作树与只读参考源码核对；参考提交为 CONTROL 记录的 `ba374322f884b0e720b45466cc1196f4574a3da5`。本次未运行原项目、构建或转换，未读取用户 `~/.markitai` 的文件内容，连目录盘点也没有必要执行。
 
 建议下一批只闭环一条路径：**已有旧 CLI/serve 增强历史 → 原位展示正确的 base/llm 结果 → URL 或保留上传的项目用原接口重试 → 重启后仍正确**。不做全 home 搬迁，不新增公开 flags，不批量改写缓存键。

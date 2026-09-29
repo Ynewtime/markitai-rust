@@ -100,10 +100,7 @@ pub(super) async fn retry(
         }};
         let mut cfg=opts.config(&state.settings.snapshot())?;
         if body.operation==Operation::Enhance&& (cfg["llm"]["enabled"]!=true||!markitai_core::llm_capabilities(&cfg).routable){return Err(ApiError::new(409,"LLM enhancement is unavailable; enable a routable LLM first"));}
-        let base=files::item_base(&data,&prior);
-        if base.is_empty()||FsPath::new(&base).components().count()!=1||base.contains(['/', '\\'])||matches!(base.as_str(),"."|"..") {return Err(ApiError::new(409,"saved output identity is not safe to retry"));}
-        let family=[format!("{base}.md"),format!("{base}.llm.md")].map(|s|caseless::default_case_fold_str(&s));
-        for sibling in data.items.iter().filter(|i|i.item_id!=item_id){let other=files::item_base(&data,sibling);if [format!("{other}.md"),format!("{other}.llm.md")].iter().any(|s|family.contains(&caseless::default_case_fold_str(s))){return Err(ApiError::new(409,"saved output family overlaps another item"));}}
+        let base=files::exclusive_item_base(&data,&prior)?;
         let runtime=job.runtime.get_or_init(||Arc::new(markitai_core::LlmRuntime::new(cfg["llm"]["concurrency"].as_u64().unwrap_or(10).max(1) as usize).expect("validated LLM concurrency"))).clone();
         cfg["output"]["on_conflict"]=json!("overwrite");
         cfg["output"]["filename"]=json!(format!("{base}.md"));
@@ -420,6 +417,7 @@ pub(super) async fn delete(
         {
             return Err(ApiError::new(409, "job is still running; retry when done"));
         }
+        files::exclusive_item_base(&data, &data.items[index])?;
         if data.items.len() == 1 {
             markitai_core::output::check_path(&job.folder, false).map_err(ApiError::internal)?;
             fs::remove_dir_all(&job.folder).map_err(ApiError::internal)?;

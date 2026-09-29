@@ -4,6 +4,9 @@
 
 ### Added
 
+- Shared-runtime coalescing of identical active typed document and first visual-batch requests, with separate owner accounting.
+- Additive detailed Rust failures and optional terminal usage in C JSON and Python/Node/Go errors.
+
 - Capability-aware structured model tools/schema/text transport, bounded repair and shared paid usage across validation attempts.
 - Same-session authenticated browser PDF streaming into the native document and page-media pipeline.
 - Complete spreadsheet sheet canvases through isolated LibreOffice, including hidden and empty sheets.
@@ -59,6 +62,8 @@
 - Bounded native model discovery with credential-scoped caching, plus single-model connection probes without document conversion.
 
 ### Fixed
+
+- In-memory compatibility for legacy enhanced histories, consistent result/retry/delete families and preserved native filename ownership.
 
 - Bounded long-text splitting for literal marker-like input, and stop visual dispatch when the first metadata batch cannot succeed.
 - Private Unix permissions for Office diagnostic and rendering workspaces.

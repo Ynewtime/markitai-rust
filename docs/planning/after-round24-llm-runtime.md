@@ -1,5 +1,9 @@
 # Small runtime stages after structured transport
 
+Implementation status: the contracts selected here have source validation in
+[round 25](../validation/runtime-history-round25.md). The proposal below preserves
+its original design reasoning; broader follow-up work is tracked separately.
+
 This is a proposed next implementation, not a claim that requests are already
 coalesced or that terminal errors expose usage. It requires no new configuration
 keys. Keep the two stages independently reviewable: shared in-flight work first,

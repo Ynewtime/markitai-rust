@@ -1,20 +1,21 @@
 //! Shared, blocking request capacity for one caller-controlled conversion run.
 
-use crate::{Error, Result};
+use crate::{Error, Result, llm::flight};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// Share this runtime between conversions that should obey one LLM request cap.
 ///
 /// Clones share capacity. Independently constructed runtimes do not constrain
-/// one another, and no credentials or request contents are retained here.
+/// one another. Typed requests may share validated in-flight answers; private
+/// request fingerprints are never exposed through Debug or persisted.
 #[derive(Clone, Debug)]
 pub struct LlmRuntime {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
 struct Inner {
     limit: usize,
+    flights: Arc<flight::Table>,
     state: Mutex<State>,
     changed: Condvar,
 }
@@ -24,6 +25,14 @@ struct State {
     active: usize,
     next_ticket: u64,
     serving: u64,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmRuntime")
+            .field("concurrency", &self.limit)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LlmRuntime {
@@ -36,10 +45,15 @@ impl LlmRuntime {
         Ok(Self {
             inner: Arc::new(Inner {
                 limit: concurrency,
+                flights: Arc::new(flight::Table::new()),
                 state: Mutex::new(State::default()),
                 changed: Condvar::new(),
             }),
         })
+    }
+
+    pub(crate) fn flights(&self) -> &Arc<flight::Table> {
+        &self.inner.flights
     }
 
     pub fn concurrency(&self) -> usize {

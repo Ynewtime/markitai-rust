@@ -59,6 +59,7 @@ struct Work<'a> {
     key: Option<String>,
     cached: Option<BatchAnswer>,
     first: bool,
+    context: &'a str,
 }
 struct BatchAnswer {
     markdown: String,
@@ -156,6 +157,7 @@ pub(crate) fn process_vision_with_runtime(
             key,
             cached: None,
             first: index == 0,
+            context: request.cache_context,
         };
         if let (Some(cache), Some(key)) = (&cache, &item.key) {
             match cache.get_json(key) {
@@ -181,6 +183,7 @@ pub(crate) fn process_vision_with_runtime(
     let mut answers: Vec<_> = work.iter_mut().map(|item| item.cached.take()).collect();
     let stop = AtomicBool::new(false);
     let mut failures = Vec::new();
+    let mut reused = 0;
     if misses > 0 {
         let local_runtime;
         let runtime = match runtime {
@@ -201,13 +204,14 @@ pub(crate) fn process_vision_with_runtime(
         // Metadata is obtained before dispatching the independent cleaner batches.
         if answers[0].is_none() {
             match complete(&work[0], cfg, env, runtime, &stop, cache.as_ref(), &pool) {
-                (Ok(answer), warning) => {
+                (Ok(answer), warning, shared) => {
+                    reused += usize::from(shared);
                     answers[0] = Some(answer);
                     warnings.extend(warning);
                 }
                 // No later batch can repair a missing first-batch document answer.
                 // Preserve its classification for the caller's web text fallback.
-                (Err(failure), _) => return Err(failure),
+                (Err(failure), _, _) => return Err(failure),
             }
         }
         let jobs: Vec<_> = work
@@ -253,7 +257,10 @@ pub(crate) fn process_vision_with_runtime(
                 });
             }
         });
-        for (index, (answer, warning)) in results.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        for (index, (answer, warning, shared)) in
+            results.into_inner().unwrap_or_else(|e| e.into_inner())
+        {
+            reused += usize::from(shared);
             warnings.extend(warning);
             match answer {
                 Ok(answer) => answers[index] = Some(answer),
@@ -287,7 +294,7 @@ pub(crate) fn process_vision_with_runtime(
     let output = Enhancement {
         markdown,
         metadata,
-        cache_hit: misses == 0 && usage.requests == 0,
+        cache_hit: misses == reused && usage.requests == 0,
         usage,
         warnings,
     };
@@ -529,16 +536,49 @@ fn complete(
     stop: &AtomicBool,
     cache: Option<&llm_cache::Cache>,
     pool: &str,
-) -> (VisualResult<BatchAnswer>, Option<String>) {
-    let result = run_batch(item, cfg, env, runtime, stop);
-    let warning = if let (Ok(answer), Some(cache), Some(key)) = (&result, cache, &item.key) {
-        cache.set_json(key, pool, &answer.value()).err().map(|_| {
-            "Persistent LLM cache could not save a visual batch; processing succeeded.".into()
+) -> (VisualResult<BatchAnswer>, Option<String>, bool) {
+    let key = item
+        .first
+        .then(|| {
+            flight::key(
+                runtime,
+                item.key.as_deref(),
+                item.context,
+                &item.prompts,
+                cfg,
+                env,
+                item.frames
+                    .iter()
+                    .map(|frame| (frame.number, frame.mime, frame.bytes)),
+            )
         })
-    } else {
-        None
-    };
-    (result, warning)
+        .flatten();
+    flight::execute(
+        runtime,
+        key,
+        Some(stop),
+        || {
+            cache
+                .zip(item.key.as_ref())
+                .and_then(|(cache, key)| cache.get_json(key).ok().flatten())
+                .and_then(|value| cached_answer(item, &value).ok())
+        },
+        |value| cached_answer(item, value),
+        BatchAnswer::value,
+        || {
+            let result = run_batch(item, cfg, env, runtime, stop);
+            let warning = if let (Ok(answer), Some(cache), Some(key)) = (&result, cache, &item.key)
+            {
+                cache.set_json(key, pool, &answer.value()).err().map(|_| {
+                    "Persistent LLM cache could not save a visual batch; processing succeeded."
+                        .into()
+                })
+            } else {
+                None
+            };
+            (result, warning)
+        },
+    )
 }
 fn run_batch(
     item: &Work<'_>,
@@ -675,6 +715,7 @@ mod tests {
             key: None,
             cached: None,
             first: true,
+            context: "test",
         };
         assert!(cached_answer(&item,&json!({"markdown":"I cannot process the image.","metadata":{"description":"x","tags":["x"]}})).is_err());
     }
