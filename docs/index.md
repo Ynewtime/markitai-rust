@@ -1,5 +1,7 @@
 # Markitai Rust documentation
 
+当前完整检查点：[R24 验收记录](validation/structured-media-round24.md)；浏览器修复说明见[原生安装](browser-installation.md)。
+
 - [Pause summary](STATUS.md): complete delivered scope, verified artifacts and remaining work.
 - [Remaining work](remaining-work.md): current acceptance queue.
 - [Control center](CONTROL.md): scope, ownership, acceptance, checkpoints.

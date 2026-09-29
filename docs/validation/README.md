@@ -1,5 +1,7 @@
 # Validation records
 
+最新完整检查点：[R24 结构化协议、认证 PDF、完整工作表与浏览器安装](structured-media-round24.md)。项目按用户要求继续推进。
+
 An implementation checkpoint is reproducible only when it records the command,
 source revision, test inputs, build profile, and platform. Passing new unit
 tests establishes specific contracts; it does not imply reference parity.
