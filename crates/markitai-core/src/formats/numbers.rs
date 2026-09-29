@@ -1,4 +1,4 @@
-//! Numbers tables, decoded locally from bounded ZIP/IWA packages.
+//! Numbers tables from bounded ZIP or directory packages.
 
 mod container;
 #[cfg(test)]
@@ -19,6 +19,15 @@ fn error(message: impl std::fmt::Display) -> Error {
 
 pub(super) fn extract(bytes: &[u8]) -> Result<Document> {
     let (archive, expected_tables) = container::open(bytes)?;
+    render(archive, expected_tables)
+}
+
+pub(super) fn extract_directory(path: &std::path::Path) -> Result<Document> {
+    let (archive, expected_tables) = container::open_directory(path)?;
+    render(archive, expected_tables)
+}
+
+fn render(archive: iwork::Document, expected_tables: usize) -> Result<Document> {
     let tables = archive.tables();
     if tables.len() != expected_tables || tables.is_empty() {
         return Err(error(

@@ -49,6 +49,16 @@ pub fn supports_extension(extension: &str) -> bool {
     ) || anydoc::Format::from_extension(&extension).is_some()
 }
 
+/// Whether a local directory is an atomic Numbers document candidate.
+///
+/// Invalid or unsupported packages still belong to this class: callers must
+/// report one document error rather than traverse their implementation files.
+pub fn is_numbers_package_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("numbers"))
+        && path.is_dir()
+}
+
 /// Extract a local document without modifying the input or writing assets.
 pub fn extract(path: &Path) -> Result<Document> {
     let extension = path
@@ -62,44 +72,48 @@ pub fn extract(path: &Path) -> Result<Document> {
             extension
         )));
     }
-    let bytes = if extension == "numbers" {
-        use std::io::Read;
-        const LIMIT: u64 = 128 * 1024 * 1024;
-        let file = std::fs::File::open(path)?;
-        if file.metadata()?.len() > LIMIT {
-            return Err(Error::Conversion(
-                "Numbers package exceeds the 128 MiB limit".into(),
-            ));
-        }
-        let mut bytes = Vec::new();
-        file.take(LIMIT + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > LIMIT {
-            return Err(Error::Conversion(
-                "Numbers package exceeds the 128 MiB limit".into(),
-            ));
-        }
-        bytes
+    let mut result = if is_numbers_package_path(path) {
+        numbers::extract_directory(path)?
     } else {
-        std::fs::read(path)?
-    };
-    let mut result = match extension.as_str() {
-        "txt" | "md" | "markdown" => Document {
-            markdown: text::decode(&bytes)?,
-            ..Document::default()
-        },
-        "html" | "htm" | "xhtml" => extract_html(&text::decode(&bytes)?, None)?,
-        "csv" | "tsv" => text::delimited(
-            &text::decode(&bytes)?,
-            if extension == "tsv" { b'\t' } else { b',' },
-        )?,
-        "ipynb" => text::notebook(&text::decode(&bytes)?)?,
-        "json" => text::json(&text::decode(&bytes)?)?,
-        "xml" => text::xml(&text::decode(&bytes)?)?,
-        "eml" => text::email(&bytes)?,
-        "msg" => msg::extract(&bytes)?,
-        "numbers" => numbers::extract(&bytes)?,
-        "rst" | "org" | "tex" | "latex" => markup::extract(&text::decode(&bytes)?, &extension)?,
-        _ => native::extract(&bytes, &extension)?,
+        let bytes = if extension == "numbers" {
+            use std::io::Read;
+            const LIMIT: u64 = 128 * 1024 * 1024;
+            let file = std::fs::File::open(path)?;
+            if file.metadata()?.len() > LIMIT {
+                return Err(Error::Conversion(
+                    "Numbers package exceeds the 128 MiB limit".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > LIMIT {
+                return Err(Error::Conversion(
+                    "Numbers package exceeds the 128 MiB limit".into(),
+                ));
+            }
+            bytes
+        } else {
+            std::fs::read(path)?
+        };
+        match extension.as_str() {
+            "txt" | "md" | "markdown" => Document {
+                markdown: text::decode(&bytes)?,
+                ..Document::default()
+            },
+            "html" | "htm" | "xhtml" => extract_html(&text::decode(&bytes)?, None)?,
+            "csv" | "tsv" => text::delimited(
+                &text::decode(&bytes)?,
+                if extension == "tsv" { b'\t' } else { b',' },
+            )?,
+            "ipynb" => text::notebook(&text::decode(&bytes)?)?,
+            "json" => text::json(&text::decode(&bytes)?)?,
+            "xml" => text::xml(&text::decode(&bytes)?)?,
+            "eml" => text::email(&bytes)?,
+            "msg" => msg::extract(&bytes)?,
+            "numbers" => numbers::extract(&bytes)?,
+            "rst" | "org" | "tex" | "latex" => markup::extract(&text::decode(&bytes)?, &extension)?,
+            _ => native::extract(&bytes, &extension)?,
+        }
     };
     result
         .metadata

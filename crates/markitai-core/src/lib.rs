@@ -218,15 +218,16 @@ fn convert_inner(
                 Error::Io(error)
             }
         })?;
-        if meta.is_dir() {
+        let numbers_package = meta.is_dir() && formats::is_numbers_package_path(path);
+        if meta.is_dir() && !numbers_package {
             return Err(Error::IsDirectory(source.into()));
         }
-        if !meta.is_file() {
+        if !meta.is_file() && !numbers_package {
             return Err(Error::InvalidInput(format!(
                 "Input is not a file: {source}"
             )));
         }
-        if meta.len() > 500 * 1024 * 1024 {
+        if meta.is_file() && meta.len() > 500 * 1024 * 1024 {
             return Err(Error::InvalidInput(
                 "Input exceeds the 500 MiB limit".into(),
             ));

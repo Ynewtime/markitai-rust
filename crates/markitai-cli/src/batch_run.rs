@@ -231,6 +231,42 @@ struct Work {
     previous: Entry,
 }
 
+// An older directory scan may have persisted work inside a package. Reject
+// that scope before receipt adoption or checkpoint upgrade; replay is read-only
+// and a stable state lock does not grant permission to rewrite old work.
+fn reject_package_members(snapshot: &Snapshot, scope: &Scope) -> CliResult<()> {
+    let mut checked = std::collections::HashMap::<PathBuf, bool>::new();
+    let mut inspect = |source: PathBuf| -> CliResult<()> {
+        let resolved = crate::report_store::resolve_path(&source).map_err(runtime)?;
+        for path in [&source, &resolved] {
+            for ancestor in path.ancestors().skip(1) {
+                let package = *checked
+                    .entry(ancestor.to_owned())
+                    .or_insert_with(|| markitai_core::formats::is_numbers_package_path(ancestor));
+                if package {
+                    return Err(runtime(
+                        "Recovery state contains an item inside a Numbers directory package; preserve this state and use a fresh output directory without --resume to convert the package as one document",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    };
+    for key in snapshot.documents.keys() {
+        inspect(scope.input.join(key))?;
+    }
+    for entry in snapshot.urls.values() {
+        if let Some(source) = entry
+            .source_file
+            .as_deref()
+            .filter(|source| !source.is_empty())
+        {
+            inspect(PathBuf::from(source))?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn run(
     cli: &Cli,
     cfg: &Value,
@@ -296,6 +332,9 @@ pub(super) fn run(
     } else {
         Snapshot::default()
     };
+    if cli.resume {
+        reject_package_members(&snapshot, &scope)?;
+    }
     let fresh = discovered(&tasks, state_options);
     let url_order: Vec<_> = fresh.urls.keys().cloned().collect();
     let native = snapshot.checkpoint.is_some();

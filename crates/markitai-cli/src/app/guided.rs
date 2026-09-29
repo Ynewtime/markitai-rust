@@ -30,7 +30,14 @@ fn collect_with(
     .map_err(runtime)?;
     let default = match cli.input.as_deref() {
         Some(source) if super::is_url(source) => "3",
-        Some(source) if config::expand_home(Path::new(source)).is_dir() => "2",
+        Some(source)
+            if {
+                let path = config::expand_home(Path::new(source));
+                path.is_dir() && !markitai_core::formats::is_numbers_package_path(&path)
+            } =>
+        {
+            "2"
+        }
         _ => "1",
     };
     let Some(kind) = interactive::choice(
@@ -75,9 +82,9 @@ fn collect_with(
             let path = config::expand_home(Path::new(source));
             if !source.is_empty()
                 && if kind == "2" {
-                    path.is_dir()
+                    path.is_dir() && !markitai_core::formats::is_numbers_package_path(&path)
                 } else {
-                    path.is_file()
+                    path.is_file() || markitai_core::formats::is_numbers_package_path(&path)
                 }
             {
                 break path.to_string_lossy().into_owned();

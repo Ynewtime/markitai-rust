@@ -26,6 +26,21 @@ configuration; `false` explicitly disables the feature. An explicit empty
 `config` uses built-in defaults and bypasses configuration files. An omitted
 configuration follows the core's configuration loading rules.
 
+A modern `.numbers` directory package is a single local document, just like its
+ZIP form; the extension is case-insensitive. It uses the same bounded IWA table
+reader and keeps the package path as `source`. Supplying `output_dir` writes one
+`<package-name>.md` file. Ordinary directories still return `is_directory`
+(`IsADirectoryError` in Python); the bindings do not recursively convert them.
+Legacy XML packages, Numbers OCR and complete worksheet screenshots remain
+explicitly unsupported. See [Numbers reader boundaries](numbers.md).
+
+The binding tests unfold two pinned MIT ZIP fixtures into directory packages
+and compare their bodies, warnings and output files through Python/Node sync
+and async calls and Go typed/JSON calls. `MARKITAI_TEST_NUMBERS_FIXTURES` selects
+the fixture directory for installed-package tests; repository tests also have a
+local fallback. These are container-equivalence checks, not independently
+exported Apple directory-package goldens or canvas-fidelity tests.
+
 Success is `{"ok":true,"result":{...}}`; failure is
 `{"ok":false,"error":{"code":"...","message":"..."}}`, with optional
 `error.usage` when model responses have already been recorded. The typed adapters

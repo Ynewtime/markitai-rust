@@ -55,6 +55,16 @@ RFC3339 timestamps have millisecond precision, with one finish timestamp shared
 by the job and its items. Warnings are deduplicated in encounter order. Only URL
 items are retryable because original input files are not archived.
 
+## Numbers package inputs
+
+A modern `.numbers` directory is eligible as one local document, including when
+its conversion fails. The reader owns the package content limits; directory
+metadata length is not treated as its byte size. Single-package archives use the
+package basename, while a package found in a directory batch uses its relative
+path. History copies the generated Markdown and referenced assets, never the
+package's internal source files. Deleting the source package does not remove the
+archived output. CLI file history remains nonretryable without its original input.
+
 ## Attempt diagnostics
 
 New CLI archives add optional item `diagnostics.last_attempt` only when core

@@ -1,5 +1,8 @@
 //! Allocation checks that run before the third-party table decoder.
 
+#[path = "directory.rs"]
+mod directory;
+
 use super::{Result, error};
 use iwork::pb::{Message, Reader, Value};
 use std::collections::{HashMap, HashSet};
@@ -89,15 +92,33 @@ pub(super) fn open(bytes: &[u8]) -> Result<(iwork::Document, usize)> {
         }
         entries.push((name, data));
     }
+    finish(entries, iwork::package::Form::SingleFile, budget)
+}
+
+pub(super) fn open_directory(path: &std::path::Path) -> Result<(iwork::Document, usize)> {
+    directory::open(path)
+}
+
+fn finish(
+    entries: Vec<(String, Vec<u8>)>,
+    form: iwork::package::Form,
+    budget: Budget,
+) -> Result<(iwork::Document, usize)> {
+    if !entries.iter().any(|(name, _)| name.ends_with(".iwa"))
+        && entries
+            .iter()
+            .any(|(name, _)| matches!(name.as_str(), "index.xml" | "index.xml.gz" | "Index.zip"))
+    {
+        return Err(crate::Error::Unsupported(
+            "Legacy XML and Index.zip-only Numbers packages are not supported".into(),
+        ));
+    }
     if !budget.model_refs.is_subset(&budget.model_ids) {
         return Err(error("table references a missing model"));
     }
     validate_decoded_budget(&budget)?;
-    let doc = iwork::Document::from_package(iwork::Package {
-        entries,
-        form: iwork::package::Form::SingleFile,
-    })
-    .map_err(|_| error("invalid or unsupported IWA document"))?;
+    let doc = iwork::Document::from_package(iwork::Package { entries, form })
+        .map_err(|_| error("invalid or unsupported IWA document"))?;
     if doc.kind() != iwork::Kind::Numbers {
         return Err(error("package is not a modern Numbers document"));
     }

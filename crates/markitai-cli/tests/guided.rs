@@ -248,6 +248,43 @@ mod terminal {
     }
 
     #[test]
+    fn numbers_directory_package_defaults_to_file_and_uses_one_document_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("预算.NuMbErS");
+        std::fs::create_dir(&package).unwrap();
+        let bytes =
+            include_bytes!("../../markitai-core/src/formats/numbers/fixtures/test-1.numbers");
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        for index in 0..zip.len() {
+            let mut entry = zip.by_index(index).unwrap();
+            let path = package.join(entry.enclosed_name().unwrap());
+            if entry.is_dir() {
+                std::fs::create_dir_all(path).unwrap();
+                continue;
+            }
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            std::fs::write(path, data).unwrap();
+        }
+        let mut cmd = command(dir.path());
+        cmd.args(["预算.NuMbErS", "-I", "--config-json", &base().to_string()]);
+        let mut session = Session::new(cmd);
+        session.wait_for("Input: 1 file, 2 directory, 3 URL [1]");
+        session.send("\n\nout\nn\nn\nn\nn\ny\n");
+        let (status, stdout) = session.finish();
+        assert!(status.success(), "{}", session.text());
+        assert!(stdout.is_empty());
+        let markdown = std::fs::read_to_string(dir.path().join("out/预算.NuMbErS.md")).unwrap();
+        assert!(markdown.contains("YYY\\_ROW\\_4"));
+        assert!(!dir.path().join("out/.markitai/states").exists());
+        let reports: Vec<_> = std::fs::read_dir(dir.path().join("out/.markitai/reports"))
+            .unwrap()
+            .collect();
+        assert_eq!(reports.len(), 1);
+    }
+
+    #[test]
     fn directory_wizard_uses_the_normal_batch_pipeline_and_cancel_creates_nothing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("inputs")).unwrap();

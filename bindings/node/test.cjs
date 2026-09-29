@@ -172,3 +172,143 @@ test('paid native failures retain separate document accounting including zero to
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+const numbersFixtures = [
+  ['test-1.numbers', 'b9e9772b2d2866c26d773fe46a173c373c7dc1dd3df6cefc7f0253b6ab50d4c3'],
+  ['test-formats.numbers', '9b3ba4b52b2eb3ffd1e05602ab7da954abb2da7f37e68b147725d31777e1cda3'],
+];
+
+function numbersSource(name, sha256) {
+  const directory = process.env.MARKITAI_TEST_NUMBERS_FIXTURES ||
+    path.resolve(__dirname, '../../crates/markitai-core/src/formats/numbers/fixtures');
+  const bytes = fs.readFileSync(path.join(directory, name));
+  assert.equal(require('node:crypto').createHash('sha256').update(bytes).digest('hex'), sha256);
+  return bytes;
+}
+
+function expandNumbersFixture(bytes, target) {
+  // These two pinned public fixtures contain only stored ZIP entries. This is
+  // test setup for their exact bytes, not a general-purpose archive extractor.
+  let end = bytes.length - 22;
+  while (end >= Math.max(0, bytes.length - 65557) && bytes.readUInt32LE(end) !== 0x06054b50) end--;
+  assert.ok(end >= 0);
+  assert.equal(end + 22 + bytes.readUInt16LE(end + 20), bytes.length);
+  assert.equal(bytes.readUInt16LE(end + 4), 0);
+  assert.equal(bytes.readUInt16LE(end + 6), 0);
+  const count = bytes.readUInt16LE(end + 10);
+  assert.equal(bytes.readUInt16LE(end + 8), count);
+  let cursor = bytes.readUInt32LE(end + 16);
+  const centralEnd = cursor + bytes.readUInt32LE(end + 12);
+  assert.equal(centralEnd, end);
+  const seen = new Set();
+  fs.mkdirSync(target);
+  for (let index = 0; index < count; index++) {
+    assert.equal(bytes.readUInt32LE(cursor), 0x02014b50);
+    assert.equal(bytes.readUInt16LE(cursor + 8), 0);
+    assert.equal(bytes.readUInt16LE(cursor + 10), 0);
+    const size = bytes.readUInt32LE(cursor + 24);
+    assert.equal(bytes.readUInt32LE(cursor + 20), size);
+    const nameSize = bytes.readUInt16LE(cursor + 28);
+    const rawName = bytes.subarray(cursor + 46, cursor + 46 + nameSize);
+    const name = rawName.toString('utf8');
+    assert.deepEqual(Buffer.from(name, 'utf8'), rawName);
+    assert.ok(!path.isAbsolute(name) && !name.includes('\\') && !name.includes('\0'));
+    assert.ok(name.split('/').every((part) => part !== '..' && part !== '.'));
+    assert.ok(!seen.has(name));
+    seen.add(name);
+    const local = bytes.readUInt32LE(cursor + 42);
+    assert.equal(bytes.readUInt32LE(local), 0x04034b50);
+    const data = local + 30 + bytes.readUInt16LE(local + 26) + bytes.readUInt16LE(local + 28);
+    assert.ok(data + size <= bytes.readUInt32LE(end + 16));
+    const destination = path.join(target, name);
+    if (name.endsWith('/')) {
+      fs.mkdirSync(destination, { recursive: true });
+    } else {
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.writeFileSync(destination, bytes.subarray(data, data + size), { flag: 'wx', mode: 0o600 });
+    }
+    cursor += 46 + nameSize + bytes.readUInt16LE(cursor + 30) + bytes.readUInt16LE(cursor + 32);
+  }
+  assert.equal(cursor, centralEnd);
+  assert.ok(count > 0);
+}
+
+function numbersOptions(directory) {
+  return { config: {
+    llm: { enabled: false }, ocr: { enabled: false }, screenshot: { enabled: false },
+    image: { alt_enabled: false, desc_enabled: false }, cache: { enabled: false },
+    history: { record: false }, prompts: { dir: path.join(directory, 'prompts') },
+  }, llm: false, ocr: false, screenshot: false, alt: false, desc: false };
+}
+
+test('Numbers directory packages match pinned ZIP fixtures in sync and async calls', async () => {
+  const directory = fs.mkdtempSync(path.join(root, 'numbers-'));
+  const cwd = process.cwd();
+  const home = process.env.HOME;
+  // Load fixtures before switching to a private cwd; an installed test supplies
+  // MARKITAI_TEST_NUMBERS_FIXTURES as an absolute path.
+  const fixtures = numbersFixtures.map(([name, hash]) => [name, numbersSource(name, hash)]);
+  process.chdir(directory);
+  try {
+    const options = numbersOptions(directory);
+    for (const [name, bytes] of fixtures) {
+      const zip = path.join(directory, name);
+      const bundle = path.join(directory, `目录-${name.toUpperCase()}`);
+      fs.writeFileSync(zip, bytes);
+      expandNumbersFixture(bytes, bundle);
+      const baseline = markitai.convertSync(zip, options);
+      const sync = markitai.convertSync(bundle, options);
+      const async = await markitai.convert(bundle, options);
+      assert.ok(baseline.markdown.length > 0);
+      for (const result of [sync, async]) {
+        assert.equal(result.source, bundle);
+        assert.equal(result.markdown, baseline.markdown);
+        assert.deepEqual(result.warnings, baseline.warnings);
+        assert.equal(result.output_path, null);
+        assert.equal(result.usage.requests, 0);
+        assert.deepEqual(result.assets, []);
+      }
+      const written = await markitai.convert(bundle, { ...options, output_dir: path.join(directory, `out-${name}`) });
+      assert.equal(path.basename(written.output_path), `${path.basename(bundle)}.md`);
+      assert.ok(fs.readFileSync(written.output_path, 'utf8').endsWith(baseline.markdown));
+    }
+    assert.equal(process.env.HOME, home);
+  } finally {
+    process.chdir(cwd);
+  }
+});
+
+test('Numbers package support leaves ordinary directories, XML and visual modes explicit', async () => {
+  const directory = fs.mkdtempSync(path.join(root, 'numbers-errors-'));
+  const bytes = numbersSource(...numbersFixtures[0]);
+  const bundle = path.join(directory, 'modern.numbers');
+  expandNumbersFixture(bytes, bundle);
+  const ordinary = path.join(directory, 'ordinary');
+  const legacy = path.join(directory, 'old.numbers');
+  fs.mkdirSync(ordinary);
+  fs.mkdirSync(legacy);
+  fs.writeFileSync(path.join(legacy, 'index.xml'), '<document><table>OLD_XML_MUST_NOT_BE_BATCHED</table></document>');
+  const cwd = process.cwd();
+  process.chdir(directory);
+  try {
+    const options = numbersOptions(directory);
+    for (const [source, override, codes] of [
+      [ordinary, {}, ['is_directory']],
+      [legacy, {}, ['unsupported']],
+      [bundle, { ocr: true }, ['unsupported']],
+      [bundle, { screenshot: true }, ['unsupported']],
+    ]) {
+      const verify = (error) => {
+        assert.ok(error instanceof markitai.ConversionError);
+        assert.ok(codes.includes(error.code), `${error.code}: ${error.message}`);
+        assert.equal(error.usage, undefined);
+        if (source !== ordinary) assert.match(error.message, /Numbers/i);
+        return true;
+      };
+      assert.throws(() => markitai.convertSync(source, { ...options, ...override }), verify);
+      await assert.rejects(markitai.convert(source, { ...options, ...override }), verify);
+    }
+  } finally {
+    process.chdir(cwd);
+  }
+});

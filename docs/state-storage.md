@@ -95,6 +95,24 @@ reader can ignore added fields but does not understand the fence; it does not
 inherit the native crash guarantees. No protocol can promise exactly-once paid
 requests across a process kill between a provider response and durable completion.
 
+## Atomic Numbers packages
+
+Directory discovery records a `.numbers` directory package as one file entry.
+Its children are never new work items, even if a glob excludes the package or its
+contents are invalid. Resume skips its completed entry and retries its failed
+entry using the normal output-ownership checks; no state schema change is needed.
+
+An older scanner may have saved entries strictly inside such a package. Before
+receipt adoption, checkpoint upgrade or worker dispatch, resume checks saved file
+keys and URL `source_file` paths, including completed entries. A strict package
+ancestor causes an explicit error. The package's own key is allowed. Absolute and
+legacy cwd-relative URL provenance follow the codec's existing path rules; both
+spelling and resolved paths are checked. The stable checkpoint lock may be opened
+or created to perform this preflight, but rejection preserves existing checkpoint,
+journal, receipt and output bytes. It neither deletes saved child entries nor
+silently schedules them. Preserve that state and use a fresh output directory
+without `--resume` to convert the package as one document.
+
 ## Native attempt observations
 
 Native item entries and journal events may carry `diagnostics.last_attempt` with

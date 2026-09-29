@@ -136,6 +136,7 @@ def main():
     environment = dict(os.environ, MARKITAI_HOME=str(state), PYO3_PYTHON=sys.executable)
     for key in ["PYTHONPATH", "PYTHONHOME", "NODE_PATH", "NODE_OPTIONS"]:
         environment.pop(key, None)
+    environment["MARKITAI_TEST_NUMBERS_FIXTURES"] = str(root / "crates/markitai-core/src/formats/numbers/fixtures")
     # This script tests native builds. A foreign Cargo target cannot be loaded
     # into the Python/Node processes running on this host.
     if environment.get("CARGO_BUILD_TARGET"):

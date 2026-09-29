@@ -19,8 +19,15 @@ not supply that alias should use `markitai mcp`.
 
 ## Tools and results
 
-`convert_document` requires an absolute local `path`; `~` is expanded. It rejects
-directories. `convert_url` requires an `http://` or `https://` URL. Both accept
+`convert_document` requires an absolute local `path`; `~` is expanded. A modern
+`.numbers` directory package is one document, with a case-insensitive extension;
+ordinary directories are rejected. The same package paths can be individual
+`batch_convert` sources. This does not add recursive directory traversal or a
+directory-upload protocol. Legacy XML Numbers packages, Numbers OCR and full
+worksheet screenshots remain unsupported; [the reader contract](numbers.md)
+describes the table-only scope.
+
+`convert_url` requires an `http://` or `https://` URL. Both single-source tools accept
 `output_dir`, `llm`, `ocr`, `screenshot`, `alt`, `desc` and `profile`. Feature flags
 accept true, false or null: omitted/null values follow configuration. Profiles
 are `rag`, `obsidian` or `okf`; null follows configuration.

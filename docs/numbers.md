@@ -1,6 +1,6 @@
 # Numbers tables
 
-The local reader accepts modern, single-file `.numbers` ZIP packages and decodes their IWA streams in Rust. It uses the pinned MIT-licensed `iwork = 0.2.1` library. Conversion does not launch Numbers, Python, a browser or a remote service.
+The local reader accepts modern `.numbers` ZIP files and directory packages, decoding their IWA streams in Rust. Both containers use the same allocation checks, semantic decoder and renderer; directory packages are not recompressed into ZIP files. It uses the pinned MIT-licensed `iwork = 0.2.1` library. Conversion does not launch Numbers, Python, a browser or a remote service.
 
 ## What is retained
 
@@ -18,7 +18,7 @@ The adapter does not treat `CellValue::to_text()` as a complete display formatte
 
 Dates use an ISO-style calendar/time representation without an invented timezone; the stored value does not identify a timezone. Fractional date seconds are not retained. Durations use seconds. Rich-text cell text is retained, but fonts, colors, bullets and inline styling are flattened. Scientific/custom/fraction formats, locale separators, accounting signs, conditional formatting and interactive controls are not reproduced exactly. A formatting warning accompanies such normalized output.
 
-Only tables are extracted. Linked non-table canvas objects, including charts, images, shapes and text boxes, produce an omission warning. Their geometry, captions and image assets are not exported. This is not a canvas renderer. Directory packages, encrypted documents and older XML/pre-BNC cell storage are not supported by this reader; damaged or unsupported tables fail rather than silently becoming empty successful output.
+Only tables are extracted. Linked non-table canvas objects, including charts, images, shapes and text boxes, produce an omission warning. Their geometry, captions and image assets are not exported. This is not a canvas renderer. Encrypted documents, older XML/pre-BNC cell storage and packages containing only a nested `Index.zip` are not supported by this reader; damaged or unsupported tables fail rather than silently becoming empty successful output.
 
 ## Resource bounds
 
@@ -26,9 +26,10 @@ Checks precede high-level table decoding:
 
 | Resource | Limit |
 | --- | --- |
-| Input ZIP and expanded package entries | 128 MiB each aggregate |
-| ZIP entries | 4,096 |
-| Individual expanded ZIP entry / IWA stream | 32 MiB |
+| Input ZIP / expanded ZIP entries / directory file bytes | 128 MiB each aggregate |
+| ZIP entries / directory descendants, including directories | 4,096 |
+| Directory relative-path components | 8 |
+| Individual expanded ZIP entry / directory file / IWA stream | 32 MiB |
 | Expanded IWA streams combined | 64 MiB |
 | Snappy block | 64 KiB expanded |
 | IWA objects | 100,000 |
@@ -42,6 +43,10 @@ An additional conservative decoded-cell estimate charges every declared position
 
 The ZIP reader limits actual bytes read and verifies entry data. It rejects duplicate names, path traversal, non-regular entries and encrypted packages. Nothing is extracted to the filesystem. IWA headers, Snappy expanded lengths, object identities and table dimensions are checked before `iwork` allocates table rows and columns. Multiple table-info objects may not point to the same table model: otherwise the decoder would multiply allocations outside the dimension budget.
 
+Directory packages are inventoried before their content is read. Entries are sorted by their UTF-8 relative paths. Every descendant, including directories and `.DS_Store`, counts toward the node limit; the package root itself does not. Every regular file counts toward the byte limits, even ignored Finder metadata. Internal symbolic links, sockets, FIFOs, devices and invalid path names are rejected. A `.DS_Store` regular file is ignored only after these checks. The caller applies its existing symlink policy to the supplied package path; allowing an outer alias never permits links inside the package.
+
+Files are opened with bounded reads and checked against their inventoried type, length and modification metadata. Unix also checks device/inode/change-time identity and opens with `O_NOFOLLOW | O_NONBLOCK`. Directory and file metadata are checked again before decoding. Ordinary replacement or mutation during reading causes an error; these checks do not provide an atomic snapshot or a filesystem sandbox against adversarial concurrent ancestor replacement. Packages should remain unchanged while being converted.
+
 Output size is checked after each heading and cell, so rejection may temporarily exceed the body limit by one escaped cell, at most about 6 MiB. The adapter avoids scanning every merge for every cell by using a bounded coverage bitmap.
 
 ## Fixtures and evidence
@@ -52,5 +57,7 @@ Two unmodified public files come from the independent MIT-licensed [`numbers-par
 - `test-formats.numbers`: rich-text/bullet content independently specified in [`test_styles.py`](https://github.com/masaccio/numbers-parser/blob/726bd6cbbfe1d00ec5449865a51eb7a4a3f472aa/tests/test_styles.py). Despite its filename, this is not a golden for numeric display formatting.
 
 Original bytes, hashes, source URLs and the upstream license are retained in [fixture provenance](../crates/markitai-core/src/formats/numbers/fixtures/provenance.json) and [LICENSE.rst](../crates/markitai-core/src/formats/numbers/fixtures/LICENSE.rst). No local Apple application was used to inspect or regenerate them.
+
+Directory tests expand both retained MIT ZIP fixtures without changing their entry bytes, deliberately create entries in reverse ZIP order, and compare body, metadata and warnings exactly with the ZIP reader. These are container-equivalence tests, not independent Apple-exported directory goldens. Additional tests cover both sides of the depth and node limits, sparse-file and aggregate byte limits, legacy/encrypted containers, damaged IWA, internal links/special files, invalid names and replacement during reading.
 
 Authored tests cover Unicode and Markdown escaping, fixed decimal/percentage/currency output, cached formulas, merged cells, duplicate table names across sheets, bounded expansion and hostile dimensions/references. The duplicate-name fixture first creates distinct tables, then changes only the second model's name through the library's public archive API because its writer rejects ambiguous names. These authored fixtures supplement the independent files; writer/reader round trips alone are not evidence of complete Numbers compatibility. Public conversion tests check in-memory/disk body agreement without changing the existing frontmatter schema. Coordinated gate and release results are recorded separately.

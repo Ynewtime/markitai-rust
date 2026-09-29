@@ -429,6 +429,12 @@ pub(crate) fn eligible(source: &str) -> bool {
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
+    if markitai_core::formats::is_numbers_package_path(&path) {
+        // Package byte budgets belong to the reader; directory metadata length
+        // does not describe its contents. Failed package conversions also record
+        // their one original input, just like failed ordinary documents.
+        return true;
+    }
     (markitai_core::formats::supports_extension(extension)
         || markitai_core::is_image_extension(extension))
         && fs::metadata(path)

@@ -466,7 +466,9 @@ fn execute_conversion(
         "Configuration loaded; native CLI conversion starting",
     );
     let input_path = Path::new(input);
-    let directory = !is_url(input) && input_path.is_dir();
+    let directory = !is_url(input)
+        && input_path.is_dir()
+        && !markitai_core::formats::is_numbers_package_path(input_path);
     let batch = !is_url(input)
         && (directory
             || input_path
@@ -1131,27 +1133,33 @@ fn discover(input: &Path, output: &Path, cli: &Cli, cfg: &Value) -> CliResult<Ve
     let absolute_input = absolute(input);
     let follow = config::enabled(cfg, "/output/allow_symlinks");
     let mut tasks = Vec::new();
-    let entries = walkdir::WalkDir::new(input)
+    let mut entries = walkdir::WalkDir::new(input)
         .follow_links(follow)
         .max_depth(depth.saturating_add(1))
-        .into_iter()
-        .filter_entry(|entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            if entry.file_name() == ".markitai" {
-                return false;
-            }
-            !(entry.file_type().is_dir()
-                && absolute_output != absolute_input
-                && absolute(entry.path()) == absolute_output)
-        });
-    for entry in entries {
+        .into_iter();
+    while let Some(entry) = entries.next() {
         let entry = entry.map_err(runtime)?;
-        if !entry.file_type().is_file() {
+        if entry.depth() == 0 {
             continue;
         }
         let path = entry.path();
+        let directory = entry.file_type().is_dir();
+        if entry.file_name() == ".markitai"
+            || (directory && absolute_output != absolute_input && absolute(path) == absolute_output)
+        {
+            if directory {
+                entries.skip_current_dir();
+            }
+            continue;
+        }
+        let package = directory && markitai_core::formats::is_numbers_package_path(path);
+        if package {
+            // Even an excluded or malformed package is one input. Never discover
+            // its internal files as independent documents or URL lists.
+            entries.skip_current_dir();
+        } else if !entry.file_type().is_file() {
+            continue;
+        }
         let relative = path.strip_prefix(input).map_err(runtime)?;
         if (has_positive && !positive.is_match(relative)) || negative.is_match(relative) {
             continue;

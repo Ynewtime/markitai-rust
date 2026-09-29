@@ -1,6 +1,9 @@
 package markitai
 
 import (
+	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -242,5 +246,217 @@ func TestPaidNativeFailuresKeepDocumentScopesSeparate(t *testing.T) {
 	var early *ConversionError
 	if !errors.As(err, &early) || early.Usage != nil {
 		t.Fatalf("early failure should not invent accounting: %v", err)
+	}
+}
+
+var numbersFixtures = []struct{ name, hash string }{
+	{"test-1.numbers", "b9e9772b2d2866c26d773fe46a173c373c7dc1dd3df6cefc7f0253b6ab50d4c3"},
+	{"test-formats.numbers", "9b3ba4b52b2eb3ffd1e05602ab7da954abb2da7f37e68b147725d31777e1cda3"},
+}
+
+func numbersFixtureRoot(t *testing.T) string {
+	t.Helper()
+	root := os.Getenv("MARKITAI_TEST_NUMBERS_FIXTURES")
+	if root == "" {
+		root = "../../crates/markitai-core/src/formats/numbers/fixtures"
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return absolute
+}
+
+func numbersBundle(t *testing.T, fixtureRoot, targetRoot, name, expectedHash string) (string, string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fixtureRoot, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	if hex.EncodeToString(digest[:]) != expectedHash {
+		t.Fatal("independent MIT Numbers fixture identity changed")
+	}
+	zipped := filepath.Join(targetRoot, name)
+	if err := os.WriteFile(zipped, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(targetRoot, "目录-"+strings.ToUpper(name))
+	if err := os.Mkdir(bundle, 0700); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := zip.OpenReader(zipped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	seen := map[string]bool{}
+	for _, entry := range archive.File {
+		if !filepath.IsLocal(entry.Name) || strings.Contains(entry.Name, "\\") || seen[entry.Name] || entry.UncompressedSize64 > 1024*1024 {
+			t.Fatal("unexpected pinned fixture entry")
+		}
+		seen[entry.Name] = true
+		destination := filepath.Join(bundle, filepath.FromSlash(entry.Name))
+		if entry.FileInfo().IsDir() {
+			if err := os.MkdirAll(destination, 0700); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if !entry.Mode().IsRegular() {
+			t.Fatal("pinned fixture entry is not regular")
+		}
+		input, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(input, 1024*1024+1))
+		closeErr := input.Close()
+		if readErr != nil || closeErr != nil || uint64(len(body)) != entry.UncompressedSize64 {
+			t.Fatalf("invalid pinned ZIP entry: read=%v close=%v", readErr, closeErr)
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destination, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return zipped, bundle
+}
+
+func numbersOptions(root string) *Options {
+	return &Options{LLM: Bool(false), OCR: Bool(false), Screenshot: Bool(false), Alt: Bool(false), Desc: Bool(false), Config: map[string]any{
+		"llm": map[string]any{"enabled": false}, "ocr": map[string]any{"enabled": false},
+		"screenshot": map[string]any{"enabled": false}, "cache": map[string]any{"enabled": false},
+		"image":   map[string]any{"alt_enabled": false, "desc_enabled": false},
+		"history": map[string]any{"record": false}, "prompts": map[string]any{"dir": filepath.Join(root, "prompts")},
+	}}
+}
+
+func privateNumbersCwd(t *testing.T, directory string) {
+	t.Helper()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(directory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Setenv("MARKITAI_HOME", filepath.Join(directory, "state"))
+}
+
+func numbersJSON(t *testing.T, source string, options *Options) (bool, *ConversionOutput, *ConversionError) {
+	t.Helper()
+	request, err := json.Marshal(map[string]any{"source": source, "options": options})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := ConvertJSON(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		OK     bool              `json:"ok"`
+		Result *ConversionOutput `json:"result"`
+		Error  *ConversionError  `json:"error"`
+	}
+	if err := json.Unmarshal(response, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.OK, envelope.Result, envelope.Error
+}
+
+func TestNumbersDirectoryPackagesMatchPinnedZIPAcrossTypedAndJSONCalls(t *testing.T) {
+	fixtures := numbersFixtureRoot(t)
+	dir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	privateNumbersCwd(t, dir)
+	for _, fixture := range numbersFixtures {
+		zipped, bundle := numbersBundle(t, fixtures, dir, fixture.name, fixture.hash)
+		options := numbersOptions(dir)
+		baseline, err := Convert(zipped, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := Convert(bundle, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ok, raw, failure := numbersJSON(t, bundle, options)
+		if !ok || raw == nil || failure != nil {
+			t.Fatalf("directory JSON call failed: %+v", failure)
+		}
+		for _, output := range []*ConversionOutput{result, raw} {
+			if baseline.Markdown == "" || output.Markdown != baseline.Markdown || output.Source != bundle || !reflect.DeepEqual(output.Warnings, baseline.Warnings) || output.OutputPath != nil || output.Usage.Requests != 0 || len(output.Assets) != 0 {
+				t.Fatal("directory result differs from the independent ZIP fixture")
+			}
+		}
+		options.OutputDir = filepath.Join(dir, "out-"+fixture.name)
+		written, err := Convert(bundle, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if written.OutputPath == nil || filepath.Base(*written.OutputPath) != filepath.Base(bundle)+".md" {
+			t.Fatal("directory did not publish one correctly named Markdown file")
+		}
+		body, err := os.ReadFile(*written.OutputPath)
+		if err != nil || !strings.HasSuffix(string(body), baseline.Markdown) {
+			t.Fatalf("published body differs from ZIP: %v", err)
+		}
+	}
+	if os.Getenv("HOME") != originalHome {
+		t.Fatal("HOME changed during directory package conversion")
+	}
+}
+
+func TestNumbersPackagesKeepOtherDirectoriesXMLAndVisualModesExplicit(t *testing.T) {
+	fixtures := numbersFixtureRoot(t)
+	dir := t.TempDir()
+	privateNumbersCwd(t, dir)
+	_, bundle := numbersBundle(t, fixtures, dir, numbersFixtures[0].name, numbersFixtures[0].hash)
+	ordinary, legacy := filepath.Join(dir, "ordinary"), filepath.Join(dir, "old.numbers")
+	for _, directory := range []string{ordinary, legacy} {
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "index.xml"), []byte("<document><table>OLD_XML_MUST_NOT_BE_BATCHED</table></document>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"directory", "xml", "ocr", "screenshot"} {
+		options := numbersOptions(dir)
+		source := bundle
+		switch mode {
+		case "directory":
+			source = ordinary
+		case "xml":
+			source = legacy
+		case "ocr":
+			options.OCR = Bool(true)
+		case "screenshot":
+			options.Screenshot = Bool(true)
+		}
+		_, err := Convert(source, options)
+		var typed *ConversionError
+		if !errors.As(err, &typed) {
+			t.Fatalf("%s: expected typed conversion failure: %v", mode, err)
+		}
+		ok, result, raw := numbersJSON(t, source, options)
+		if ok || result != nil || raw == nil || raw.Code != typed.Code || raw.Message != typed.Message || raw.Usage != nil || typed.Usage != nil {
+			t.Fatalf("%s: raw and typed failure contracts differ", mode)
+		}
+		if mode == "directory" {
+			if typed.Code != "is_directory" {
+				t.Fatalf("ordinary directory category changed: %s", typed.Code)
+			}
+		} else if !strings.Contains(typed.Message, "Numbers") || typed.Code != "unsupported" {
+			t.Fatalf("%s: not an explicit Numbers rejection: %+v", mode, typed)
+		}
 	}
 }
