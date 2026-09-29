@@ -20,9 +20,10 @@ and keys are never inserted into a suggested collection command or saved job.
 
 ## R31 frozen recovery
 
-The continuation code passes the complete source gate and eleven independent
-debug CLI workflows /234 assertions. Optimized delivery verification is pending;
-R30 artifact identities above remain unchanged.
+R31 source `88e44ce` passes the complete source gate, eleven independent optimized
+CLI workflows /234 assertions and installed bindings. See
+[recovery delivery](validation/subscription-recovery-round31.md). R30 artifact
+identities above remain unchanged.
 
 `markitai --llm-batch --resume -o output-directory` selects the unique unfinished
 native job. INPUT is optional and, when supplied, must match the recorded resolved

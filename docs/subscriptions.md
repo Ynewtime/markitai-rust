@@ -1,7 +1,8 @@
 # Subscription runtimes
 
-R31 source verification passes the workspace gate and authored process fixtures;
-optimized CLI and installed-package delivery are being verified. This page separates the native adapter contract from verification
+R31 is verified at source `88e44ce`: the workspace gate, optimized CLI process
+fixtures and installed Node/Python/Go packages pass. See
+[delivery evidence](validation/subscription-recovery-round31.md). This page separates the native adapter contract from verification
 with a real subscription. Normal document conversion remains a native binary.
 Subscription features require a separately installed official provider runtime.
 
