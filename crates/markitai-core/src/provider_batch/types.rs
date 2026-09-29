@@ -121,6 +121,80 @@ pub struct Batch {
     pub failed: Option<u64>,
 }
 
+/// A bounded read-only search. Exhaustion never establishes permission to create again.
+#[derive(Clone, Copy, Debug)]
+pub struct ReconcileLimits {
+    pub pages: usize,
+    pub bytes: usize,
+    pub timeout: std::time::Duration,
+}
+impl Default for ReconcileLimits {
+    fn default() -> Self {
+        Self {
+            pages: 20,
+            bytes: 16 * 1024 * 1024,
+            timeout: std::time::Duration::from_secs(120),
+        }
+    }
+}
+impl ReconcileLimits {
+    pub(super) fn validate(self) -> Result<Self, Error> {
+        let maximum = Self::default();
+        if self.pages == 0
+            || self.pages > maximum.pages
+            || self.bytes == 0
+            || self.bytes > maximum.bytes
+            || self.timeout.is_zero()
+            || self.timeout > maximum.timeout
+        {
+            return Err(Error::Invalid("Batch reconciliation limits are invalid"));
+        }
+        Ok(self)
+    }
+}
+
+/// Only transport parsing constructs this evidence; arbitrary remote metadata is discarded.
+#[derive(Clone)]
+pub struct RemoteIdentity {
+    pub(super) batch: Batch,
+    pub(super) endpoint: String,
+    pub(super) api_base: String,
+    pub(super) submission_nonce: Option<String>,
+}
+impl RemoteIdentity {
+    pub fn batch(&self) -> &Batch {
+        &self.batch
+    }
+    pub fn api_base(&self) -> &str {
+        &self.api_base
+    }
+    pub fn into_batch(self) -> Batch {
+        self.batch
+    }
+    pub fn matches(&self, uploaded: &UploadedInput, nonce: &str) -> bool {
+        self.endpoint == ENDPOINT
+            && self.batch.input_file_id == uploaded.file_id
+            && self.submission_nonce.as_deref() == Some(nonce)
+    }
+}
+impl fmt::Debug for RemoteIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteIdentity")
+            .field("status", &self.batch.status)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub enum Reconciliation {
+    Found(Box<RemoteIdentity>),
+    NotFound,
+    /// At least two distinct matching IDs; no first/newest choice is made.
+    Ambiguous(Vec<String>),
+    /// Pagination, byte or time bounds were reached without a complete unique proof.
+    Incomplete,
+}
+
 /// Raw provider bodies include observed usage even when HTTP/semantic results fail.
 /// They are deliberately neither Serialize nor detailed Debug/Display values.
 #[derive(Clone)]

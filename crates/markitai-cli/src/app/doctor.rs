@@ -203,14 +203,36 @@ fn checks(
     let (llm, local) = model_check(cfg, path, env);
     result.insert("llm-api", llm);
     for provider in local {
+        if provider == "copilot" {
+            let auth = super::auth::copilot_status(env);
+            let verified = auth.details.get("protocol_version").is_some();
+            let mut adapter = Check::new(
+                "Copilot official runtime",
+                "Configured local provider",
+                if verified { "ok" } else { "error" },
+                if verified {
+                    "Installed official runtime matches the native adapter protocol"
+                } else {
+                    "The installed Copilot runtime could not verify its supported protocol"
+                },
+                "Install the supported official Copilot CLI; no Python SDK is required",
+            );
+            adapter.required = true;
+            let mut identity = Check::new(
+                "Copilot authentication", "Configured local provider",
+                if auth.authenticated { "ok" } else { "error" },
+                auth.error.unwrap_or_else(|| "Official runtime reports an authenticated account; model access was not probed".into()),
+                "Run markitai auth copilot login",
+            );
+            identity.required = true;
+            result.insert("copilot-sdk", adapter);
+            result.insert("copilot-auth", identity);
+            continue;
+        }
         let rows: &[(&str, &str)] = match provider {
             "claude-agent" => &[
                 ("claude-agent-sdk", "Claude Agent SDK"),
                 ("claude-agent-auth", "Claude Agent authentication"),
-            ],
-            "copilot" => &[
-                ("copilot-sdk", "Copilot SDK"),
-                ("copilot-auth", "Copilot authentication"),
             ],
             _ => &[("chatgpt-auth", "ChatGPT authentication")],
         };

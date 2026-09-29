@@ -2,7 +2,7 @@
 use crate::output_claims::Owner;
 use markitai_core::{
     ConversionUsage,
-    provider_batch::{Batch, UploadedInput},
+    provider_batch::{Batch, RemoteIdentity, UploadedInput},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,6 +17,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub(crate) enum Error {
     Invalid(&'static str),
+    NotFound,
     Io,
     Busy,
     Overlap,
@@ -28,6 +29,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Invalid(message) => message,
+            Self::NotFound => "Provider batch job was not found",
             Self::Io => "Provider batch storage operation failed",
             Self::Busy => "Another process is using this provider batch store",
             Self::Overlap => "An unfinished provider batch already owns part of this output family; collect or resolve it before submitting again",
@@ -205,6 +207,16 @@ struct Root {
     path: PathBuf,
     directories: Vec<Directory>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeStep {
+    PrepareRequests,
+    Upload,
+    Create,
+    Reconcile,
+    Collect,
+    Done,
+}
+
 pub(crate) struct Preparation {
     root: Root,
     lock: HeldLock,
@@ -213,6 +225,48 @@ impl Preparation {
     pub(crate) fn validate(&self) -> Result<()> {
         self.root.validate()?;
         self.lock.validate()
+    }
+
+    /// Select frozen work while holding submission exclusion, then acquire its collector lock.
+    /// Input is an optional resolved scope identity; it need not exist anymore.
+    pub(crate) fn open_frozen(
+        &self,
+        input_scope: Option<&Path>,
+        limits: Limits,
+    ) -> Result<Option<Store>> {
+        self.validate()?;
+        let limits = limits.check()?;
+        if input_scope.is_some_and(|input| !absolute_path(input)) {
+            return Err(Error::Invalid(
+                "Provider batch input scope must be an absolute resolved path",
+            ));
+        }
+        let global = self.root.lock()?;
+        let jobs = scan(&self.root, limits)?;
+        let mut pending = jobs
+            .iter()
+            .filter(|job| !matches!(job.phase, Phase::Collected | Phase::Rejected));
+        let Some(job) = pending.next() else {
+            return Ok(None);
+        };
+        if pending.next().is_some() {
+            return Err(Error::Invalid(
+                "Multiple unfinished provider batches require explicit collection",
+            ));
+        }
+        if input_scope.is_some_and(|input| input != job.input_root) {
+            return Err(Error::Conflict);
+        }
+        let id = job.id.clone();
+        global.validate()?;
+        drop(global);
+        let store = Store::open_id(Root::open(&self.root.output, false, false)?, &id, limits)?;
+        self.validate()?;
+        // Another collector may have completed it between the snapshot and job-lock acquisition.
+        if matches!(store.state.phase, Phase::Collected | Phase::Rejected) {
+            return Ok(None);
+        }
+        Ok(Some(store))
     }
 }
 pub(crate) struct Store {
@@ -355,9 +409,7 @@ impl Store {
             let mut matching = jobs
                 .iter()
                 .filter(|job| job.batch.as_ref().is_some_and(|batch| batch.id == batch_id));
-            let job = matching
-                .next()
-                .ok_or(Error::Invalid("Provider batch job was not found"))?;
+            let job = matching.next().ok_or(Error::NotFound)?;
             if matching.next().is_some() {
                 return Err(Error::Conflict);
             }
@@ -459,6 +511,45 @@ impl Store {
     }
     pub(crate) fn state(&self) -> &Job {
         &self.state
+    }
+
+    /// An unchanged typed phase is the only authority to choose the next network operation.
+    /// This deliberately provides no transition from uncertain creation back to create.
+    pub(crate) fn resume_step(&self) -> Result<ResumeStep> {
+        self.validate()?;
+        validate_job(&self.state, &self.root.output, self.limits)?;
+        for item in &self.state.items {
+            self.verify_blob(&item.plan, self.limits.blob_bytes)?;
+        }
+        if let Some(requests) = &self.state.requests {
+            self.verify_blob(requests, self.limits.request_bytes)?;
+        }
+        match self.state.phase {
+            Phase::Prepared if self.state.requests.is_none() => Ok(ResumeStep::PrepareRequests),
+            Phase::Prepared => Ok(ResumeStep::Upload),
+            Phase::Uploaded => Ok(ResumeStep::Create),
+            Phase::Creating | Phase::CreateUncertain => Ok(ResumeStep::Reconcile),
+            Phase::Submitted => Ok(ResumeStep::Collect),
+            Phase::Collected => Ok(ResumeStep::Done),
+            Phase::Rejected => Err(Error::Invalid(
+                "A rejected provider submission cannot be resumed; retain its evidence and start a new run",
+            )),
+        }
+    }
+
+    /// Called with transport evidence from a strict manual lookup or complete reconciliation.
+    /// Provider-returned IDs alone never let a caller attach an unrelated paid job.
+    pub(crate) fn bind_reconciled(&mut self, identity: RemoteIdentity) -> Result<()> {
+        if self.resume_step()? != ResumeStep::Reconcile {
+            return Err(Error::Conflict);
+        }
+        let uploaded = self.state.uploaded.as_ref().ok_or(Error::Conflict)?;
+        if identity.api_base() != self.state.endpoint.api_base
+            || !identity.matches(uploaded, &self.state.id)
+        {
+            return Err(Error::Conflict);
+        }
+        self.bind_batch(identity.into_batch())
     }
     pub(crate) fn directory(&self) -> &Path {
         &self.path

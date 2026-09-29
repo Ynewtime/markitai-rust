@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// No environment/config loading, redirects, automatic retries or persisted auth.
@@ -15,6 +15,7 @@ pub struct Client {
     base: Url,
     authorization: HeaderValue,
     limits: Limits,
+    timeout: Duration,
 }
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -80,6 +81,7 @@ impl Client {
             base,
             authorization,
             limits,
+            timeout,
         })
     }
 
@@ -200,6 +202,197 @@ impl Client {
         Ok(batch)
     }
 
+    /// Retrieve identity evidence, without deriving URLs from response metadata.
+    pub fn inspect(&self, batch_id: &str) -> Result<RemoteIdentity, Error> {
+        self.inspect_with_budget(batch_id, self.timeout, self.limits.control_bytes)
+            .map(|(identity, _)| identity)
+    }
+
+    /// The manual-ID path verifies exactly the same proof as automatic reconciliation.
+    pub fn verify_binding(
+        &self,
+        batch_id: &str,
+        uploaded: &UploadedInput,
+        nonce: &str,
+    ) -> Result<RemoteIdentity, Error> {
+        validate_recovery(uploaded, nonce)?;
+        let identity = self.inspect(batch_id)?;
+        if !identity.matches(uploaded, nonce) {
+            return Err(Error::Invalid(
+                "Batch identity does not match the frozen submission",
+            ));
+        }
+        Ok(identity)
+    }
+
+    /// Only GET requests are possible here, including after empty or ambiguous searches.
+    pub fn reconcile(
+        &self,
+        uploaded: &UploadedInput,
+        nonce: &str,
+        limits: ReconcileLimits,
+    ) -> Result<Reconciliation, Error> {
+        validate_recovery(uploaded, nonce)?;
+        let limits = limits.validate()?;
+        let deadline = Instant::now() + limits.timeout;
+        let mut remaining_bytes = limits.bytes;
+        let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
+        let mut matching: Option<RemoteIdentity> = None;
+        for _ in 0..limits.pages {
+            let Some(remaining_time) = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|time| !time.is_zero())
+            else {
+                return Ok(Reconciliation::Incomplete);
+            };
+            if remaining_bytes == 0 {
+                return Ok(Reconciliation::Incomplete);
+            }
+            let mut url = self.endpoint("batches")?;
+            url.query_pairs_mut().append_pair("limit", "100");
+            if let Some(cursor) = &cursor {
+                url.query_pairs_mut().append_pair("after", cursor);
+            }
+            let response = match self
+                .http
+                .get(url)
+                .header(AUTHORIZATION, self.authorization.clone())
+                .timeout(remaining_time.min(self.timeout))
+                .send()
+            {
+                Ok(response) => response,
+                Err(_) if Instant::now() >= deadline => return Ok(Reconciliation::Incomplete),
+                Err(_) => return Err(Error::Transport),
+            };
+            let (value, consumed) = match self
+                .control_limited(response, remaining_bytes.min(self.limits.control_bytes))
+            {
+                Ok(value) => value,
+                Err(Error::Limit(_)) => return Ok(Reconciliation::Incomplete),
+                Err(_) if Instant::now() >= deadline => return Ok(Reconciliation::Incomplete),
+                Err(error) => return Err(error),
+            };
+            remaining_bytes = remaining_bytes
+                .checked_sub(consumed)
+                .ok_or(Error::Protocol)?;
+            if Instant::now() >= deadline {
+                return Ok(Reconciliation::Incomplete);
+            }
+            let object = value.as_object().ok_or(Error::Protocol)?;
+            if object.get("object").and_then(Value::as_str) != Some("list") {
+                return Err(Error::Protocol);
+            }
+            let data = object
+                .get("data")
+                .and_then(Value::as_array)
+                .ok_or(Error::Protocol)?;
+            let has_more = object
+                .get("has_more")
+                .and_then(Value::as_bool)
+                .ok_or(Error::Protocol)?;
+            if data.len() > 100 {
+                return Err(Error::Protocol);
+            }
+            let mut last_id = None;
+            for row in data {
+                let id = row
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| identifier(id, "batch"))
+                    .ok_or(Error::Protocol)?;
+                if !seen.insert(id.to_owned()) {
+                    return Ok(Reconciliation::Incomplete);
+                }
+                last_id = Some(id);
+                if remote_nonce(row)?.as_deref() != Some(nonce) {
+                    continue;
+                }
+                let identity = parse_remote(row.clone(), self.base.as_str().trim_end_matches('/'))?;
+                if !identity.matches(uploaded, nonce) {
+                    return Err(Error::Invalid(
+                        "Batch identity does not match the frozen submission",
+                    ));
+                }
+                if let Some(prior) = &matching {
+                    return Ok(Reconciliation::Ambiguous(vec![
+                        prior.batch.id.clone(),
+                        identity.batch.id,
+                    ]));
+                }
+                matching = Some(identity);
+            }
+            if !has_more {
+                let Some(found) = matching else {
+                    return Ok(Reconciliation::NotFound);
+                };
+                let Some(remaining_time) = deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|time| !time.is_zero())
+                else {
+                    return Ok(Reconciliation::Incomplete);
+                };
+                if remaining_bytes == 0 {
+                    return Ok(Reconciliation::Incomplete);
+                }
+                let checked = self.inspect_with_budget(
+                    &found.batch.id,
+                    remaining_time.min(self.timeout),
+                    remaining_bytes.min(self.limits.control_bytes),
+                );
+                let (checked, _) = match checked {
+                    Ok(value) => value,
+                    Err(Error::Limit(_)) => return Ok(Reconciliation::Incomplete),
+                    Err(_) if Instant::now() >= deadline => return Ok(Reconciliation::Incomplete),
+                    Err(error) => return Err(error),
+                };
+                if Instant::now() >= deadline {
+                    return Ok(Reconciliation::Incomplete);
+                }
+                if !checked.matches(uploaded, nonce) {
+                    return Err(Error::Invalid(
+                        "Batch identity changed during reconciliation",
+                    ));
+                }
+                return Ok(Reconciliation::Found(Box::new(checked)));
+            }
+            let next = object
+                .get("last_id")
+                .and_then(Value::as_str)
+                .filter(|id| identifier(id, "batch"))
+                .ok_or(Error::Protocol)?;
+            if last_id != Some(next) {
+                return Ok(Reconciliation::Incomplete);
+            }
+            cursor = Some(next.to_owned());
+        }
+        Ok(Reconciliation::Incomplete)
+    }
+
+    fn inspect_with_budget(
+        &self,
+        batch_id: &str,
+        timeout: Duration,
+        bytes: usize,
+    ) -> Result<(RemoteIdentity, usize), Error> {
+        if !identifier(batch_id, "batch") {
+            return Err(Error::Invalid("Batch ID is invalid"));
+        }
+        let response = self
+            .http
+            .get(self.endpoint(&format!("batches/{batch_id}"))?)
+            .header(AUTHORIZATION, self.authorization.clone())
+            .timeout(timeout)
+            .send()
+            .map_err(|_| Error::Transport)?;
+        let (value, bytes) = self.control_limited(response, bytes)?;
+        let identity = parse_remote(value, self.base.as_str().trim_end_matches('/'))?;
+        if identity.batch.id != batch_id {
+            return Err(Error::Protocol);
+        }
+        Ok((identity, bytes))
+    }
+
     /// Download both files, including partial results of expired/cancelled jobs.
     /// A failure retains earlier attributed results; the caller owns persistence.
     pub fn download_results(
@@ -287,12 +480,17 @@ impl Client {
     }
 
     fn control(&self, response: Response) -> Result<Value, Error> {
+        self.control_limited(response, self.limits.control_bytes)
+            .map(|(value, _)| value)
+    }
+
+    fn control_limited(&self, response: Response, limit: usize) -> Result<(Value, usize), Error> {
         if !response.status().is_success() {
             return Err(Error::Http(response.status().as_u16()));
         }
         if response
             .content_length()
-            .is_some_and(|size| size > self.limits.control_bytes as u64)
+            .is_some_and(|size| size > limit as u64)
         {
             return Err(Error::Limit(
                 "Batch control response exceeds its byte limit",
@@ -300,16 +498,51 @@ impl Client {
         }
         let mut bytes = Vec::new();
         response
-            .take(self.limits.control_bytes as u64 + 1)
+            .take(limit as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| Error::Transport)?;
-        if bytes.len() > self.limits.control_bytes {
+        if bytes.len() > limit {
             return Err(Error::Limit(
                 "Batch control response exceeds its byte limit",
             ));
         }
-        serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)
+        let value = serde_json::from_slice(&bytes).map_err(|_| Error::Protocol)?;
+        Ok((value, bytes.len()))
     }
+}
+
+fn validate_recovery(uploaded: &UploadedInput, nonce: &str) -> Result<(), Error> {
+    if !identifier(&uploaded.file_id, "file") || !custom_id(nonce) {
+        return Err(Error::Invalid("Batch recovery identity is invalid"));
+    }
+    Ok(())
+}
+fn remote_nonce(value: &Value) -> Result<Option<String>, Error> {
+    let metadata = match value.get("metadata") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(metadata)) => metadata,
+        _ => return Err(Error::Protocol),
+    };
+    match metadata.get("markitai_submission") {
+        None => Ok(None),
+        Some(Value::String(nonce)) if nonce.len() <= 2048 => Ok(Some(nonce.clone())),
+        _ => Err(Error::Protocol),
+    }
+}
+fn parse_remote(value: Value, api_base: &str) -> Result<RemoteIdentity, Error> {
+    let endpoint = value
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .filter(|endpoint| *endpoint == ENDPOINT)
+        .ok_or(Error::Protocol)?
+        .to_owned();
+    let submission_nonce = remote_nonce(&value)?;
+    Ok(RemoteIdentity {
+        batch: parse_batch(value)?,
+        endpoint,
+        api_base: api_base.into(),
+        submission_nonce,
+    })
 }
 
 fn parse_batch(value: Value) -> Result<Batch, Error> {

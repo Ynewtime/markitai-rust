@@ -1,7 +1,8 @@
 //! Bounded provider discovery and one-deployment connection checks.
 //!
 //! These calls use process credentials only. They do not load configuration,
-//! prompt files, dotenv, authentication stores or document caches.
+//! prompt files, dotenv or document caches. Copilot delegates its auth store
+//! to the installed official runtime; this module never parses that store.
 mod cache;
 mod discovery;
 #[cfg(test)]
@@ -160,6 +161,27 @@ pub fn discover(request: &Value) -> Result<Value> {
         _ => return Err(Error::InvalidInput("refresh must be a boolean".into())),
     };
     let env: HashMap<String, String> = std::env::vars().collect();
+    if provider == "copilot" {
+        if field(request, "api_key")?.is_some_and(|value| !value.is_empty())
+            || field(request, "api_base")?.is_some_and(|value| !value.is_empty())
+        {
+            return Err(Error::InvalidInput("Copilot discovery uses official CLI authentication, not API credentials or a base URL".into()));
+        }
+        // A stored login can change within one HOME. No discovery cache keyed by
+        // a filesystem path can establish account identity, so query each time.
+        let result = crate::subscription::CopilotConfig::from_env(&env).and_then(|config| {
+            crate::subscription::models(&config, std::time::Duration::from_secs(15))
+                .map_err(|failure| failure.error)
+        });
+        return Ok(match result {
+            Ok(models) => {
+                json!({"provider":"copilot","status":"ok","source":"official_cli","authoritative":true,"cached":false,"stale":false,"models":models,"detail":"Models reported by the authenticated official Copilot runtime"})
+            }
+            Err(_) => {
+                json!({"provider":"copilot","status":"unavailable","source":"official_cli","authoritative":false,"cached":false,"stale":false,"models":[],"detail":"Official Copilot runtime or authentication is unavailable"})
+            }
+        });
+    }
     let variable = match provider.as_str() {
         "openai" => Some("OPENAI_API_KEY"),
         "anthropic" => Some("ANTHROPIC_API_KEY"),
@@ -176,7 +198,7 @@ pub fn discover(request: &Value) -> Result<Value> {
     if let Some(base) = &base {
         checked_url(base)?;
     }
-    if matches!(provider.as_str(), "claude-agent" | "copilot" | "chatgpt") {
+    if matches!(provider.as_str(), "claude-agent" | "chatgpt") {
         return Ok(discovery::unavailable(
             &provider,
             "This provider requires an unavailable OAuth or local runtime integration",

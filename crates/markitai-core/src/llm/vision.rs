@@ -82,7 +82,7 @@ pub(crate) fn process_vision_with_runtime(
         .then(|| DocumentScope::new(cfg));
     let accounting = DocumentScope::shared().expect("scope installed");
     let before = document_usage().expect("scope installed");
-    let cache = llm_cache::Cache::configured(cfg, request.cache_context);
+
     let ambient = std::cell::OnceCell::new();
     let environment = || ambient.get_or_init(config::environment);
     let automatic;
@@ -95,6 +95,12 @@ pub(crate) fn process_vision_with_runtime(
     } else {
         automatic = automatic_entries(environment());
         &automatic
+    };
+    let subscription_pool = copilot::pool_has_copilot(models);
+    let cache = if subscription_pool {
+        None
+    } else {
+        llm_cache::Cache::configured(cfg, request.cache_context)
     };
     let pool = llm_cache::model_scope(
         models
@@ -124,6 +130,9 @@ pub(crate) fn process_vision_with_runtime(
     let count = request.frames.len().div_ceil(width);
     let (sources, aligned) = partition(request.markdown, request.frames, count);
     let mut warnings = Vec::new();
+    if subscription_pool {
+        warnings.push(copilot::WARNING.into());
+    }
     if !aligned && count > 1 && !request.markdown.trim().is_empty() {
         warnings.push("Visual source text has no complete ordered page map; all text was retained once across batches without claiming exact text-to-page alignment.".into());
     }

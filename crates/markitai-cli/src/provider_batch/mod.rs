@@ -1,5 +1,8 @@
 //! A cloud job remains separate from the local directory conversion checkpoint.
+mod resume;
 mod store;
+pub(super) use resume::resume;
+use resume::{advance_frozen, reconciliation_handoff};
 
 use super::*;
 use crate::output_claims::{Claim, MemberLeases, Owner, Policy};
@@ -159,11 +162,6 @@ pub(super) fn submit(
     }
     if !config::enabled(&cfg, "/llm/enabled") {
         return Err((2, "--llm-batch requires enabled LLM processing".into()));
-    }
-    if cli.resume {
-        return Err(unsupported(
-            "Provider Batch submission with --resume; collect an existing cloud job first",
-        ));
     }
     let session = provider::Session::new(&cfg).map_err(runtime)?;
     // Reject unsupported plans before even the base conversion can publish files.
@@ -333,28 +331,25 @@ pub(super) fn submit(
     store
         .save_requests(&mut request_bytes.as_slice())
         .map_err(runtime)?;
+    if let Some(reason) = advance_frozen(&mut store, &session, &cfg)? {
+        return Ok(reconciliation_handoff(cli, &store, reason));
+    }
+    wait_and_finish(cli, &cfg, &session, store, records, (started, clock), wait)
+}
+
+fn wait_and_finish(
+    cli: &Cli,
+    cfg: &Value,
+    session: &provider::Session,
+    mut store: store::Store,
+    mut records: Vec<RunItem>,
+    timing: (String, Instant),
+    wait: Duration,
+) -> CliResult<i32> {
+    let (started, clock) = timing;
+    let input = store.state().input_root.to_string_lossy().into_owned();
+    let output = store.state().output_root.clone();
     let client = session.client().map_err(runtime)?;
-    let uploaded = client
-        .upload(&store.request_path().map_err(runtime)?)
-        .map_err(runtime)?;
-    store.save_uploaded(uploaded.clone()).map_err(runtime)?;
-    let nonce = store.mark_creating().map_err(runtime)?;
-    let batch = match client.create(&uploaded, &nonce) {
-        Ok(batch) => batch,
-        Err(error) => {
-            if matches!(error, provider::Error::CreateUncertain) {
-                store.mark_uncertain().map_err(runtime)?;
-            } else {
-                store.mark_rejected().map_err(runtime)?;
-            }
-            eprintln!(
-                "Submission evidence retained at {}. Do not automatically submit this input again.",
-                store.directory().display()
-            );
-            return Err(runtime(error));
-        }
-    };
-    store.bind_batch(batch).map_err(runtime)?;
     let _signals = crate::signals::Guard::install().map_err(runtime)?;
     // A clock boundary reached during preparation hands the saved job back for collection.
     let deadline = Instant::now()
@@ -409,7 +404,7 @@ pub(super) fn submit(
         }
         2
     } else {
-        let (code, collected) = collect_ready(&mut store, &client, &cfg)?;
+        let (code, collected) = collect_ready(&mut store, &client, cfg)?;
         let by_key: HashMap<_, _> = collected
             .into_iter()
             .map(|item| (item.report_key.clone(), item))
@@ -426,7 +421,7 @@ pub(super) fn submit(
             code
         }
     };
-    report_and_history(cli, &cfg, input, &output, &records, &started, clock)?;
+    report_and_history(cli, cfg, &input, &output, &records, &started, clock)?;
     if cli.json {
         let mut value = envelope(&records.iter().map(outcome).collect::<Vec<_>>(), None);
         value["batch"] = batch_json;
@@ -450,27 +445,22 @@ pub(super) fn collect(cli: &Cli, id: &str, cfg: Value) -> CliResult<i32> {
             "--llm-batch-collect requires the original output directory with -o".into(),
         )
     })?;
-    let mut store = store::Store::open_by_batch(
+    let mut store = match store::Store::open_by_batch(
         output,
         id,
         config::enabled(&cfg, "/output/allow_symlinks"),
         Default::default(),
-    )
-    .map_err(runtime)?;
+    ) {
+        Ok(store) => store,
+        Err(store::Error::NotFound) => resume::bind_manual(output, id, &cfg)?,
+        Err(error) => return Err(runtime(error)),
+    };
     if store.state().phase == store::Phase::Collected {
         eprintln!("Provider batch {id} was already collected.");
         return Ok(0);
     }
     let session = provider::Session::for_collection(&cfg).map_err(runtime)?;
-    let saved = &store.state().endpoint;
-    if session.identity().provider != saved.provider
-        || session.identity().model != saved.model
-        || session.identity().api_base != saved.api_base
-    {
-        return Err(runtime(
-            "Collection configuration differs from the frozen model and endpoint",
-        ));
-    }
+    resume::match_session(&store, &session)?;
     let client = session.client().map_err(runtime)?;
     let batch = client.retrieve(id).map_err(runtime)?;
     store.bind_batch(batch).map_err(runtime)?;

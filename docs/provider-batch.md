@@ -18,6 +18,33 @@ endpoint. It does not need the original input directory. Credentials are resolve
 again from the current configuration and remain in memory. Inline configuration
 and keys are never inserted into a suggested collection command or saved job.
 
+## R31 frozen recovery
+
+The continuation code passes the complete source gate and eleven independent
+debug CLI workflows /234 assertions. Optimized delivery verification is pending;
+R30 artifact identities above remain unchanged.
+
+`markitai --llm-batch --resume -o output-directory` selects the unique unfinished
+native job. INPUT is optional and, when supplied, must match the recorded resolved
+scope; it may have been deleted. Frozen plans and request bytes are reused without
+source discovery or reconversion. No pending job returns an explicit error instead
+of silently starting a fresh submission. Rejected/completed jobs are not selected.
+
+Prepared work rebuilds missing JSONL only from saved plans. An uploaded file is
+reused. The creating phase is durably saved before the one paid create attempt.
+Every retained output receipt and base hash is verified before paid work and again
+after upload, with member leases held through creation. Modified outputs cannot
+become new publication authority merely by matching a hash.
+
+Creating/uncertain work only searches remote batches with bounded pagination and
+an exact file/nonce/endpoint match, then verifies the unique result with a fresh GET.
+No match, multiple matches or incomplete search remains unresolved and returns 2;
+none authorizes another create. An explicit `--llm-batch-collect ID` may bind an
+uncertain local attempt only after the same strict remote identity proof. Storage
+corruption, ownership conflict or lock contention never becomes that fallback.
+A new dollar budget does not block read-only reconciliation/collection; new paid
+Batch creation still cannot enforce a continuation dollar budget.
+
 ## Initial supported scope
 
 The current implementation accepts one effective OpenAI deployment and structured
@@ -32,8 +59,7 @@ metadata validation, cache identity and output profiles. Valid cache hits publis
 without a new provider request. Successful base Markdown remains beside enhanced
 Markdown. Long documents, pure mode, OCR, screenshots and image analysis are
 currently rejected rather than silently sent through a paid live fallback.
-Anthropic Batch, legacy Python Batch-state import and submission with `--resume`
-remain unfinished scope. Ordinary `--resume` refuses an input scope with an
+Anthropic Batch and legacy Python Batch-state import remain unfinished scope. Ordinary `--resume` refuses an input scope with an
 unresolved native provider job.
 The CLI currently permits one unfinished provider job per output directory.
 A preparation lock enforces that boundary before any base file is published,

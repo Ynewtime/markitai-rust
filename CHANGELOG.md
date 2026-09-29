@@ -4,6 +4,9 @@
 
 ### Added
 
+- Native frozen Batch continuation and bounded remote reconciliation, including strict manual binding of uncertain submissions and output ownership checks before paid creation.
+- Optional official Copilot CLI conversion, model discovery/probe, authentication status and Unix login delegation, with observed unpriced usage and account-safe cache bypass.
+
 - Reviewed offline model pricing, explicit unknown-price coverage, fixed-point per-document continuation budgets and retained pricing attribution in CLI and binding packages.
 - OpenAI text Batch submission and collection with private durable request/result evidence, preserved observed usage and receipt-checked publication after restarts.
 - Origin-scoped browser Digest authentication, including session algorithms, stale nonces and authenticated PDF downloads.

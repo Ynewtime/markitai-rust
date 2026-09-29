@@ -1,3 +1,5 @@
+#[path = "app/auth.rs"]
+mod auth;
 #[path = "app/compat.rs"]
 mod compat;
 #[path = "app/doctor.rs"]
@@ -136,7 +138,7 @@ struct Cli {
     /// Directory scan depth; 0 scans only the input directory.
     max_depth: Option<usize>,
     #[arg(long)]
-    /// Submit directory text enhancement to the OpenAI Batch API; retains resumable collection evidence.
+    /// Submit directory text enhancement to the OpenAI Batch API; --resume continues frozen work in -o.
     llm_batch: bool,
     #[arg(long, value_parser=clap::value_parser!(u64).range(60..))]
     /// Maximum local wait for a provider batch (seconds, at least 60); expiry does not cancel it.
@@ -206,10 +208,10 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
-    /// Provider authentication (not yet implemented).
+    /// Inspect subscription authentication or delegate login to an official runtime.
     Auth {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: Option<auth::Command>,
     },
     /// Run the native REST conversion service.
     Serve {
@@ -381,6 +383,15 @@ fn execute(cli: &Cli) -> CliResult<i32> {
     }
     if cli.llm_batch_timeout.is_some() && !cli.llm_batch {
         return Err((2, "--llm-batch-timeout requires --llm-batch".into()));
+    }
+    if cli.llm_batch && cli.resume {
+        if cli.interactive || cli.dry_run {
+            return Err((
+                2,
+                "Frozen Batch resume cannot use preview or interactive mode".into(),
+            ));
+        }
+        return provider_batch::resume(cli, conversion_config(cli, overrides)?);
     }
     if cli.input.is_none() && !cli.interactive {
         Cli::command().print_help().map_err(runtime)?;
@@ -1504,7 +1515,7 @@ fn subcommand(cli: &Cli, command: &Command, overrides: Option<Value>) -> CliResu
             let cfg = config::load(cli.config.as_deref(), overrides).map_err(runtime)?;
             return cache_command(command, &cfg);
         }
-        Command::Auth { .. } => return Err(unsupported("Provider authentication commands")),
+        Command::Auth { command } => return auth::run(command.as_ref()),
         Command::Serve {
             host,
             port,

@@ -11,6 +11,30 @@ pub(crate) fn probe(request: &Value) -> Result<()> {
     let model = request["model"]
         .as_str()
         .ok_or_else(|| Error::InvalidInput("Model is required".into()))?;
+    if model.starts_with("copilot/") {
+        for name in ["api_key", "api_base"] {
+            if request
+                .get(name)
+                .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+            {
+                return Err(Error::InvalidInput("Copilot probe uses official CLI authentication, not API credentials or a base URL".into()));
+            }
+        }
+        let config = crate::subscription::CopilotConfig::from_env(&env)?;
+        return crate::subscription::complete(
+            &config,
+            crate::subscription::Request {
+                model,
+                system: "Reply briefly without tools.",
+                user: "Reply with exactly OK.",
+                images: &[],
+                timeout: Duration::from_secs(15),
+                cancel: None,
+            },
+        )
+        .map(|_| ())
+        .map_err(|failure| failure.error);
+    }
     let mut params = json!({"model":model,"max_tokens":16,"weight":1});
     for name in ["api_key", "api_base"] {
         if let Some(value) = request.get(name) {

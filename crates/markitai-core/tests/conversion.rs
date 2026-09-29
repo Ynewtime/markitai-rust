@@ -691,3 +691,6 @@ fn local_image_ocr_reads_original_pixels_and_blank_images_are_explicit() {
 
 #[path = "conversion/request_coalescing.rs"]
 mod request_coalescing;
+
+#[path = "conversion/copilot.rs"]
+mod copilot;

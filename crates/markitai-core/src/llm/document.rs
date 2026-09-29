@@ -46,7 +46,7 @@ pub(crate) fn process_document_with_runtime(
     let before = document_usage().expect("document scope installed");
     let protected = chunks::Protected::new(markdown);
     let sources = protected.split();
-    let cache = llm_cache::Cache::configured(cfg, cache_context);
+
     // Hits from configured model identities need no credential or dotenv reads.
     let ambient = std::cell::OnceCell::new();
     let environment = || ambient.get_or_init(config::environment);
@@ -60,6 +60,12 @@ pub(crate) fn process_document_with_runtime(
     } else {
         automatic = automatic_entries(environment());
         &automatic
+    };
+    let subscription_pool = copilot::pool_has_copilot(models);
+    let cache = if subscription_pool {
+        None
+    } else {
+        llm_cache::Cache::configured(cfg, cache_context)
     };
     let pool = llm_cache::model_scope(
         models
@@ -78,6 +84,9 @@ pub(crate) fn process_document_with_runtime(
             }),
     );
     let mut warnings = Vec::new();
+    if subscription_pool {
+        warnings.push(copilot::WARNING.into());
+    }
     let mut work = Vec::with_capacity(sources.len());
     for source in sources {
         let prompts = document_prompts(&source, source_label, metadata_only, cfg)?;

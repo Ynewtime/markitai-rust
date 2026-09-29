@@ -443,3 +443,219 @@ fn internal_symlinks_public_evidence_and_foreign_output_families_are_rejected() 
     drop(store);
     assert!(Store::open_by_id(&fixture.output, &id, false, Limits::default()).is_err());
 }
+
+#[test]
+fn frozen_selection_survives_deleted_input_and_keeps_request_bytes_and_identity() {
+    let fixture = Fixture::new();
+    let mut store = fixture.create(&["a"]);
+    let requests = b"exact old requests\n";
+    store.save_requests(&mut requests.as_slice()).unwrap();
+    let id = store.state().id.clone();
+    drop(store);
+    fs::remove_dir_all(&fixture.input).unwrap();
+    let preparation = Store::lock_preparation(&fixture.output, false).unwrap();
+    let restored = preparation
+        .open_frozen(Some(&fixture.input), Limits::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.state().id, id);
+    assert_eq!(restored.resume_step().unwrap(), ResumeStep::Upload);
+    assert_eq!(
+        fs::read(restored.request_path().unwrap()).unwrap(),
+        requests
+    );
+    assert_eq!(
+        restored.read_plan("item_0").unwrap()["frozen_content"],
+        "original a"
+    );
+    preparation.validate().unwrap();
+}
+
+#[test]
+fn frozen_selection_requires_one_job_correct_scope_and_an_exclusive_collector() {
+    let fixture = Fixture::new();
+    let preparation = Store::lock_preparation(&fixture.output, false).unwrap();
+    assert!(
+        preparation
+            .open_frozen(None, Limits::default())
+            .unwrap()
+            .is_none()
+    );
+    let first = fixture.create(&["a"]);
+    assert!(matches!(
+        preparation.open_frozen(None, Limits::default()),
+        Err(Error::Busy)
+    ));
+    drop(first);
+    assert!(matches!(
+        preparation.open_frozen(Some(&fixture.output), Limits::default()),
+        Err(Error::Conflict)
+    ));
+    let restored = preparation
+        .open_frozen(None, Limits::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.resume_step().unwrap(), ResumeStep::PrepareRequests);
+    drop(restored);
+    let second = fixture.create(&["b"]);
+    drop(second);
+    assert!(
+        preparation
+            .open_frozen(Some(&fixture.input), Limits::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn resume_step_cannot_turn_uncertain_creation_into_a_new_create() {
+    let fixture = Fixture::new();
+    let mut store = fixture.create(&["a"]);
+    assert_eq!(store.resume_step().unwrap(), ResumeStep::PrepareRequests);
+    store
+        .save_requests(&mut b"frozen validated request bytes\n".as_slice())
+        .unwrap();
+    assert_eq!(store.resume_step().unwrap(), ResumeStep::Upload);
+    uploaded(&mut store);
+    assert_eq!(store.resume_step().unwrap(), ResumeStep::Create);
+    store.mark_creating().unwrap();
+    assert_eq!(store.resume_step().unwrap(), ResumeStep::Reconcile);
+    store.mark_uncertain().unwrap();
+    assert_eq!(store.resume_step().unwrap(), ResumeStep::Reconcile);
+    assert!(store.mark_creating().is_err());
+    assert!(store.save_requests(&mut b"different".as_slice()).is_err());
+}
+
+#[test]
+fn resume_step_revalidates_frozen_bytes_and_rejected_jobs_are_not_selected() {
+    let fixture = Fixture::new();
+    let mut store = fixture.create(&["a"]);
+    uploaded(&mut store);
+    store.mark_creating().unwrap();
+    store.mark_rejected().unwrap();
+    assert!(store.resume_step().is_err());
+    drop(store);
+    let preparation = Store::lock_preparation(&fixture.output, false).unwrap();
+    assert!(
+        preparation
+            .open_frozen(None, Limits::default())
+            .unwrap()
+            .is_none()
+    );
+    let mut store = fixture.create(&["a"]);
+    uploaded(&mut store);
+    fs::write(
+        store.directory().join("plans/0.json"),
+        b"tampered after open",
+    )
+    .unwrap();
+    assert!(store.resume_step().is_err());
+    assert_eq!(store.state().phase, Phase::Uploaded);
+}
+
+fn remote_identity(nonce: &str, file_id: &str) -> markitai_core::provider_batch::RemoteIdentity {
+    use std::net::TcpListener;
+    use std::time::Duration;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let response = serde_json::to_vec(&json!({"id":"batch_proven","input_file_id":file_id,
+        "endpoint":"/v1/chat/completions","status":"in_progress","metadata":{"markitai_submission":nonce}})).unwrap();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+            assert!(headers.len() < 65536);
+        }
+        assert!(headers.starts_with(b"GET /v1/batches/batch_proven "));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response.len()
+        )
+        .unwrap();
+        stream.write_all(&response).unwrap();
+    });
+    let client = markitai_core::provider_batch::Client::new(
+        &base,
+        "fixture-only-key",
+        Duration::from_secs(3),
+        Default::default(),
+    )
+    .unwrap();
+    let evidence = client.inspect("batch_proven").unwrap();
+    worker.join().unwrap();
+    evidence
+}
+
+#[test]
+fn reconciled_binding_rechecks_api_base_nonce_file_and_phase_without_mutation() {
+    for mismatch in 0..4 {
+        let fixture = Fixture::new();
+        let mut job = fixture.job(&["a"]);
+        let nonce = if mismatch == 0 {
+            "wrong_nonce"
+        } else {
+            &job.id
+        };
+        let file = if mismatch == 1 {
+            "file_wrong"
+        } else {
+            "file_input"
+        };
+        let evidence = remote_identity(nonce, file);
+        if mismatch != 2 {
+            job.endpoint.api_base = evidence.api_base().into();
+        }
+        let mut store = Store::create(&fixture.output, job, false, Limits::default()).unwrap();
+        uploaded(&mut store);
+        if mismatch != 3 {
+            store.mark_creating().unwrap();
+        }
+        let before = fs::read(store.directory().join("state.json")).unwrap();
+        assert!(
+            matches!(store.bind_reconciled(evidence), Err(Error::Conflict)),
+            "mismatch {mismatch}"
+        );
+        assert_eq!(
+            fs::read(store.directory().join("state.json")).unwrap(),
+            before
+        );
+        assert!(store.state().batch.is_none());
+    }
+}
+
+#[test]
+fn proven_binding_preserves_create_evidence_across_state_commit_failure() {
+    let fixture = Fixture::new();
+    let mut job = fixture.job(&["a"]);
+    let evidence = remote_identity(&job.id, "file_input");
+    job.endpoint.api_base = evidence.api_base().into();
+    let mut store = Store::create(&fixture.output, job, false, Limits::default()).unwrap();
+    uploaded(&mut store);
+    store.mark_creating().unwrap();
+    let id = store.state().id.clone();
+    store.fault = Some(Fault::BeforeStateReplace);
+    assert!(store.bind_reconciled(evidence.clone()).is_err());
+    assert_eq!(store.state().phase, Phase::Creating);
+    drop(store);
+    let mut restored = fixture.reopen(&id);
+    restored.bind_reconciled(evidence).unwrap();
+    assert_eq!(restored.resume_step().unwrap(), ResumeStep::Collect);
+    drop(restored);
+    let restored =
+        Store::open_by_batch(&fixture.output, "batch_proven", false, Limits::default()).unwrap();
+    assert_eq!(restored.state().id, id);
+    assert_eq!(
+        restored.state().uploaded.as_ref().unwrap().file_id,
+        "file_input"
+    );
+    assert_eq!(restored.usage().unwrap().requests, 0);
+}

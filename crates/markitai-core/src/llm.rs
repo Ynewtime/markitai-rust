@@ -2,6 +2,7 @@
 mod accounting;
 pub(crate) mod batch;
 mod chunks;
+mod copilot;
 mod document;
 pub(crate) mod flight;
 pub(crate) mod routing;
@@ -482,15 +483,20 @@ fn enhance_cached(
 ) -> Result<Enhancement> {
     let prompts = prompts(markdown, source_label, cfg, None)?;
     let remote = |source: &str| source.starts_with("http://") || source.starts_with("https://");
-    let cache =
-        if config::enabled(cfg, "/llm/pure") || remote(source_label) || remote(cache_context) {
-            None
-        } else {
-            llm_cache::Cache::configured(cfg, cache_context)
-        };
-    // A configured-model hit needs neither credential resolution nor dotenv I/O.
+    // Configured HTTP-model hits still need no credential or dotenv reads.
     let ambient = std::cell::OnceCell::new();
     let environment = || supplied_env.unwrap_or_else(|| ambient.get_or_init(config::environment));
+    let subscription_pool = copilot::configured(cfg)
+        .unwrap_or_else(|| copilot::pool_has_copilot(&automatic_entries(environment())));
+    let cache = if subscription_pool
+        || config::enabled(cfg, "/llm/pure")
+        || remote(source_label)
+        || remote(cache_context)
+    {
+        None
+    } else {
+        llm_cache::Cache::configured(cfg, cache_context)
+    };
     let scope = cache.as_ref().map(|_| {
         let automatic;
         let models = if let Some(models) = cfg
@@ -525,6 +531,9 @@ fn enhance_cached(
         .filter(|scope| *scope != "pool:none")
         .map(|scope| llm_cache::key(markdown, &prompts.cache_scope, scope));
     let mut warnings = Vec::new();
+    if subscription_pool {
+        warnings.push(copilot::WARNING.into());
+    }
     if let (Some(cache), Some(key)) = (&cache, &cache_key) {
         match cache.get(key) {
             Ok(Some(markdown)) => return Ok(Enhancement {
@@ -726,8 +735,10 @@ pub(crate) fn capabilities(cfg: &Value, env: &HashMap<String, String>) -> crate:
         .collect();
     let routable = deployments(cfg, env).is_ok_and(|entries| {
         entries.iter().any(|entry| {
-            matches!(entry.provider.as_str(), "ollama" | "ollama_chat")
-                || entry.key.as_ref().is_some_and(|key| !key.is_empty())
+            matches!(
+                entry.provider.as_str(),
+                "ollama" | "ollama_chat" | "copilot"
+            ) || entry.key.as_ref().is_some_and(|key| !key.is_empty())
         })
     });
     crate::LlmCapabilities {
@@ -752,8 +763,10 @@ pub(crate) fn vision_models(cfg: &Value, env: &HashMap<String, String>) -> Vec<S
         .filter(|entry| {
             groups.contains(&entry.group)
                 && entry.supports_vision != Some(false)
-                && (matches!(entry.provider.as_str(), "ollama" | "ollama_chat")
-                    || entry.key.as_ref().is_some_and(|key| !key.is_empty()))
+                && (matches!(
+                    entry.provider.as_str(),
+                    "ollama" | "ollama_chat" | "copilot"
+                ) || entry.key.as_ref().is_some_and(|key| !key.is_empty()))
                 && seen.insert(entry.id.clone())
         })
         .map(|entry| entry.id)
@@ -792,6 +805,13 @@ fn deployments(cfg: &Value, env: &HashMap<String, String>) -> Result<Vec<Deploym
             continue;
         };
         let (provider, model_name) = model.split_once('/').unwrap_or(("openai", model));
+        if provider == "copilot" {
+            match copilot::deployment(entry, env, grouped) {
+                Ok(deployment) => result.push(deployment),
+                Err(error) => last_error = Some(error),
+            }
+            continue;
+        }
         let (key_var, base, protocol) = match provider {
             "openai" => (
                 "OPENAI_API_KEY",
@@ -1258,14 +1278,26 @@ fn run_mode(
                 }
                 attempts = attempts.saturating_add(1);
                 let mut observation = routing::Observation::default();
-                let response = request_with_mode(
-                    &client,
-                    &entries[selected],
-                    prompts,
-                    &mut usage,
-                    structured,
-                    strategy.measured().then_some(&mut observation),
-                );
+                let response = if entries[selected].provider == "copilot" {
+                    copilot::request(
+                        &entries[selected],
+                        prompts,
+                        env,
+                        Duration::from_secs(timeout),
+                        stop,
+                        &mut usage,
+                        strategy.measured().then_some(&mut observation),
+                    )
+                } else {
+                    request_with_mode(
+                        &client,
+                        &entries[selected],
+                        prompts,
+                        &mut usage,
+                        structured,
+                        strategy.measured().then_some(&mut observation),
+                    )
+                };
                 if let Some(route) = &route {
                     route.observe(observation);
                 }

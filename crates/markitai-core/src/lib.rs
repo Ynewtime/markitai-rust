@@ -24,6 +24,7 @@ mod pricing;
 pub mod provider_batch;
 pub mod provider_management;
 pub mod spa_domains;
+pub mod subscription;
 mod types;
 
 pub use browser_runtime::BrowserRuntime;
