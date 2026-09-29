@@ -1,9 +1,8 @@
 # Provider Batch jobs
 
-This page describes the R30 implementation under integration. The last verified
-installed release is still the R29 checkpoint in [STATUS.md](STATUS.md). Source
-transport and document-plan tests have run; the complete CLI lifecycle still
-requires its independent process acceptance and installed-package checks.
+R30 is verified at source `16babc6` on macOS arm64, including six independent
+optimized CLI workflows and all installed bindings. See [validation](validation/metered-provider-batch-round30.md)
+for exact artifact identities and the distinction between loopback and real-account evidence.
 
 Provider Batch sends prepared requests to a provider's asynchronous queue. It is
 separate from local directory concurrency, REST conversion jobs and MCP
