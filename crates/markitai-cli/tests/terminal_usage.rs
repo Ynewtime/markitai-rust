@@ -110,10 +110,18 @@ impl Model {
                 stream
                     .set_write_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
                 let mut bytes = Vec::new();
                 let mut buffer = [0; 8192];
                 let end = loop {
-                    let n = stream.read(&mut buffer).unwrap();
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    assert!(!remaining.is_zero(), "loopback request deadline exceeded");
+                    stream.set_read_timeout(Some(remaining)).unwrap();
+                    let n = match stream.read(&mut buffer) {
+                        Ok(n) => n,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => panic!("loopback read: {error}"),
+                    };
                     assert!(n > 0);
                     bytes.extend_from_slice(&buffer[..n]);
                     assert!(bytes.len() < 2_000_000);
@@ -147,7 +155,14 @@ impl Model {
                     .unwrap();
                 assert!(length < 2_000_000);
                 while bytes.len() < end + length {
-                    let n = stream.read(&mut buffer).unwrap();
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    assert!(!remaining.is_zero(), "loopback request deadline exceeded");
+                    stream.set_read_timeout(Some(remaining)).unwrap();
+                    let n = match stream.read(&mut buffer) {
+                        Ok(n) => n,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => panic!("loopback read: {error}"),
+                    };
                     assert!(n > 0);
                     bytes.extend_from_slice(&buffer[..n]);
                 }

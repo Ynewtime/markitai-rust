@@ -229,6 +229,28 @@ fn checks(
             result.insert("copilot-auth", identity);
             continue;
         }
+        if provider == "claude-agent" {
+            let auth = super::auth::claude_status(env);
+            let verified = auth.details.get("cli_version").is_some();
+            let mut adapter = Check::new(
+                "Claude official runtime",
+                "Configured local provider",
+                if verified { "ok" } else { "error" },
+                if verified {
+                    "Installed official runtime matches the native adapter version"
+                } else {
+                    "The installed Claude runtime could not verify its supported version"
+                },
+                "Install the supported official Claude CLI; no Python SDK is required",
+            );
+            adapter.required = true;
+            let mut identity=Check::new("Claude subscription authentication", "Configured local provider", if auth.authenticated {"ok"} else {"error"},
+                auth.error.unwrap_or_else(|| "Official runtime reports an authenticated subscription; model access was not probed".into()), "Run markitai auth claude login");
+            identity.required = true;
+            result.insert("claude-agent-sdk", adapter);
+            result.insert("claude-agent-auth", identity);
+            continue;
+        }
         let rows: &[(&str, &str)] = match provider {
             "claude-agent" => &[
                 ("claude-agent-sdk", "Claude Agent SDK"),

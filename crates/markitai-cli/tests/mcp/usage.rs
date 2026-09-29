@@ -37,8 +37,16 @@ impl Model {
                     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
                     let mut bytes = Vec::new();
                     let mut buffer = [0; 8192];
+                    let request_deadline = Instant::now() + Duration::from_secs(10);
                     let header_end = loop {
-                        let read = stream.read(&mut buffer).unwrap();
+                        let remaining = request_deadline.saturating_duration_since(Instant::now());
+                        assert!(!remaining.is_zero(), "mock request deadline exceeded");
+                        stream.set_read_timeout(Some(remaining)).unwrap();
+                        let read = match stream.read(&mut buffer) {
+                            Ok(count) => count,
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(error) => panic!("mock read: {error}"),
+                        };
                         assert!(read > 0, "incomplete request headers");
                         bytes.extend_from_slice(&buffer[..read]);
                         assert!(bytes.len() < 2_000_000);
@@ -53,7 +61,14 @@ impl Model {
                     }).unwrap();
                     assert!(length < 2_000_000);
                     while bytes.len() < header_end + length {
-                        let read = stream.read(&mut buffer).unwrap();
+                        let remaining = request_deadline.saturating_duration_since(Instant::now());
+                        assert!(!remaining.is_zero(), "mock request deadline exceeded");
+                        stream.set_read_timeout(Some(remaining)).unwrap();
+                        let read = match stream.read(&mut buffer) {
+                            Ok(count) => count,
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(error) => panic!("mock read: {error}"),
+                        };
                         assert!(read > 0, "incomplete request body");
                         bytes.extend_from_slice(&buffer[..read]);
                     }

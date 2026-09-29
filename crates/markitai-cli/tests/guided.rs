@@ -132,9 +132,16 @@ mod terminal {
                     let result = unsafe { libc::poll(&mut descriptor, 1, 100) };
                     if result > 0 {
                         match reader.read(&mut bytes) {
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue;
+                            }
                             Ok(0) | Err(_) => break,
                             Ok(n) => captured.lock().unwrap().extend_from_slice(&bytes[..n]),
                         }
+                    } else if result < 0
+                        && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                    {
+                        continue;
                     } else if result < 0 || finished.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
                     }

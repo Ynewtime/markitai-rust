@@ -698,7 +698,7 @@ fn convert_inner(
     }
     if let Some(scope) = document_scope.as_ref() {
         result.usage = scope.usage();
-        if result.usage.requests > 0 {
+        if result.usage.requests > 0 || !result.usage.by_model.is_empty() {
             result.llm_cache_hit = false;
             if !result.usage.cost_complete() {
                 result.warnings.push("Some observed LLM requests could not be priced. cost_usd is the known priced subtotal; the complete cost is unknown.".into());

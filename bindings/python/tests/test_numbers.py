@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -99,7 +100,10 @@ class NumbersTests(unittest.TestCase):
                         invoke()
                     self.assertIsNone(caught.exception.usage)
                     if source != ordinary:
-                        self.assertIn("Numbers", str(caught.exception))
+                        if (overrides.get("ocr") or overrides.get("screenshot")) and sys.platform != "darwin":
+                            self.assertEqual(str(caught.exception), "Office page capture requires an available native PDF page renderer on this platform")
+                        else:
+                            self.assertIn("Numbers", str(caught.exception))
                         self.assertEqual(caught.exception.code, "unsupported")
 
 

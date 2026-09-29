@@ -326,9 +326,16 @@ fn serve(mut stream: TcpStream, shared: Arc<(Mutex<HttpState>, Condvar)>, stop: 
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let mut bytes = Vec::new();
+    let request_deadline = Instant::now() + Duration::from_secs(5);
     let (split, length) = loop {
+        let remaining = request_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        stream.set_read_timeout(Some(remaining)).unwrap();
         let mut chunk = [0u8; 4096];
         match stream.read(&mut chunk) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Ok(0) | Err(_) => return,
             Ok(n) => bytes.extend_from_slice(&chunk[..n]),
         }

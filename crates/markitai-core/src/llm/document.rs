@@ -61,7 +61,7 @@ pub(crate) fn process_document_with_runtime(
         automatic = automatic_entries(environment());
         &automatic
     };
-    let subscription_pool = copilot::pool_has_copilot(models);
+    let subscription_pool = claude::subscription_pool(models);
     let cache = if subscription_pool {
         None
     } else {
@@ -85,7 +85,7 @@ pub(crate) fn process_document_with_runtime(
     );
     let mut warnings = Vec::new();
     if subscription_pool {
-        warnings.push(copilot::WARNING.into());
+        warnings.push(claude::warning(cfg).into());
     }
     let mut work = Vec::with_capacity(sources.len());
     for source in sources {

@@ -11,6 +11,11 @@ import time
 root = pathlib.Path(os.environ['COPILOT_HOME'])
 config = json.loads((root / 'fixture.json').read_text())
 mode = config['mode']
+if 'cache_home' in config:
+    assert os.environ.get('COPILOT_CACHE_HOME') == config['cache_home']
+    cache = pathlib.Path(config['cache_home'])
+    cache.mkdir(mode=0o700, exist_ok=True)
+    (cache / 'fixture-cache-access').write_text('private cache preserved')
 log = root / 'requests.jsonl'
 assert os.environ.get('HOME') == config['home']
 assert os.getcwd() != config['home']
@@ -56,7 +61,14 @@ while True:
     req=json.loads(body)
     with log.open('a') as out:out.write(json.dumps(req)+'\n')
     method=req.get('method')
-    if method=='connect':response(req,{'protocolVersion':2 if mode=='wrong_protocol' else 3})
+    if method=='connect':
+        p=req.get('params',{});client=p.get('clientInfo',{})
+        if set(client)-{'editorName','editorVersion','extensionName','extensionVersion'}:
+            send({'jsonrpc':'2.0','id':req['id'],'error':{'code':-32602,'message':'Invalid connect request: unknown clientInfo field'}})
+            continue
+        assert client.get('editorName')=='markitai' and isinstance(client.get('editorVersion'),str) and client['editorVersion']
+        assert p.get('supportedTaskKinds')==[]
+        response(req,{'protocolVersion':2 if mode=='wrong_protocol' else 3})
     elif method=='status.get':response(req,{'version':'1.0.90-2','protocolVersion':3})
     elif method=='auth.getStatus':response(req,{'isAuthenticated':mode!='unauth','login':'fixture-user','authType':'env','host':'https://github.com'})
     elif method=='models.list':response(req,{'models':[{'id':'z','name':'Zed','policy':{'state':'enabled'},'capabilities':{'supports':{'vision':True}}},{'id':'hidden','policy':{'state':'disabled'}},{'id':'a','name':'Alpha'}]})

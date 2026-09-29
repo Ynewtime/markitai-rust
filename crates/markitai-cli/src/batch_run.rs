@@ -570,14 +570,15 @@ pub(super) fn run(
     }
     let file_limit = cfg["batch"]["concurrency"].as_u64().unwrap_or(10) as usize;
     let url_limit = cfg["batch"]["url_concurrency"].as_u64().unwrap_or(5) as usize;
-    let count = file_limit
-        .saturating_add(url_limit)
-        .min(pending.len())
-        .max(1);
     // Separate queues avoid rescanning every blocked item whenever one worker finishes.
     let (mut pending_urls, mut pending_files): (VecDeque<_>, VecDeque<_>) = pending
         .into_iter()
         .partition(|&index| is_url(&tasks[index].source));
+    // An absent task class cannot use workers reserved for its concurrency cap.
+    let count = file_limit
+        .min(pending_files.len())
+        .saturating_add(url_limit.min(pending_urls.len()))
+        .max(1);
     let seconds = cfg["batch"]["state_flush_interval_seconds"]
         .as_u64()
         .unwrap_or(0);

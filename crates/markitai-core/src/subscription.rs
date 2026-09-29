@@ -81,6 +81,7 @@ impl CopilotConfig {
             "LANG",
             "LC_ALL",
             "COPILOT_HOME",
+            "COPILOT_CACHE_HOME",
         ] {
             if let Some(value) = env.get(key) {
                 environment.insert(key.into(), value.clone());
@@ -171,3 +172,5 @@ pub struct Request<'a> {
     pub timeout: Duration,
     pub cancel: Option<&'a AtomicBool>,
 }
+
+pub mod claude;

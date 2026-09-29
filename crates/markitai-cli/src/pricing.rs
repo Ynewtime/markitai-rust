@@ -18,12 +18,18 @@ pub(crate) struct Pricing {
     pub(crate) unpriced_requests: u64,
     pub(crate) cost_status: CostStatus,
     pub(crate) pricing_snapshots: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) incomplete_request_observations: u64,
 }
 
-fn status(priced: u64, unpriced: u64) -> CostStatus {
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn status(priced: u64, unpriced: u64, incomplete: u64) -> CostStatus {
     if priced == 0 {
         CostStatus::Unknown
-    } else if unpriced > 0 {
+    } else if unpriced > 0 || incomplete > 0 {
         CostStatus::Partial
     } else {
         CostStatus::Complete
@@ -51,7 +57,11 @@ fn snapshots(value: &Value) -> BTreeSet<String> {
 impl Pricing {
     fn model(record: &Value) -> Option<Self> {
         let requests = record.get("requests").and_then(Value::as_u64).unwrap_or(0);
-        if requests == 0 {
+        let incomplete = record
+            .get("incomplete_request_observations")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if requests == 0 && incomplete == 0 {
             return None;
         }
         let counts = record
@@ -61,7 +71,7 @@ impl Pricing {
             .filter(|(priced, unpriced)| priced.checked_add(*unpriced) == Some(requests));
         let (priced, unpriced) = counts
             .filter(|(priced, unpriced)| {
-                serde_json::to_value(status(*priced, *unpriced))
+                serde_json::to_value(status(*priced, *unpriced, incomplete))
                     .ok()
                     .as_ref()
                     == record.get("cost_status")
@@ -70,7 +80,8 @@ impl Pricing {
         Some(Self {
             priced_requests: priced,
             unpriced_requests: unpriced,
-            cost_status: status(priced, unpriced),
+            cost_status: status(priced, unpriced, incomplete),
+            incomplete_request_observations: incomplete,
             pricing_snapshots: if priced > 0 {
                 snapshots(record).into_iter().collect()
             } else {
@@ -96,11 +107,16 @@ impl Pricing {
                 priced_requests: 0,
                 unpriced_requests: usage.requests,
                 cost_status: CostStatus::Unknown,
+                incomplete_request_observations: 0,
                 pricing_snapshots: Vec::new(),
             });
         };
         output.unpriced_requests = output.unpriced_requests.checked_add(missing)?;
-        output.cost_status = status(output.priced_requests, output.unpriced_requests);
+        output.cost_status = status(
+            output.priced_requests,
+            output.unpriced_requests,
+            output.incomplete_request_observations,
+        );
         Some(output)
     }
 
@@ -108,22 +124,25 @@ impl Pricing {
         let mut priced = 0u64;
         let mut unpriced = 0u64;
         let mut snapshots = BTreeSet::new();
+        let mut incomplete = 0u64;
         for value in values {
             if !value.valid() {
                 return None;
             }
             priced = priced.checked_add(value.priced_requests)?;
             unpriced = unpriced.checked_add(value.unpriced_requests)?;
+            incomplete = incomplete.checked_add(value.incomplete_request_observations)?;
             snapshots.extend(value.pricing_snapshots.iter().cloned());
         }
         if snapshots.len() > 256 {
             return None;
         }
         let requests = priced.checked_add(unpriced)?;
-        (requests > 0).then(|| Self {
+        (requests > 0 || incomplete > 0).then(|| Self {
             priced_requests: priced,
             unpriced_requests: unpriced,
-            cost_status: status(priced, unpriced),
+            cost_status: status(priced, unpriced, incomplete),
+            incomplete_request_observations: incomplete,
             pricing_snapshots: snapshots.into_iter().collect(),
         })
     }
@@ -131,8 +150,13 @@ impl Pricing {
     pub(crate) fn valid(&self) -> bool {
         self.priced_requests
             .checked_add(self.unpriced_requests)
-            .is_some_and(|total| total > 0)
-            && self.cost_status == status(self.priced_requests, self.unpriced_requests)
+            .is_some_and(|total| total > 0 || self.incomplete_request_observations > 0)
+            && self.cost_status
+                == status(
+                    self.priced_requests,
+                    self.unpriced_requests,
+                    self.incomplete_request_observations,
+                )
             && (self.priced_requests > 0 || self.pricing_snapshots.is_empty())
             && self.pricing_snapshots.len() <= 256
             && self.pricing_snapshots.iter().all(|name| {
@@ -174,7 +198,17 @@ pub(crate) fn merge_models(
             "input_tokens",
             "output_tokens",
             "cached_input_tokens",
+            "cache_creation_input_tokens",
+            "incomplete_request_observations",
         ] {
+            if matches!(
+                key,
+                "cache_creation_input_tokens" | "incomplete_request_observations"
+            ) && merged.get(key).is_none()
+                && incoming.get(key).is_none()
+            {
+                continue;
+            }
             let total = merged[key]
                 .as_u64()
                 .unwrap_or(0)
@@ -215,7 +249,8 @@ pub(crate) fn schema() -> Value {
     json!({"type":"object","required":["priced_requests","unpriced_requests","cost_status","pricing_snapshots"],"properties":{
         "priced_requests":{"type":"integer","minimum":0},"unpriced_requests":{"type":"integer","minimum":0},
         "cost_status":{"type":"string","enum":["complete","partial","unknown"]},
-        "pricing_snapshots":{"type":"array","items":{"type":"string"}}
+        "pricing_snapshots":{"type":"array","items":{"type":"string"}},
+        "incomplete_request_observations":{"type":"integer","minimum":0}
     }})
 }
 
@@ -286,6 +321,40 @@ mod tests {
             CostStatus::Partial
         );
     }
+    #[test]
+    fn tokens_without_a_request_count_remain_unknown_through_reports_and_history() {
+        let row = json!({"requests":0,"input_tokens":30,"output_tokens":7,"cost_usd":0.0,
+            "priced_requests":0,"unpriced_requests":0,"cost_status":"unknown","incomplete_request_observations":1});
+        let unknown = Pricing::model(&row).unwrap();
+        assert_eq!(unknown.cost_status, CostStatus::Unknown);
+        assert_eq!(unknown.priced_requests + unknown.unpriced_requests, 0);
+        assert!(unknown.valid());
+        let encoded = serde_json::to_value(&unknown).unwrap();
+        let decoded: Pricing = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, unknown);
+        let mut merged = Map::new();
+        let models = json!({"subscription":row}).as_object().unwrap().clone();
+        merge_models(&mut merged, &models).unwrap();
+        merge_models(&mut merged, &models).unwrap();
+        assert_eq!(merged["subscription"]["requests"], 0);
+        assert_eq!(merged["subscription"]["input_tokens"], 60);
+        assert_eq!(merged["subscription"]["incomplete_request_observations"], 2);
+        let mut total = usage(Value::Object(merged));
+        total.input_tokens = 60;
+        total.output_tokens = 14;
+        let coverage = Pricing::from_usage(&total).unwrap();
+        assert_eq!(coverage.incomplete_request_observations, 2);
+        assert_eq!(coverage.cost_status, CostStatus::Unknown);
+        let known=Pricing::model(&json!({"requests":1,"priced_requests":1,"unpriced_requests":0,"cost_status":"complete","pricing_snapshot":"fixture"})).unwrap();
+        let combined = Pricing::aggregate([&known, &coverage]).unwrap();
+        assert_eq!(combined.cost_status, CostStatus::Partial);
+        assert_eq!(
+            (combined.priced_requests, combined.unpriced_requests),
+            (1, 0)
+        );
+        assert!(combined.valid());
+    }
+
     #[test]
     fn inconsistent_or_malformed_coverage_never_becomes_complete() {
         for fields in [

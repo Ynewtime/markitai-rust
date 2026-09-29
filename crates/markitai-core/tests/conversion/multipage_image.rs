@@ -1,6 +1,8 @@
 use super::*;
 use base64::Engine;
-use image::{DynamicImage, Rgb, RgbImage};
+#[cfg(target_os = "macos")]
+use image::DynamicImage;
+use image::{Rgb, RgbImage};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

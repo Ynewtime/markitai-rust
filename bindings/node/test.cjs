@@ -306,7 +306,9 @@ test('Numbers package support leaves ordinary directories, XML and visual modes 
         assert.ok(error instanceof markitai.ConversionError);
         assert.ok(codes.includes(error.code), `${error.code}: ${error.message}`);
         assert.equal(error.usage, undefined);
-        if (source !== ordinary) assert.match(error.message, /Numbers/i);
+        if ((override.ocr || override.screenshot) && process.platform !== 'darwin') {
+          assert.equal(error.message, 'Office page capture requires an available native PDF page renderer on this platform');
+        } else if (source !== ordinary) assert.match(error.message, /Numbers/i);
         return true;
       };
       assert.throws(() => markitai.convertSync(source, { ...options, ...override }), verify);

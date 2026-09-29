@@ -23,4 +23,10 @@ eq(attemptNotice({...old,diagnostics:{last_attempt:{status:'done',error:null,usa
 eq(attemptNotice(old),null);
 eq(attemptNotice({cost_usd:null,error:null,diagnostics:{last_attempt:{status:'done',error:null,usage}}}),{label:'Last attempt: Price unknown · $0.000000 known subtotal',error:''});
 eq(attemptNotice({...old,diagnostics:{last_attempt:{status:'error',error:'<script>literal message</script>',usage:{requests:1,by_model:{}}}}}),{label:'Last attempt failed',error:'<script>literal message</script>'});
+const aggregateOnly = {requests:0,cost_usd:0,by_model:{sub:{requests:0,input_tokens:30,output_tokens:7,priced_requests:0,unpriced_requests:0,cost_status:'unknown',incomplete_request_observations:1}}};
+eq(attemptPricing(aggregateOnly),{priced_requests:0,unpriced_requests:0,cost_status:'unknown',incomplete_request_observations:1});
+eq(priceText(0,attemptPricing(aggregateOnly)),'Price unknown · $0.000000 known subtotal');
+const mixed = {...aggregateOnly,requests:1,by_model:{...aggregateOnly.by_model,api:{requests:1,priced_requests:1,unpriced_requests:0,cost_status:'complete'}}};
+eq(attemptPricing(mixed),{priced_requests:1,unpriced_requests:0,cost_status:'partial',incomplete_request_observations:1});
+eq(priceText(0.5,attemptPricing(mixed)),'$0.500000 known subtotal · complete request count unavailable');
 console.log(JSON.stringify({checks,status:'passed'}));

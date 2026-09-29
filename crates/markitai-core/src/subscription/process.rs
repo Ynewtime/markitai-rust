@@ -183,9 +183,12 @@ impl Process {
             .spawn(move || {
                 // Drain instead of forwarding diagnostics which may contain credentials.
                 let mut buffer = [0u8; 8192];
-                while let Ok(size) = stderr.read(&mut buffer) {
-                    if size == 0 {
-                        break;
+                loop {
+                    match stderr.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
                     }
                 }
             })

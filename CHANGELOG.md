@@ -4,6 +4,8 @@
 
 ### Added
 
+- Optional official Claude CLI conversion, discovery, authentication and Unix login, preserving aggregate-only token usage without inventing request counts.
+
 - Native frozen Batch continuation and bounded remote reconciliation, including strict manual binding of uncertain submissions and output ownership checks before paid creation.
 - Optional official Copilot CLI conversion, model discovery/probe, authentication status and Unix login delegation, with observed unpriced usage and account-safe cache bypass.
 
@@ -83,6 +85,10 @@
 - Bounded native model discovery with credential-scoped caching, plus single-model connection probes without document conversion.
 
 ### Fixed
+
+- Correct Copilot protocol connect fields and its independent cache directory, verified against the pinned official runtime offline.
+- Release checkpoint locks explicitly across fork/exec inheritance; retry interrupted fixture/runtime reads without extending deadlines.
+- Remove redundant checkpoint directory barriers while preserving per-append file durability, and avoid unused worker classes.
 
 - Detect response-body timeouts when recording routing latency penalties.
 - Resolve the selected macOS SDK automatically for isolated Go static package consumers.

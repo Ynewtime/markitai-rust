@@ -12,24 +12,29 @@ const terminal = item => ['done','error'].includes(item.status);
 // Request coverage is independent of a zero or rounded cost subtotal.
 function attemptPricing(usage) {
   if (!usage) return null;
-  let priced = 0, unpriced = 0;
+  let priced = 0, unpriced = 0, incomplete = 0;
   for (const row of Object.values(usage.by_model || {})) {
     const requests = Number.isSafeInteger(row.requests) && row.requests > 0 ? row.requests : 0;
+    const unknown = Number.isSafeInteger(row.incomplete_request_observations) && row.incomplete_request_observations > 0 ? row.incomplete_request_observations : 0;
+    incomplete += unknown;
     if (!requests) continue;
     const known = row.priced_requests, missing = row.unpriced_requests;
-    const expected = known === 0 ? 'unknown' : missing > 0 ? 'partial' : 'complete';
+    const expected = known === 0 ? 'unknown' : missing > 0 || unknown > 0 ? 'partial' : 'complete';
     if (Number.isSafeInteger(known) && known >= 0 && Number.isSafeInteger(missing) && missing >= 0 && known + missing === requests && row.cost_status === expected) {
       priced += known; unpriced += missing;
     } else unpriced += requests;
   }
   if (Number.isSafeInteger(usage.requests)) unpriced += Math.max(0, usage.requests - priced - unpriced);
-  return priced + unpriced > 0 ? {priced_requests:priced, unpriced_requests:unpriced, cost_status:priced === 0 ? 'unknown' : unpriced > 0 ? 'partial' : 'complete'} : null;
+  if (priced + unpriced === 0 && incomplete === 0) return null;
+  const value = {priced_requests:priced, unpriced_requests:unpriced, cost_status:priced === 0 ? 'unknown' : unpriced > 0 || incomplete > 0 ? 'partial' : 'complete'};
+  if (incomplete > 0) value.incomplete_request_observations = incomplete;
+  return value;
 }
 function priceText(cost, pricing) {
   if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return '';
   const amount = `$${cost.toFixed(6)}`;
   if (pricing?.cost_status === 'complete') return `${amount} · all recorded requests priced`;
-  if (pricing?.cost_status === 'partial') return `${amount} known subtotal · ${pricing.unpriced_requests} unpriced request(s)`;
+  if (pricing?.cost_status === 'partial') return pricing.incomplete_request_observations > 0 ? `${amount} known subtotal · complete request count unavailable` : `${amount} known subtotal · ${pricing.unpriced_requests} unpriced request(s)`;
   if (pricing?.cost_status === 'unknown') return `Price unknown · ${amount} known subtotal`;
   return cost > 0 ? `${amount} recorded subtotal · pricing completeness unavailable` : '';
 }

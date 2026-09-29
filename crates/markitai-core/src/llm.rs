@@ -2,12 +2,14 @@
 mod accounting;
 pub(crate) mod batch;
 mod chunks;
+mod claude;
 mod copilot;
 mod document;
 pub(crate) mod flight;
 pub(crate) mod routing;
 mod service_probe;
 mod structured;
+mod subscription_accounting;
 mod vision;
 use crate::pricing::{self, BillingClass, Identity};
 use crate::{ConversionUsage, Error, LlmRuntime, Result, config, llm_cache};
@@ -486,8 +488,8 @@ fn enhance_cached(
     // Configured HTTP-model hits still need no credential or dotenv reads.
     let ambient = std::cell::OnceCell::new();
     let environment = || supplied_env.unwrap_or_else(|| ambient.get_or_init(config::environment));
-    let subscription_pool = copilot::configured(cfg)
-        .unwrap_or_else(|| copilot::pool_has_copilot(&automatic_entries(environment())));
+    let subscription_pool = claude::subscription_configured(cfg)
+        .unwrap_or_else(|| claude::subscription_pool(&automatic_entries(environment())));
     let cache = if subscription_pool
         || config::enabled(cfg, "/llm/pure")
         || remote(source_label)
@@ -532,7 +534,7 @@ fn enhance_cached(
         .map(|scope| llm_cache::key(markdown, &prompts.cache_scope, scope));
     let mut warnings = Vec::new();
     if subscription_pool {
-        warnings.push(copilot::WARNING.into());
+        warnings.push(claude::warning(cfg).into());
     }
     if let (Some(cache), Some(key)) = (&cache, &cache_key) {
         match cache.get(key) {
@@ -737,7 +739,7 @@ pub(crate) fn capabilities(cfg: &Value, env: &HashMap<String, String>) -> crate:
         entries.iter().any(|entry| {
             matches!(
                 entry.provider.as_str(),
-                "ollama" | "ollama_chat" | "copilot"
+                "ollama" | "ollama_chat" | "copilot" | "claude-agent"
             ) || entry.key.as_ref().is_some_and(|key| !key.is_empty())
         })
     });
@@ -765,7 +767,7 @@ pub(crate) fn vision_models(cfg: &Value, env: &HashMap<String, String>) -> Vec<S
                 && entry.supports_vision != Some(false)
                 && (matches!(
                     entry.provider.as_str(),
-                    "ollama" | "ollama_chat" | "copilot"
+                    "ollama" | "ollama_chat" | "copilot" | "claude-agent"
                 ) || entry.key.as_ref().is_some_and(|key| !key.is_empty()))
                 && seen.insert(entry.id.clone())
         })
@@ -805,8 +807,13 @@ fn deployments(cfg: &Value, env: &HashMap<String, String>) -> Result<Vec<Deploym
             continue;
         };
         let (provider, model_name) = model.split_once('/').unwrap_or(("openai", model));
-        if provider == "copilot" {
-            match copilot::deployment(entry, env, grouped) {
+        if matches!(provider, "copilot" | "claude-agent") {
+            let deployment = if provider == "copilot" {
+                copilot::deployment(entry, env, grouped)
+            } else {
+                claude::deployment(entry, env, grouped)
+            };
+            match deployment {
                 Ok(deployment) => result.push(deployment),
                 Err(error) => last_error = Some(error),
             }
@@ -1280,6 +1287,16 @@ fn run_mode(
                 let mut observation = routing::Observation::default();
                 let response = if entries[selected].provider == "copilot" {
                     copilot::request(
+                        &entries[selected],
+                        prompts,
+                        env,
+                        Duration::from_secs(timeout),
+                        stop,
+                        &mut usage,
+                        strategy.measured().then_some(&mut observation),
+                    )
+                } else if entries[selected].provider == "claude-agent" {
+                    claude::request(
                         &entries[selected],
                         prompts,
                         env,

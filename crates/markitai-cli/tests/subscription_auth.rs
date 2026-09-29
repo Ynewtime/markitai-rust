@@ -23,7 +23,8 @@ if sys.argv[1:] == ['login']:
     assert 'COPILOT_PROVIDER_API_KEY' not in os.environ
     state = json.loads((root / 'fixture.json').read_text())
     assert os.environ.get('HOME') == state['home']
-    (root / 'login.json').write_text(json.dumps({'pid':os.getpid(),'args':sys.argv[1:]}))
+    assert os.environ.get('COPILOT_CACHE_HOME') == state['cache_home']
+    (root / 'login.json').write_text(json.dumps({'pid':os.getpid(),'args':sys.argv[1:],'cache_home':os.environ.get('COPILOT_CACHE_HOME')}))
     sys.exit(state.get('login_exit', 0))"#,
         );
         std::fs::write(&executable, text).unwrap();
@@ -37,7 +38,7 @@ if sys.argv[1:] == ['login']:
         std::fs::write(
             self.root.path().join("fixture.json"),
             serde_json::to_vec(&json!({
-                "mode":mode,"home":std::env::var("HOME").ok(),"login_exit":exit
+                "mode":mode,"home":std::env::var("HOME").ok(),"login_exit":exit,"cache_home":self.root.path().join("private cache")
             }))
             .unwrap(),
         )
@@ -53,8 +54,10 @@ if sys.argv[1:] == ['login']:
         }
         command
             .env("MARKITAI_HOME", self.root.path().join("state"))
+            .env("CLAUDE_CLI_PATH", self.root.path().join("missing claude"))
             .env("COPILOT_CLI_PATH", &self.executable)
             .env("COPILOT_HOME", self.root.path())
+            .env("COPILOT_CACHE_HOME", self.root.path().join("private cache"))
             .env("COPILOT_GITHUB_TOKEN", "fixture-only")
             .env("OPENAI_API_KEY", "must-be-scrubbed")
             .env("COPILOT_PROVIDER_API_KEY", "must-be-scrubbed")
@@ -121,7 +124,14 @@ fn unavailable_runtime_and_other_adapters_remain_explicit() {
             .unwrap();
         assert!(result.status.success());
         let value: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(value["details"]["verification"], "unsupported");
+        assert_eq!(
+            value["details"]["verification"],
+            if provider == "claude" {
+                "unavailable"
+            } else {
+                "unsupported"
+            }
+        );
         if provider == "claude" {
             assert_eq!(value["sdk_installed"], false);
             assert!(value["cli_path"].is_null());
@@ -156,9 +166,86 @@ fn explicit_login_replaces_process_and_preserves_exit_home_and_configuration() {
         assert_eq!(login["pid"], pid);
         assert_eq!(login["args"], json!(["login"]));
         assert_eq!(
+            login["cache_home"],
+            json!(fixture.root.path().join("private cache"))
+        );
+        assert_eq!(
             std::fs::read(fixture.root.path().join("config.json")).unwrap(),
             b"{}\n"
         );
         assert!(result.stdout.is_empty());
     }
+}
+
+#[test]
+fn claude_status_and_login_delegate_to_official_runtime_with_private_auth_home() {
+    let fixture = Fixture::new("normal");
+    let executable = fixture.root.path().join("claude fixture");
+    std::fs::write(&executable, include_str!("claude_auth_fixture.py")).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = || {
+        let mut command = fixture.command();
+        command
+            .env("CLAUDE_CLI_PATH", &executable)
+            .env("CLAUDE_CONFIG_DIR", fixture.root.path())
+            .env("ANTHROPIC_API_KEY", "must-be-scrubbed")
+            .env("CLAUDE_CODE_OAUTH_TOKEN", "must-be-scrubbed");
+        command
+    };
+    for (mode, authenticated) in [("normal", true), ("signed-out", false), ("byok", false)] {
+        fixture.state(mode, 0);
+        let output = command()
+            .args(["auth", "claude", "status", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["authenticated"], authenticated);
+        assert_eq!(value["provider"], "claude-agent");
+        assert_eq!(value["sdk_installed"], false);
+        assert_eq!(value["details"]["native_adapter"], true);
+        assert_eq!(
+            value["cli_path"],
+            executable.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-secret"));
+        assert_eq!(
+            command()
+                .args(["auth", "claude", "status"])
+                .status()
+                .unwrap()
+                .code(),
+            Some(if authenticated { 0 } else { 1 })
+        );
+    }
+    let before = std::fs::read(fixture.root.path().join("config.json")).unwrap();
+    for exit in [0, 7] {
+        fixture.state("normal", exit);
+        let child = command()
+            .args(["auth", "claude", "login"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(exit));
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(fixture.root.path().join("claude-login.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["pid"], pid);
+        assert_eq!(record["home"], std::env::var("HOME").unwrap());
+        assert_eq!(
+            std::fs::read(fixture.root.path().join("config.json")).unwrap(),
+            before
+        );
+    }
+    let calls = std::fs::read_to_string(fixture.root.path().join("claude-calls.jsonl")).unwrap();
+    assert!(!calls.contains("--print"));
 }

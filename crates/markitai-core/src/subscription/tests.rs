@@ -50,7 +50,7 @@ mod unix {
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::write(
                 root.path().join("fixture.json"),
-                serde_json::to_vec(&json!({"mode":mode,"home":std::env::var("HOME").ok()}))
+                serde_json::to_vec(&json!({"mode":mode,"home":std::env::var("HOME").ok(),"cache_home":root.path().join("private cache")}))
                     .unwrap(),
             )
             .unwrap();
@@ -62,6 +62,13 @@ mod unix {
                 (
                     "COPILOT_HOME".into(),
                     root.path().to_string_lossy().into_owned(),
+                ),
+                (
+                    "COPILOT_CACHE_HOME".into(),
+                    root.path()
+                        .join("private cache")
+                        .to_string_lossy()
+                        .into_owned(),
                 ),
                 ("COPILOT_GITHUB_TOKEN".into(), "test-only-secret".into()),
                 ("GH_TOKEN".into(), "lower-priority-secret".into()),
@@ -139,6 +146,41 @@ mod unix {
                 .iter()
                 .any(|call| call["method"] == "session.send")
         );
+    }
+    #[test]
+    fn connect_rejects_legacy_display_fields_and_preserves_private_cache_override() {
+        let fixture = Fixture::new("normal");
+        {
+            let mut process =
+                process::Process::spawn(&fixture.cfg, Duration::from_secs(5), None).unwrap();
+            let failure = process.call("connect", json!({"clientInfo":{"name":"markitai","version":"0.1.0"},"supportedTaskKinds":[]}), None, &mut |_| Ok(())).unwrap_err();
+            assert_eq!(failure.kind, FailureKind::Protocol);
+        }
+        assert!(
+            status(&fixture.cfg, Duration::from_secs(5))
+                .unwrap()
+                .authenticated
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                fixture
+                    .root
+                    .path()
+                    .join("private cache/fixture-cache-access")
+            )
+            .unwrap(),
+            "private cache preserved"
+        );
+        let calls = fixture.calls();
+        let valid = calls
+            .iter()
+            .rev()
+            .find(|v| v["method"] == "connect")
+            .unwrap();
+        assert_eq!(valid["params"]["clientInfo"]["editorName"], "markitai");
+        assert!(valid["params"]["clientInfo"].get("name").is_none());
+        assert!(valid["params"]["clientInfo"].get("version").is_none());
+        fixture.assert_private_cwd_removed();
     }
     #[test]
     fn complete_preserves_unicode_chunks_and_ordered_memory_images() {

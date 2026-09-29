@@ -8,7 +8,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // These tests exercise the installed CLI boundary: saved reports and stdout are
 // different public JSON contracts. Every subprocess receives a private home and
@@ -262,9 +262,17 @@ impl Server {
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
                 let mut bytes = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    assert!(!remaining.is_zero(), "mock request deadline exceeded");
+                    stream.set_read_timeout(Some(remaining)).unwrap();
                     let mut chunk = [0u8; 4096];
-                    let count = stream.read(&mut chunk).unwrap();
+                    let count = match stream.read(&mut chunk) {
+                        Ok(count) => count,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => panic!("mock read: {error}"),
+                    };
                     assert!(count > 0, "request ended before headers/body completed");
                     bytes.extend_from_slice(&chunk[..count]);
                     if let Some(split) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {

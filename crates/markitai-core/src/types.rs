@@ -139,6 +139,14 @@ impl ConversionUsage {
     /// Whether every observed request has a recorded reviewed tariff quote.
     /// Legacy records with requests but no completeness metadata remain unknown.
     pub fn cost_complete(&self) -> bool {
+        if self.by_model.values().any(|row| {
+            row.get("incomplete_request_observations")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0
+        }) {
+            return false;
+        }
         if self.requests == 0 {
             return true;
         }

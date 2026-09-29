@@ -182,6 +182,26 @@ pub fn discover(request: &Value) -> Result<Value> {
             }
         });
     }
+    if provider == "claude-agent" {
+        if field(request, "api_key")?.is_some_and(|value| !value.is_empty())
+            || field(request, "api_base")?.is_some_and(|value| !value.is_empty())
+        {
+            return Err(Error::InvalidInput("Claude discovery uses official CLI authentication, not API credentials or a base URL".into()));
+        }
+        // A stored subscription can change accounts independently of this process.
+        let result = crate::subscription::claude::Config::from_env(&env).and_then(|config| {
+            crate::subscription::claude::models(&config, std::time::Duration::from_secs(15))
+                .map_err(|failure| failure.error)
+        });
+        return Ok(match result {
+            Ok(models) => {
+                json!({"provider":"claude-agent","status":"ok","source":"official_cli","authoritative":true,"cached":false,"stale":false,"models":models,"detail":"Models reported by the authenticated official Claude runtime"})
+            }
+            Err(_) => {
+                json!({"provider":"claude-agent","status":"unavailable","source":"official_cli","authoritative":false,"cached":false,"stale":false,"models":[],"detail":"Official Claude runtime or subscription authentication is unavailable"})
+            }
+        });
+    }
     let variable = match provider.as_str() {
         "openai" => Some("OPENAI_API_KEY"),
         "anthropic" => Some("ANTHROPIC_API_KEY"),
@@ -198,7 +218,7 @@ pub fn discover(request: &Value) -> Result<Value> {
     if let Some(base) = &base {
         checked_url(base)?;
     }
-    if matches!(provider.as_str(), "claude-agent" | "chatgpt") {
+    if provider == "chatgpt" {
         return Ok(discovery::unavailable(
             &provider,
             "This provider requires an unavailable OAuth or local runtime integration",

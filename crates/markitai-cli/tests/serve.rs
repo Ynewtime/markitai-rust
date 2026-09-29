@@ -521,7 +521,23 @@ impl Origin {
                         let gate = thread_gate.clone();
                         let entered = thread_entered.clone();
                         workers.push(std::thread::spawn(move||{
-            stream.set_nonblocking(false).unwrap();stream.set_read_timeout(Some(WAIT)).unwrap();stream.set_write_timeout(Some(WAIT)).unwrap();let mut request=Vec::new();let mut byte=[0];while stream.read(&mut byte).ok()==Some(1){request.push(byte[0]);if request.ends_with(b"\r\n\r\n"){break;}}
+            stream.set_nonblocking(false).unwrap();
+            stream.set_write_timeout(Some(WAIT)).unwrap();
+            let deadline = Instant::now() + WAIT;
+            let mut request = Vec::new();
+            let mut byte = [0];
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { return; }
+                stream.set_read_timeout(Some(remaining)).unwrap();
+                match stream.read(&mut byte) {
+                    Ok(1) => request.push(byte[0]),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    _ => return,
+                }
+                if request.ends_with(b"\r\n\r\n") { break; }
+                assert!(request.len() < 65536, "loopback header exceeds limit");
+            }
             let path=String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap_or("").to_owned();entered.fetch_add(1,Ordering::SeqCst);
             if path=="/hold"{let(lock,notify)=&*gate;let ready=lock.lock().unwrap_or_else(|e|e.into_inner());let(ready,_)=notify.wait_timeout_while(ready,WAIT,|ready|!*ready).unwrap_or_else(|e|e.into_inner());if !*ready{return;}}
             let body=format!("<html><title>Local page</title><article><h1>Local article</h1><p>Origin response for {path}.</p></article></html>");let response=format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());let _=stream.write_all(response.as_bytes());

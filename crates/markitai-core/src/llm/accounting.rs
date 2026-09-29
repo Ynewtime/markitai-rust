@@ -99,7 +99,10 @@ fn snapshots(value: &Value, into: &mut BTreeSet<String>) {
 fn annotate(value: &mut Value, priced: u64, unpriced: u64, snapshots: BTreeSet<String>) {
     value["priced_requests"] = json!(priced);
     value["unpriced_requests"] = json!(unpriced);
-    value["cost_status"] = json!(match (priced > 0, unpriced > 0) {
+    value["cost_status"] = json!(match (
+        priced > 0,
+        unpriced > 0 || count(value, "incomplete_request_observations") > 0
+    ) {
         (true, false) => "complete",
         (true, true) => "partial",
         _ => "unknown",
@@ -159,7 +162,17 @@ pub(super) fn merge(target: &mut ConversionUsage, source: &ConversionUsage) {
             "input_tokens",
             "output_tokens",
             "cached_input_tokens",
+            "cache_creation_input_tokens",
+            "incomplete_request_observations",
         ] {
+            if matches!(
+                name,
+                "cache_creation_input_tokens" | "incomplete_request_observations"
+            ) && entry.get(name).is_none()
+                && values.get(name).is_none()
+            {
+                continue;
+            }
             entry[name] = json!(count(entry, name).saturating_add(count(values, name)));
         }
         entry["cost_usd"] = json!(cost(entry) + cost(values));
@@ -191,16 +204,29 @@ pub(super) fn difference(after: &ConversionUsage, before: &ConversionUsage) -> C
                 "input_tokens",
                 "output_tokens",
                 "cached_input_tokens",
+                "cache_creation_input_tokens",
+                "incomplete_request_observations",
             ] {
+                if matches!(
+                    name,
+                    "cache_creation_input_tokens" | "incomplete_request_observations"
+                ) && entry.get(name).is_none()
+                    && old.get(name).is_none()
+                {
+                    continue;
+                }
                 entry[name] = json!(count(entry, name).saturating_sub(count(old, name)));
             }
             entry["cost_usd"] = json!((cost(entry) - cost(old)).max(0.0));
         }
         annotate(entry, priced, unpriced, sources);
     }
-    usage
-        .by_model
-        .retain(|_, entry| count(entry, "requests") > 0);
+    usage.by_model.retain(|_, entry| {
+        count(entry, "requests") > 0
+            || count(entry, "input_tokens") > 0
+            || count(entry, "output_tokens") > 0
+            || count(entry, "incomplete_request_observations") > 0
+    });
     usage
 }
 

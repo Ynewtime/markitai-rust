@@ -47,6 +47,14 @@ pub(super) fn copilot_status(env: &HashMap<String, String>) -> subscription::Aut
         details: serde_json::json!({"source":"official_cli","verification":"unavailable"}),
     })
 }
+pub(super) fn claude_status(env: &HashMap<String, String>) -> subscription::AuthStatus {
+    subscription::claude::Config::from_env(env)
+        .and_then(|cfg| subscription::claude::status(&cfg, Duration::from_secs(15)).map_err(|failure| failure.error))
+        .unwrap_or_else(|error| subscription::AuthStatus {
+            provider: "claude-agent", authenticated: false, user: None, expires_at: None,
+            error: Some(error.to_string()), details: serde_json::json!({"source":"official_cli","verification":"unavailable","native_adapter":true}),
+        })
+}
 fn unavailable(provider: &'static str) -> subscription::AuthStatus {
     subscription::AuthStatus {
         provider,
@@ -85,7 +93,7 @@ fn terminal_text(value: &str) -> String {
 pub(super) fn run(command: Option<&Command>) -> CliResult<i32> {
     let env = config::environment();
     let Some(command) = command else {
-        display(&unavailable("claude-agent"));
+        display(&claude_status(&env));
         display(&unavailable("chatgpt"));
         display(&copilot_status(&env));
         return Ok(0);
@@ -96,22 +104,27 @@ pub(super) fn run(command: Option<&Command>) -> CliResult<i32> {
         Command::Chatgpt { command } => ("chatgpt", command),
     };
     if matches!(action, Some(Action::Login)) {
-        if provider != "copilot" {
+        if !matches!(provider, "copilot" | "claude-agent") {
             return Err(runtime(
                 "This subscription login adapter is not implemented",
             ));
         }
-        return login(&env);
+        return login(&env, provider);
     }
     let status = if provider == "copilot" {
         copilot_status(&env)
+    } else if provider == "claude-agent" {
+        claude_status(&env)
     } else {
         unavailable(provider)
     };
     if matches!(action, Some(Action::Status { json: true })) {
         let mut value = serde_json::to_value(status).map_err(runtime)?;
         if provider == "claude-agent" {
-            value["cli_path"] = serde_json::Value::Null;
+            value["cli_path"] = subscription::claude::Config::from_env(&env)
+                .ok()
+                .map(|cfg| serde_json::json!(cfg.executable()))
+                .unwrap_or(serde_json::Value::Null);
             value["sdk_installed"] = serde_json::json!(false);
         }
         println!("{}", serde_json::to_string_pretty(&value).map_err(runtime)?);
@@ -124,11 +137,26 @@ pub(super) fn run(command: Option<&Command>) -> CliResult<i32> {
 }
 
 #[cfg(unix)]
-fn login(env: &HashMap<String, String>) -> CliResult<i32> {
+fn login(env: &HashMap<String, String>, provider: &str) -> CliResult<i32> {
     use std::os::unix::process::CommandExt;
-    let cfg = subscription::CopilotConfig::from_env(env).map_err(runtime)?;
-    let mut command = std::process::Command::new(cfg.executable());
-    command.arg("login").env_clear();
+    let executable = if provider == "claude-agent" {
+        subscription::claude::Config::from_env(env)
+            .map_err(runtime)?
+            .executable()
+            .to_owned()
+    } else {
+        subscription::CopilotConfig::from_env(env)
+            .map_err(runtime)?
+            .executable()
+            .to_owned()
+    };
+    let mut command = std::process::Command::new(executable);
+    command.env_clear();
+    if provider == "claude-agent" {
+        command.args(["auth", "login"]);
+    } else {
+        command.arg("login");
+    }
     for key in [
         "HOME",
         "PATH",
@@ -137,11 +165,23 @@ fn login(env: &HashMap<String, String>) -> CliResult<i32> {
         "LC_ALL",
         "TERM",
         "COLORTERM",
-        "COPILOT_HOME",
-        "COPILOT_GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
     ] {
+        if let Some(value) = env.get(key).cloned().or_else(|| std::env::var(key).ok()) {
+            command.env(key, value);
+        }
+    }
+    let provider_keys: &[&str] = if provider == "claude-agent" {
+        &["CLAUDE_CONFIG_DIR"]
+    } else {
+        &[
+            "COPILOT_HOME",
+            "COPILOT_CACHE_HOME",
+            "COPILOT_GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+        ]
+    };
+    for &key in provider_keys {
         if let Some(value) = env.get(key).cloned().or_else(|| std::env::var(key).ok()) {
             command.env(key, value);
         }
@@ -150,12 +190,12 @@ fn login(env: &HashMap<String, String>) -> CliResult<i32> {
     // official login exit status without adding an unbounded intermediary waiter.
     let _error = command.exec();
     Err(runtime(
-        "The official Copilot login process could not be started",
+        "The official subscription login process could not be started",
     ))
 }
 #[cfg(not(unix))]
-fn login(_env: &HashMap<String, String>) -> CliResult<i32> {
+fn login(_env: &HashMap<String, String>, _provider: &str) -> CliResult<i32> {
     Err(runtime(
-        "Copilot interactive login delegation is not supported on this platform",
+        "Subscription interactive login delegation is not supported on this platform",
     ))
 }

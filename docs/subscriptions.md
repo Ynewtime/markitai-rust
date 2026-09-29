@@ -29,7 +29,8 @@ prints no credential and does not rewrite the configured model list.
 
 Configure the existing `llm.model_list[].litellm_params.model` as `copilot/MODEL`.
 `COPILOT_CLI_PATH` selects an executable; `COPILOT_HOME` selects its official auth
-home when provided. Explicit token precedence is COPILOT_GITHUB_TOKEN, GH_TOKEN,
+home when provided; `COPILOT_CACHE_HOME` independently selects its cache directory.
+The connect handshake uses the pinned `editorName`/`editorVersion` fields. Explicit token precedence is COPILOT_GITHUB_TOKEN, GH_TOKEN,
 GITHUB_TOKEN. Otherwise the official runtime resolves existing authentication.
 No HTTP api_key/api_base or strict max_tokens setting is accepted for this route;
 the pinned subscription protocol cannot enforce those settings. Missing login is
@@ -64,14 +65,76 @@ byte-limit claim. On Unix, process-group cleanup ends children before temporary
 workspaces are removed. Windows execution and login remain unsupported until its
 process-tree boundary is implemented and tested.
 
-## Other subscriptions and evidence
+## Claude
 
-The `auth claude status` and `auth chatgpt status` command shapes report explicit
-unsupported status at this checkpoint; they do not claim authenticated readiness.
-Their runtime adapters remain separate work. No private OAuth protocol or API-
-equivalent subscription dollar estimate is imported from the Python reference.
+Round 32 integrates `claude-agent/MODEL` through the separately installed official
+Claude Code CLI 2.1.284. The protocol reference is official TypeScript SDK 0.3.284
+and CLI release `8364969e9f5234ef3d9743cf7c790e9aab0ac3b1`; neither Python nor Node SDK
+is required by the Rust adapter. `CLAUDE_CLI_PATH` selects the executable and
+`CLAUDE_CONFIG_DIR` selects the official runtime's state. HOME is preserved.
+Markitai never parses a token file or implements its own OAuth refresh.
 
-The committed fixtures are authored executable processes using fake credentials,
-private MARKITAI_HOME/COPILOT_HOME and inherited HOME. Eleven adapter groups, seven conversion groups and three CLI process tests pass,
-also included in the full 1,369-execution source gate. Real official-runtime compatibility, a real login and actual
-subscription inference are distinct evidence and have not been asserted here.
+```text
+markitai auth claude status --json
+markitai auth claude login
+```
+
+Status accepts only the official subscription account method. Login replaces the
+Unix process with official `claude auth login`, preserving terminal, PID and exit
+status. API key/base and OAuth-token environment overrides are removed from the
+child; API settings and strict max_tokens are not accepted on this subscription
+route. JSON status remains zero-exit when signed out, matching the public command.
+The retained `sdk_installed` status field is false because a Python SDK is not
+used; `details.native_adapter` identifies the native adapter.
+
+Text, structured JSON text and ordered in-memory images use the shared request
+budget, concurrency, cancellation, model groups and content validation. Model
+listing initializes the runtime without a user prompt; its catalog has no vision
+capability field, so discovery does not advertise vision automatically. A caller
+may explicitly configure the supported image path.
+
+The runtime receives a fresh private workspace, safe/restricted mode, empty tools,
+no permission prompts, strict empty MCP, empty setting sources, no Chrome/slash
+commands/session persistence and a one-turn limit. Four pinned built-in agent
+names are permitted as catalog metadata; they grant no Agent tool authority.
+Unexpected tools, callbacks, background/subagent events, provider changes and
+model changes fail. Managed administrative policy can still run hooks; Markitai
+cannot override it. These controls are not an OS sandbox for a replacement binary.
+
+Success requires a valid terminal result and successful process exit, not partial
+assistant text. One deadline covers startup and response; process groups are killed
+and reaped on Unix. Input, events, stdout and stderr are bounded. Interrupted pipe
+reads retry within that original deadline. Stdout EOF waits for the bounded stderr
+drain, so a late flood cannot become a successful response. Other platforms remain
+unsupported until equivalent process cleanup is implemented.
+
+Actual assistant message IDs count observed requests. Terminal usage and per-model
+usage overlap with those calls; they are reconciled, never added twice. Per-model
+terminal totals include more than main-loop totals. Aggregate-only tokens remain
+visible with zero observed requests and `incomplete_request_observations`; that
+zero does not mean no requests happened. Conflicting totals retain known evidence
+and fail. Shared ledgers, reports/history and the web UI preserve unknown request
+counts. Runtime dollar estimates are ignored and subscription price is unknown.
+A positive dollar budget refuses before the runtime starts inference.
+
+Pools containing either Claude or Copilot bypass persistent LLM cache and active
+request merging because a stable runtime state path does not establish account
+identity. Transport failures are not replayed by the adapter. Explicit configured
+fallback groups and semantic content retries retain the shared budget and all
+observed usage; neither is a guarantee of one provider-internal paid call.
+
+## Evidence boundaries and next provider
+
+R31 optimized Copilot process fixtures passed. Round 32 additionally exercised
+both exact official macOS arm64 runtimes under OS-denied network, real HOME files
+and keychain access. Version, Copilot connection/status and Claude initialization
+were checked; the native debug CLI also successfully reports both as signed out.
+That official check exposed and corrected Copilot's connect field names and
+separate cache-home routing. It does not establish a real login or authenticated
+inference. Authored fixtures cover actual native conversion and failure accounting
+without sending provider requests. Round 32 release/install verification is tracked
+in [CONTROL](CONTROL.md) until its final artifact record is published.
+
+`auth chatgpt status` still reports unsupported readiness while the official-runtime
+adapter is developed. No private OAuth protocol or API-equivalent subscription
+price is imported from the reference project.

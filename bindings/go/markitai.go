@@ -64,7 +64,7 @@ func Bool(value bool) *bool { return &value }
 func Version() string { return C.GoString(C.markitai_version()) }
 
 // Convert blocks until the conversion finishes. Concurrent calls are allowed.
-// No subprocess or foreign-language runtime is started.
+// Built-in conversion calls Rust in process; optional provider/browser/Office runtimes may start children.
 func Convert(source string, options *Options) (*ConversionOutput, error) {
 	request, err := json.Marshal(struct {
 		Source  string   `json:"source"`

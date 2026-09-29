@@ -7,7 +7,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct ModelServer {
     base: String,
@@ -39,9 +39,17 @@ impl ModelServer {
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
                 let mut request = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(3);
                 loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    assert!(!remaining.is_zero(), "mock request deadline exceeded");
+                    stream.set_read_timeout(Some(remaining)).unwrap();
                     let mut chunk = [0u8; 4096];
-                    let count = stream.read(&mut chunk).unwrap();
+                    let count = match stream.read(&mut chunk) {
+                        Ok(count) => count,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => panic!("mock read: {error}"),
+                    };
                     assert!(count > 0, "request ended early");
                     request.extend_from_slice(&chunk[..count]);
                     if let Some(split) = request.windows(4).position(|s| s == b"\r\n\r\n") {

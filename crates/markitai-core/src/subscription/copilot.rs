@@ -20,7 +20,7 @@ fn start(
     cancel: Option<&AtomicBool>,
 ) -> Result<Process, Failure> {
     let mut process = Process::spawn(config, timeout, cancel)?;
-    let connected = process.call("connect", json!({"clientInfo":{"name":"markitai","version":env!("CARGO_PKG_VERSION")},"supportedTaskKinds":[]}), cancel, &mut no_events)?;
+    let connected = process.call("connect", json!({"clientInfo":{"editorName":"markitai","editorVersion":env!("CARGO_PKG_VERSION")},"supportedTaskKinds":[]}), cancel, &mut no_events)?;
     if connected.get("protocolVersion").and_then(Value::as_u64) != Some(COPILOT_PROTOCOL) {
         return Err(Failure::new(
             FailureKind::Unsupported,

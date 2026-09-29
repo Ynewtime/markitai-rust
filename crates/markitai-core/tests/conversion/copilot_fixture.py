@@ -24,7 +24,13 @@ while True:
  request=json.loads(sys.stdin.buffer.read(int(headers['content-length'])))
  with (root/'requests.jsonl').open('a') as log:log.write(json.dumps(request,ensure_ascii=False)+'\n')
  method=request['method'];p=request.get('params',{})
- if method=='connect':reply(request,{'protocolVersion':3})
+ if method=='connect':
+  client=p.get('clientInfo',{})
+  if set(client)-{'editorName','editorVersion','extensionName','extensionVersion'}:
+   send({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32602,'message':'Invalid connect request: unknown clientInfo field'}});continue
+  assert client.get('editorName')=='markitai' and isinstance(client.get('editorVersion'),str) and client['editorVersion']
+  assert p.get('supportedTaskKinds')==[]
+  reply(request,{'protocolVersion':3})
  elif method=='status.get':reply(request,{'version':'1.0.90-2','protocolVersion':3})
  elif method=='auth.getStatus':reply(request,{'isAuthenticated':True,'login':'private-fixture','authType':'env'})
  elif method=='models.list':reply(request,{'models':[{'id':'fixture','name':'Fixture','capabilities':{'supports':{'vision':True}}}]})

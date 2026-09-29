@@ -22,6 +22,8 @@ pub(crate) struct StateStore {
     pending: Vec<Vec<u8>>,
     pending_bytes: usize,
     journal_bytes: usize,
+    // Set only after the current journal entry and data are durably synced.
+    journal_synced_identity: Option<(u64, u64)>,
     durable_sequence: u64,
     begun: bool,
     poisoned: bool,
@@ -29,6 +31,18 @@ pub(crate) struct StateStore {
     #[cfg(test)]
     fault: Option<FaultPoint>,
 }
+
+impl Drop for StateStore {
+    fn drop(&mut self) {
+        // A fork child can retain this open file description until exec. Release
+        // our lock explicitly when the owning store ends, without flushing work.
+        let _ = self._lock.unlock();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "lock_tests.rs"]
+mod lock_tests;
 
 enum DiskBase {
     Missing,
@@ -103,6 +117,7 @@ impl StateStore {
             pending: Vec::new(),
             pending_bytes: 0,
             journal_bytes: 0,
+            journal_synced_identity: None,
             durable_sequence: 0,
             begun: false,
             poisoned: false,
@@ -120,6 +135,7 @@ impl StateStore {
             ));
         }
         self.begun = false;
+        self.journal_synced_identity = None;
         self.snapshot = None;
         self.durable_sequence = 0;
         let mut snapshot = match self.read_base()? {
@@ -416,7 +432,8 @@ impl StateStore {
             options.mode(0o600);
         }
         let mut file = options.open(&self.journal)?;
-        if !file.metadata()?.is_file() || file.metadata()?.len() != self.journal_bytes as u64 {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() != self.journal_bytes as u64 {
             return Err(Error::Invalid("journal changed outside its owner".into()));
         }
         #[cfg(test)]
@@ -432,7 +449,16 @@ impl StateStore {
         #[cfg(test)]
         self.fail_at(FaultPoint::BeforeJournalSync)?;
         file.sync_all()?;
-        sync_directory(&self.directory)?;
+        let identity = journal_identity(&metadata);
+        // Appending changes file data, not an already durable directory entry.
+        // A fresh/replaced journal must sync the namespace before acknowledging
+        // its sequence. Platforms without native identity retain the barrier.
+        if identity.is_none() || identity != self.journal_synced_identity {
+            #[cfg(test)]
+            self.fail_at(FaultPoint::BeforeJournalDirectorySync)?;
+            sync_directory(&self.directory)?;
+        }
+        self.journal_synced_identity = identity;
         self.journal_bytes += self.pending_bytes;
         self.pending_bytes = 0;
         self.pending.clear();
@@ -465,12 +491,16 @@ impl StateStore {
         sync_directory(&self.directory)?;
         #[cfg(test)]
         self.fail_at(FaultPoint::AfterBaseSync)?;
-        if regular_file(&self.journal, self.allow_symlinks)? {
+        let removed_journal = regular_file(&self.journal, self.allow_symlinks)?;
+        if removed_journal {
             fs::remove_file(&self.journal)?;
         }
         #[cfg(test)]
         self.fail_at(FaultPoint::AfterJournalRemove)?;
-        sync_directory(&self.directory)?;
+        if removed_journal {
+            sync_directory(&self.directory)?;
+        }
+        self.journal_synced_identity = None;
         self.journal_bytes = 0;
         self.pending_bytes = 0;
         self.pending.clear();
@@ -636,6 +666,19 @@ fn read_limited(path: &Path, allow_symlinks: bool, limit: usize) -> Result<Optio
     Ok(Some(bytes))
 }
 
+fn journal_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
@@ -656,11 +699,11 @@ fn create_directory(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     // Sync each new parent entry too: syncing only `states` does not make a
     // previously absent output/.markitai/states chain durable on Unix.
-    for directory in missing {
+    for directory in &missing {
         sync_directory(directory)?;
-        if let Some(parent) = directory.parent() {
-            sync_directory(parent)?;
-        }
+    }
+    if let Some(parent) = missing.last().and_then(|directory| directory.parent()) {
+        sync_directory(parent)?;
     }
     Ok(())
 }
@@ -678,6 +721,7 @@ pub(super) enum FaultPoint {
     AfterBaseSync,
     PartialJournalAppend,
     BeforeJournalSync,
+    BeforeJournalDirectorySync,
     AfterJournalRemove,
 }
 
@@ -725,6 +769,85 @@ mod tests {
 
     fn file_key() -> ItemKey {
         ItemKey::File("a.txt".into())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_journal_append_replays_and_compaction_requires_a_new_namespace_fence() {
+        let (_dir, scope, snapshot) = setup();
+        let mut store = open(&scope);
+        store.begin(snapshot).unwrap();
+        store
+            .record(file_key(), json!({"status":"failed","error":"first"}))
+            .unwrap();
+        assert_eq!(store.flush().unwrap(), 1);
+        store.inject_fault(FaultPoint::BeforeJournalDirectorySync);
+        store
+            .record(file_key(), json!({"status":"completed","error":null}))
+            .unwrap();
+        assert_eq!(store.flush().unwrap(), 2);
+        store.compact().unwrap();
+        store
+            .record(file_key(), json!({"status":"failed","error":"third"}))
+            .unwrap();
+        assert!(store.flush().is_err());
+        assert_eq!(store.durable_sequence, 2);
+        assert!(
+            store
+                .record(file_key(), json!({"status":"completed"}))
+                .is_err()
+        );
+        // The last successful checkpoint remains complete even when the next
+        // namespace fence fails; a visible but unacknowledged tail may replay.
+        let base = codec::decode(
+            &fs::read(&store.base).unwrap(),
+            &scope,
+            false,
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(base.documents["a.txt"].status, Status::Completed);
+        assert_eq!(base.checkpoint.unwrap().applied_sequence, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_bytes_replacement_cannot_reuse_a_previous_journal_namespace_fence() {
+        use std::os::unix::fs::MetadataExt;
+        let (_dir, scope, snapshot) = setup();
+        let mut store = open(&scope);
+        store.begin(snapshot).unwrap();
+        store
+            .record(file_key(), json!({"status":"failed","error":"first"}))
+            .unwrap();
+        store.flush().unwrap();
+        let original_inode = fs::metadata(&store.journal).unwrap().ino();
+        let mut replacement = tempfile::NamedTempFile::new_in(&store.directory).unwrap();
+        replacement
+            .write_all(&fs::read(&store.journal).unwrap())
+            .unwrap();
+        replacement.persist(&store.journal).unwrap();
+        assert_ne!(original_inode, fs::metadata(&store.journal).unwrap().ino());
+        store.inject_fault(FaultPoint::BeforeJournalDirectorySync);
+        store
+            .record(file_key(), json!({"status":"completed"}))
+            .unwrap();
+        assert!(store.flush().is_err());
+        assert_eq!(store.durable_sequence, 1);
+    }
+
+    #[test]
+    fn first_journal_namespace_failure_never_acknowledges_the_new_sequence() {
+        let (_dir, scope, snapshot) = setup();
+        let mut store = open(&scope);
+        store.begin(snapshot).unwrap();
+        store.inject_fault(FaultPoint::BeforeJournalDirectorySync);
+        store
+            .record(file_key(), json!({"status":"completed"}))
+            .unwrap();
+        assert!(store.flush().is_err());
+        assert_eq!(store.durable_sequence, 0);
+        assert!(store.flush().is_err());
     }
 
     #[test]

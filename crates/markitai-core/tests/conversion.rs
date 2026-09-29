@@ -694,3 +694,6 @@ mod request_coalescing;
 
 #[path = "conversion/copilot.rs"]
 mod copilot;
+
+#[path = "conversion/claude.rs"]
+mod claude;

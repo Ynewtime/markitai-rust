@@ -96,7 +96,7 @@ pub(crate) fn process_vision_with_runtime(
         automatic = automatic_entries(environment());
         &automatic
     };
-    let subscription_pool = copilot::pool_has_copilot(models);
+    let subscription_pool = claude::subscription_pool(models);
     let cache = if subscription_pool {
         None
     } else {
@@ -131,7 +131,7 @@ pub(crate) fn process_vision_with_runtime(
     let (sources, aligned) = partition(request.markdown, request.frames, count);
     let mut warnings = Vec::new();
     if subscription_pool {
-        warnings.push(copilot::WARNING.into());
+        warnings.push(claude::warning(cfg).into());
     }
     if !aligned && count > 1 && !request.markdown.trim().is_empty() {
         warnings.push("Visual source text has no complete ordered page map; all text was retained once across batches without claiming exact text-to-page alignment.".into());
