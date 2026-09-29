@@ -2,6 +2,7 @@ use super::{
     State, store,
     types::{ApiError, ApiResult, Item, now},
 };
+use crate::diagnostics::{AttemptDiagnostics, Operation};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde_json::{Value, json};
 use std::{
@@ -266,7 +267,7 @@ async fn convert_one(
     cfg["output"]["filename"] = json!(format!("{base}.md"));
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        markitai_core::convert_with_context(
+        markitai_core::convert_with_context_detailed(
             &target,
             markitai_core::ConvertOptions {
                 output_dir: Some(out),
@@ -296,6 +297,7 @@ async fn convert_one(
                 .map(|reason| format!("skipped ({reason})"));
             item.llm_enhanced = result.llm_output_path.is_some();
             item.cost_usd = Some(result.usage.cost_usd);
+            item.diagnostics = AttemptDiagnostics::completed(Operation::Convert, result.usage);
             item.warnings = result.warnings;
             item.output = result.llm_output_path.or(result.output_path).and_then(|p| {
                 p.strip_prefix(job.folder.join("out"))
@@ -315,15 +317,18 @@ async fn convert_one(
                     .collect(),
             );
         }
-        Ok(Err(markitai_core::Error::ImageOnly(_))) => {
+        Ok(Err(failure)) if matches!(&failure.error, markitai_core::Error::ImageOnly(_)) => {
             item.status = "done".into();
             item.skipped = true;
             item.skip_reason = Some("image_only".into());
             item.error = Some("skipped (image_only)".into());
         }
-        Ok(Err(error)) => {
+        Ok(Err(failure)) => {
             item.status = "error".into();
-            item.error = Some(error.to_string());
+            let message = failure.error.to_string();
+            item.diagnostics =
+                AttemptDiagnostics::failed(Operation::Convert, message.clone(), failure.usage);
+            item.error = Some(message);
         }
         Err(_) => {
             item.status = "error".into();

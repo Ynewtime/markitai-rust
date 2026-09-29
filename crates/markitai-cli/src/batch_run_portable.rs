@@ -82,7 +82,10 @@ pub(super) fn run(
                                 index,
                                 started,
                                 started_at,
-                                &Err("Conversion worker panicked".into()),
+                                &Err(markitai_core::Error::Conversion(
+                                    "Conversion worker panicked".into(),
+                                )
+                                .into()),
                             )
                         });
                         if sender.send(record).is_err() {

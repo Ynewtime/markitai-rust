@@ -118,6 +118,8 @@ pub(super) struct Item {
     pub duration_ms: Option<u64>,
     pub finished_at: Option<String>,
     pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<crate::diagnostics::AttemptDiagnostics>,
     #[serde(default)]
     pub llm_enhanced: bool,
     #[serde(default = "convert_operation")]
@@ -150,6 +152,7 @@ impl Item {
             duration_ms: None,
             finished_at: None,
             cost_usd: None,
+            diagnostics: None,
             llm_enhanced: false,
             operation: "convert".into(),
             skipped: false,

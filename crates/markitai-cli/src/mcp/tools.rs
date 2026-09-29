@@ -1,4 +1,5 @@
-use super::{State, jobs};
+use super::{State, failure::Failure, jobs};
+use crate::diagnostics::{AttemptDiagnostics, Operation};
 use markitai_core::{ConversionOutput, ConvertContext, ConvertOptions, LlmRuntime};
 use rmcp::model::Tool;
 use serde::Deserialize;
@@ -96,7 +97,7 @@ pub(super) async fn dispatch(
     state: &Arc<State>,
     name: &str,
     value: Value,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     match name {
         "convert_document" => {
             let args: Document = arguments(value)?;
@@ -132,12 +133,18 @@ pub(super) async fn dispatch(
             let concurrency = args.concurrency.unwrap_or(10).max(1) as u64;
             let concurrency = concurrency.min(args.sources.len() as u64) as usize;
             jobs::start(state, args.sources, directory, args.options, concurrency)
+                .map_err(Into::into)
         }
         "job_status" => {
             let args: Status = arguments(value)?;
-            state.jobs.lock().unwrap().snapshot(&args.job_id)
+            state
+                .jobs
+                .lock()
+                .unwrap()
+                .snapshot(&args.job_id)
+                .map_err(Into::into)
         }
-        _ => Err(format!("Unknown tool: {name}")),
+        _ => Err(format!("Unknown tool: {name}").into()),
     }
 }
 
@@ -147,7 +154,7 @@ pub(super) fn convert(
     directory: PathBuf,
     options: Options,
     runtime: Option<&LlmRuntime>,
-) -> Result<Value, String> {
+) -> Result<Value, Failure> {
     let cfg = state.config()?;
     let source = if is_url(source) {
         source.to_owned()
@@ -156,24 +163,37 @@ pub(super) fn convert(
     };
     let skip_paths = existing_paths(&source, &directory, &cfg);
     let allow_symlinks = markitai_core::config::enabled(&cfg, "/output/allow_symlinks");
-    let mut output = markitai_core::convert_with_context(&source, ConvertOptions {
-        output_dir: Some(directory.clone()), config: Some(cfg), llm: options.llm,
-        ocr: options.ocr, screenshot: options.screenshot, alt: options.alt,
-        desc: options.desc, profile: options.profile,
-    }, ConvertContext { llm_runtime: runtime, ..Default::default() }).map_err(|error| {
-        if matches!(error, markitai_core::Error::NoModelConfigured) {
-            format!("{error}. For this MCP server, set MODEL and a provider API key in the env block of its mcpServers entry, or configure llm.model_list.")
-        } else { error.to_string() }
-    })?;
+    let mut output = markitai_core::convert_with_context_detailed(
+        &source,
+        ConvertOptions {
+            output_dir: Some(directory.clone()),
+            config: Some(cfg),
+            llm: options.llm,
+            ocr: options.ocr,
+            screenshot: options.screenshot,
+            alt: options.alt,
+            desc: options.desc,
+            profile: options.profile,
+        },
+        ConvertContext {
+            llm_runtime: runtime,
+            ..Default::default()
+        },
+    )
+    .map_err(Failure::from)?;
     if output.skip_reason.as_deref() == Some("exists")
         && let Some((base, enhanced)) = skip_paths
     {
-        if let Some((frontmatter, markdown)) = read_existing(&enhanced, allow_symlinks)? {
+        if let Some((frontmatter, markdown)) = read_existing(&enhanced, allow_symlinks)
+            .map_err(|error| Failure::observed(error, output.usage.clone()))?
+        {
             output.llm_output_path = Some(enhanced);
             output.llm_markdown = Some(markdown);
             output.frontmatter = frontmatter;
         }
-        if let Some((frontmatter, markdown)) = read_existing(&base, allow_symlinks)? {
+        if let Some((frontmatter, markdown)) = read_existing(&base, allow_symlinks)
+            .map_err(|error| Failure::observed(error, output.usage.clone()))?
+        {
             output.output_path = Some(base);
             output.markdown = markdown;
             if output.frontmatter.is_empty() {
@@ -245,15 +265,62 @@ fn project(output: ConversionOutput, directory: &Path) -> Value {
     } else {
         text
     };
-    json!({"source":output.source,"markdown":text,"truncated":truncated,
+    let mut value = json!({"source":output.source,"markdown":text,"truncated":truncated,
         "markdown_file":output.llm_output_path.or(output.output_path),"output_dir":directory,
         "assets":output.assets,"screenshots":output.screenshots,"cost_usd":output.usage.cost_usd,
         "skip_reason":output.skip_reason,"duration_s":(output.duration * 100.0).round_ties_even() / 100.0,
-        "warnings":output.warnings})
+        "warnings":output.warnings});
+    if let Some(diagnostics) = AttemptDiagnostics::completed(Operation::Convert, output.usage) {
+        value["diagnostics"] = json!(diagnostics);
+    }
+    value
 }
 
 fn object(properties: Value, required: &[&str]) -> Map<String, Value> {
     json!({"type":"object","properties":properties,"required":required})
+        .as_object()
+        .unwrap()
+        .clone()
+}
+
+fn diagnostics_schema() -> Value {
+    let counters = object(
+        json!({
+            "cost_usd":{"type":"number","minimum":0},
+            "requests":{"type":"integer","minimum":0},
+            "input_tokens":{"type":"integer","minimum":0},
+            "output_tokens":{"type":"integer","minimum":0}
+        }),
+        &["cost_usd", "requests", "input_tokens", "output_tokens"],
+    );
+    let mut usage = counters.clone();
+    usage["properties"].as_object_mut().unwrap().insert(
+        "by_model".into(),
+        json!({"type":"object","additionalProperties":counters}),
+    );
+    usage["required"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("by_model"));
+    json!({"type":"object","required":["last_attempt"],"properties":{
+        "last_attempt":{"type":"object","required":["operation","status","error","usage"],"properties":{
+            "operation":{"type":"string","enum":["convert"]},
+            "status":{"type":"string","enum":["done","error"]},
+            "error":{"type":["string","null"]},"usage":usage
+        }}
+    }})
+}
+
+fn with_error_schema(success: Map<String, Value>) -> Map<String, Value> {
+    let failure = object(
+        json!({
+            "error":{"type":"string"},"diagnostics":diagnostics_schema()
+        }),
+        &["error", "diagnostics"],
+    );
+    // Tool failures stay application results. Their structured diagnostic value
+    // does not have the mandatory fields of a successful conversion or job.
+    json!({"type":"object","anyOf":[success,failure]})
         .as_object()
         .unwrap()
         .clone()
@@ -266,7 +333,8 @@ pub(super) fn definitions() -> Vec<Tool> {
             "markdown_file":{"anyOf":[{"type":"string"},{"type":"null"}]},"output_dir":{"type":"string"},
             "assets":{"type":"array","items":{"type":"string"}},"screenshots":{"type":"array","items":{"type":"string"}},
             "cost_usd":{"type":"number"},"skip_reason":{"anyOf":[{"type":"string"},{"type":"null"}]},
-            "duration_s":{"type":"number"},"warnings":{"type":"array","items":{"type":"string"}}
+            "duration_s":{"type":"number"},"warnings":{"type":"array","items":{"type":"string"}},
+            "diagnostics":diagnostics_schema()
         }),
         &[
             "source",
@@ -287,7 +355,7 @@ pub(super) fn definitions() -> Vec<Tool> {
         &["job_id", "status", "total", "output_dir"],
     );
     let status_output = object(
-        json!({"job_id":{"type":"string"},"status":{"type":"string"},"total":{"type":"integer"},"done":{"type":"integer"},"failed":{"type":"integer"},"output_dir":{"type":"string"},"results":{"type":"array","items":{"type":"object"}}}),
+        json!({"job_id":{"type":"string"},"status":{"type":"string"},"total":{"type":"integer"},"done":{"type":"integer"},"failed":{"type":"integer"},"output_dir":{"type":"string"},"results":{"type":"array","items":{"type":"object","properties":{"diagnostics":diagnostics_schema()}}}}),
         &[
             "job_id",
             "status",
@@ -351,14 +419,16 @@ pub(super) fn definitions() -> Vec<Tool> {
                 description,
                 object(Value::Object(properties), &[source]),
             )
-            .with_raw_output_schema(Arc::new(if source == "sources" {
-                batch_output.clone()
-            } else {
-                conversion_output.clone()
-            })),
+            .with_raw_output_schema(Arc::new(with_error_schema(
+                if source == "sources" {
+                    batch_output.clone()
+                } else {
+                    conversion_output.clone()
+                },
+            ))),
         );
     }
     tools.push(Tool::new("job_status", "Return batch progress and finished results in input order. done counts successes and failures; failed counts errors. Unknown and forgotten jobs have distinct errors. Files remain on disk after job eviction or restart.", object(json!({"job_id":{"type":"string"}}), &["job_id"]))
-        .with_raw_output_schema(Arc::new(status_output)));
+        .with_raw_output_schema(Arc::new(with_error_schema(status_output))));
     tools
 }

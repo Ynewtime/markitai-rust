@@ -135,6 +135,30 @@ names, local paths, model names and errors. Hash names provide no confidentialit
 Tests use temporary input/output and `MARKITAI_HOME`; reports live in the output
 tree independently of the global state directory.
 
+## Latest attempt diagnostics
+
+A report with observed model work adds an optional `terminal_diagnostics` object.
+Its `documents` and `urls` maps use the existing report identity: relative file
+keys and raw URL plus any supplied name. Each value is the shared
+`diagnostics.last_attempt` shape: `operation`, `status`, string/null `error`, and
+`usage` with request/token/cost totals and per-model records. File keys are sorted;
+URL entries retain report encounter order. Empty maps remain present inside the
+section; the whole section is omitted when there are no observations.
+
+This section is independent of the existing `llm_usage` aggregate and item
+schemas. Known failed calls appear here without changing success totals, single
+item report eligibility, URL-list sparse entries or output ownership. A failed
+single conversion still produces no saved report; stdout and optional history
+can carry its observation. Report publication failures do not reclassify finished
+conversions or charge their recorded work again.
+
+Native resumed reports retain saved observations for unprocessed entries and
+replace them with an observed new attempt, including clearing an old value when
+that attempt has no known usage. They never add old failed work to the new
+attempt. A known request with zero tokens is retained; absent observations remain
+unknown. This is neither lifetime spend nor a crash-safe billing ledger. Existing
+legacy reports and minimal states have no backfilled measurements.
+
 ## Validation scope and remaining work
 
 The report implementation passed the source-level `scripts/check.sh` gate:

@@ -172,6 +172,14 @@ pub(super) fn rehydrate(
             if let (Some(target), Some(source)) = (object.as_object_mut(), raw.as_object()) {
                 target.extend(source.clone());
             }
+            if let Some(diagnostics) = object.get("diagnostics")
+                && !diagnostics.is_null()
+                && crate::diagnostics::AttemptDiagnostics::from_value(diagnostics).is_err()
+            {
+                // An invalid optional observation does not erase the retained output row.
+                object.as_object_mut().unwrap().remove("diagnostics");
+                eprintln!("Serve: ignored invalid stored attempt diagnostics");
+            }
             if let Ok(mut item) = serde_json::from_value::<Item>(object) {
                 // Older history writers saved the actual enhanced name in both
                 // fields. Adapt the public base name without renaming any file.

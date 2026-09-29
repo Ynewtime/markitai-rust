@@ -89,6 +89,22 @@ URL 的用户信息、全部 query/fragment、可疑路径段和已知配置/环
 日志初始化失败使转换报错；运行中写入或最终 flush 失败会在 stderr 报错并退出非零，
 保留已完成的文档和已发出的唯一 stdout JSON，不追加第二个 envelope。
 
+## 最近一次转换的用量诊断
+
+`--json` 中有实际模型用量的条目增加可选的
+`diagnostics.last_attempt`，包含 `operation:"convert"`、`status:"done"|"error"`、
+原有字符串或 null 的 `error`，以及 `usage` 的 requests/input_tokens/output_tokens/
+cost_usd/by_model。失败条目的既有 `llm_usage` 和 `cost_usd` 同时投影这次已观察用量；
+原来的错误字符串、状态和退出码不变。一次请求已记录但 token 为零仍保留诊断；
+没有可读取用量的响应、转换前校验失败和未派发任务则省略新字段，不能据此认定免费。
+当前零美元成本也不代表已获得供应商定价。
+
+批量 `--resume` 仍是 convert 操作。新尝试清除旧诊断，终止后保存自己的观察值；
+重试不把旧失败用量再加一次。已完成且未重跑的记录保留其保存诊断，但 stdout
+仍只列本次实际处理的条目。报告使用独立的 [terminal_diagnostics](reports.md#latest-attempt-diagnostics)
+区域，历史元数据保留同一结构。它们不是累计账本：进程强制退出、不可解析的响应
+或状态尚未持久化都会留下观察缺口。
+
 ## 开发验证
 
 ```sh

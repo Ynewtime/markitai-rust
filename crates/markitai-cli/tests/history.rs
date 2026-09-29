@@ -460,27 +460,51 @@ fn read_job(path: &Path) -> Value {
         Some(copied.values().map(|v| v.len() as u64).sum())
     );
     for (index, item) in meta["items"].as_array().unwrap().iter().enumerate() {
-        keys(
-            item,
-            &[
-                "item_id",
-                "name",
-                "kind",
-                "status",
-                "error",
-                "output",
-                "output_name",
-                "duration_ms",
-                "finished_at",
-                "cost_usd",
-                "llm_enhanced",
-                "operation",
-                "skipped",
-                "skip_reason",
-                "retryable",
-                "warnings",
-            ],
-        );
+        let mut item_keys = vec![
+            "item_id",
+            "name",
+            "kind",
+            "status",
+            "error",
+            "output",
+            "output_name",
+            "duration_ms",
+            "finished_at",
+            "cost_usd",
+            "llm_enhanced",
+            "operation",
+            "skipped",
+            "skip_reason",
+            "retryable",
+            "warnings",
+        ];
+        if let Some(diagnostics) = item.get("diagnostics") {
+            item_keys.push("diagnostics");
+            keys(diagnostics, &["last_attempt"]);
+            let attempt = &diagnostics["last_attempt"];
+            keys(attempt, &["operation", "status", "error", "usage"]);
+            assert_eq!(attempt["operation"], "convert");
+            assert_eq!(attempt["status"], item["status"]);
+            assert_eq!(attempt["error"], item["error"]);
+            let usage = &attempt["usage"];
+            keys(
+                usage,
+                &[
+                    "requests",
+                    "input_tokens",
+                    "output_tokens",
+                    "cost_usd",
+                    "by_model",
+                ],
+            );
+            assert!(
+                usage["requests"].as_u64().unwrap() > 0
+                    || usage["input_tokens"].as_u64().unwrap() > 0
+                    || usage["output_tokens"].as_u64().unwrap() > 0
+                    || !usage["by_model"].as_object().unwrap().is_empty()
+            );
+        }
+        keys(item, &item_keys);
         assert_eq!(item["item_id"], format!("i{}", index + 1));
         assert!(item["name"].is_string());
         assert!(matches!(item["kind"].as_str(), Some("file" | "url")));

@@ -208,13 +208,19 @@ fn owner(scope: &Scope, generation: &str, task: &Task) -> Owner {
     }
 }
 fn failure(task: &Task, index: usize, error: String) -> RunItem {
-    recorded(task, index, Instant::now(), timestamp(), &Err(error))
+    recorded(
+        task,
+        index,
+        Instant::now(),
+        timestamp(),
+        &Err(markitai_core::Error::Conversion(error).into()),
+    )
 }
 fn terminal(store: &mut StateStore, task: &Task, record: &RunItem) -> Result<(), run_state::Error> {
     store.record(
         item_key(task),
         json!({"status":if record.status==ItemStatus::Failed {"failed"} else {"completed"},
-        "output":record.output,"error":record.error}),
+        "output":record.output,"error":record.error,"diagnostics":record.diagnostics}),
     )?;
     Ok(())
 }
@@ -616,7 +622,7 @@ pub(super) fn run(
                     ));
                     if let Err(error) = store.record(
                         item_key(&tasks[index]),
-                        json!({"status":"in_progress","target":target,"output":null,"error":null}),
+                        json!({"status":"in_progress","target":target,"output":null,"error":null,"diagnostics":null}),
                     ) {
                         fatal = Some(error.to_string());
                         break;
@@ -668,7 +674,7 @@ pub(super) fn run(
                 for work in admitted {
                     if fatal.is_some() || crate::signals::interrupted().is_some() {
                         if let Err(error)=store.record(item_key(&work.task),json!({"status":work.previous.status,
-                            "target":work.previous.target,"output":work.previous.output,"error":work.previous.error})) {
+                            "target":work.previous.target,"output":work.previous.output,"error":work.previous.error,"diagnostics":work.previous.observations.get("diagnostics")})) {
                             fatal.get_or_insert_with(||error.to_string());
                         }
                         if is_url(&work.task.source) {

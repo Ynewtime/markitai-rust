@@ -1,6 +1,9 @@
 //! Stdio transport and lifetime ownership for the four conversion tools.
+mod failure;
 mod jobs;
 mod tools;
+
+use failure::Failure;
 
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -47,7 +50,7 @@ impl State {
         directory: PathBuf,
         options: tools::Options,
         runtime: Option<Arc<markitai_core::LlmRuntime>>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Failure> {
         let (send, receive) = tokio::sync::oneshot::channel();
         {
             let mut work = self.work.lock().unwrap();
@@ -125,9 +128,18 @@ impl ServerHandler for Handler {
                 result.content = vec![ContentBlock::text(text)];
                 result
             }
-            Err(message) => CallToolResult::error(vec![ContentBlock::text(format!(
-                "Error executing tool {name}: {message}"
-            ))]),
+            Err(failure) => {
+                let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
+                    "Error executing tool {name}: {}",
+                    failure.message
+                ))]);
+                if let Some(diagnostics) = failure.diagnostics {
+                    result.structured_content = Some(serde_json::json!({
+                        "error": failure.message, "diagnostics": diagnostics
+                    }));
+                }
+                result
+            }
         };
         Ok(result.into())
     }

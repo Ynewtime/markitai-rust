@@ -44,6 +44,7 @@ Each single-source result contains:
 | `skip_reason` | Core skip reason, or null |
 | `duration_s` | Core duration rounded to two decimal places |
 | `warnings` | Nonfatal conversion notices |
+| `diagnostics` | Optional recorded work for the terminating conversion attempt |
 
 Bodies longer than 40,000 Unicode characters are reduced to a 2,000-character
 preview. UTF-8 byte counts do not control truncation. The full output remains on
@@ -62,6 +63,28 @@ validation, fetch or conversion diagnostics. Missing models add guidance about
 without enabled content extraction is an error, matching the public API.
 Unsupported OCR, screenshot or other core features remain explicit errors;
 exposing a tool does not implement every conversion backend.
+
+When the core records model work, successful results additionally contain
+`diagnostics.last_attempt`, with `operation: "convert"`, `status: "done"`,
+`error: null` and `usage`. Usage contains `requests`, `input_tokens`,
+`output_tokens`, `cost_usd` and `by_model`; it uses the same accounting as the
+core detailed conversion API. A recorded request with zero tokens is still an
+observation. Results without an observation retain the original eleven fields.
+
+Failed tools retain their existing `isError: true` and text beginning
+`Error executing tool <name>: `. If recorded work exists, `structuredContent`
+also contains `{error, diagnostics}`, where `error` is the original message and
+the attempt has `status: "error"` with the same error string. These remain tool
+errors, not JSON-RPC protocol errors. Output schemas permit both success and
+structured error values. Input validation, missing models, unstarted work and
+panic/worker failures do not invent usage. The missing-model configuration hint
+is unchanged.
+
+These are per-attempt observations, not a lifetime billing ledger. A failed
+conversion can have consumed tokens; missing diagnostics mean unknown or no
+observation, not proof of a free call. Provider pricing is not implemented, so
+zero `cost_usd` does not establish zero cost. Raw credentials and provider error
+bodies are not added to diagnostics.
 
 ## Background batches
 
@@ -86,6 +109,12 @@ index. A completed job may contain failures, including failure of every item.
 - Success items contain `source`, `status: "ok"`, `markdown_file`, `cost_usd`
   and `warnings`.
 - Failure items contain `source`, `status: "error"` and `error`.
+
+Either slot adds the same optional `diagnostics.last_attempt` when that
+conversion recorded work. A success reused through the shared runtime does not
+inherit the HTTP owner's usage; only the caller that actually sent the request
+is charged. A failed owner and a waiter that subsequently sends its own request
+keep separate observations. No new aggregate is added to `job_status`.
 
 This task table is independent of REST history. Jobs exist only in this server
 process, with 100 finished jobs retained and up to 500 forgotten IDs remembered
@@ -115,14 +144,23 @@ cancel-job tool. Cancelling an individual protocol request cannot forcibly stop
 Rust extraction or an HTTP request already executing in a blocking worker;
 written output may still appear. Process termination is not an exactly-once
 publication guarantee, and MCP does not enable CLI resume/state reports.
+Draining protects already admitted work; it cannot deliver a single-call result
+to a disconnected client or persist the in-memory job table. Hard termination
+and unreadable provider responses remain gaps in complete accounting.
 
 ## Verification scope
 
-Authored process tests launch the real CLI with isolated HOME, MARKITAI_HOME,
-configuration, temporary output and loopback fixtures. They exercise both
+Authored process tests launch the real CLI with private MARKITAI_HOME,
+configuration, working directory and temporary output while preserving HOME.
+The child environment excludes provider credentials; model fixtures use only
+loopback endpoints. They exercise both
 protocol eras, schemas, errors followed by continued requests, single-source
 outputs, Unicode previews, configuration reload, duplicate batch names, failure
-slots and polling while a slower URL is still in flight. Module tests cover
+slots and polling while a slower URL is still in flight. Additional terminal
+usage cases cover both protocol eras, paid HTTP failures including known zero
+tokens, early errors without observations, ordered mixed-result batches,
+shared-request owner accounting, failed-owner recovery and EOF draining.
+Module tests cover
 finished-job retention and forgotten-ID bounds. Executed gate results belong in
 the project control record; this document does not claim a completed reference
 wire differential or live-provider validation.

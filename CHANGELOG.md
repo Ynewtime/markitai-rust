@@ -4,6 +4,8 @@
 
 ### Added
 
+- Optional last-attempt diagnostics across CLI JSON, reports, recovery/history, REST events/retries and MCP, preserving observed failure usage without changing existing success totals.
+
 - Shared-runtime coalescing of identical active typed document and first visual-batch requests, with separate owner accounting.
 - Additive detailed Rust failures and optional terminal usage in C JSON and Python/Node/Go errors.
 

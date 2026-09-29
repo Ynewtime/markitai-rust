@@ -1,4 +1,4 @@
-use crate::report_store;
+use crate::{diagnostics::AttemptDiagnostics, report_store};
 use markitai_core::ConversionUsage;
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Map, Value, json};
@@ -48,6 +48,7 @@ pub(crate) struct RunItem {
     pub(crate) images: usize,
     pub(crate) screenshots: usize,
     pub(crate) usage: ConversionUsage,
+    pub(crate) diagnostics: Option<AttemptDiagnostics>,
     pub(crate) llm_cache_hit: bool,
     pub(crate) fetch_cache_hit: bool,
     pub(crate) fetch_strategy: Option<String>,
@@ -649,6 +650,35 @@ fn summary(mode: RunMode, items: &[&RunItem], finished: &RunFinished) -> Ordered
     object(fields)
 }
 
+// These observations describe each latest attempt. They never enter the
+// reference-shaped usage totals or acquire authority over an output path.
+fn terminal_diagnostics<'a>(
+    entries: impl IntoIterator<Item = (ItemKind, &'a str, &'a AttemptDiagnostics)>,
+) -> Result<Option<Ordered>, String> {
+    let mut documents = Vec::new();
+    let mut urls = Vec::new();
+    for (kind, key, diagnostics) in entries {
+        diagnostics.validate()?;
+        let target = if kind == ItemKind::File {
+            &mut documents
+        } else {
+            &mut urls
+        };
+        target.push((
+            key.to_owned(),
+            value(serde_json::to_value(diagnostics).map_err(|e| e.to_string())?),
+        ));
+    }
+    if documents.is_empty() && urls.is_empty() {
+        return Ok(None);
+    }
+    documents.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(Some(object([
+        ("documents", Ordered::Object(documents)),
+        ("urls", Ordered::Object(urls)),
+    ])))
+}
+
 pub(crate) fn render(
     plan: &ReportPlan,
     items: &[RunItem],
@@ -728,6 +758,13 @@ pub(crate) fn render(
     }
     if mode != RunMode::SingleFile {
         fields.push(("url_sources", url_groups(&items, mode)));
+    }
+    if let Some(diagnostics) = terminal_diagnostics(items.iter().filter_map(|item| {
+        item.diagnostics
+            .as_ref()
+            .map(|diagnostics| (item.kind, item.report_key.as_str(), diagnostics))
+    }))? {
+        fields.push(("terminal_diagnostics", diagnostics));
     }
     serde_json::to_vec_pretty(&object(fields)).map_err(|e| e.to_string())
 }
@@ -1203,6 +1240,29 @@ pub(crate) fn render_resumed(
         })
         .collect::<Result<Vec<_>, String>>()?;
     fields.push(("url_sources", Ordered::Object(groups)));
+    let recovered = views
+        .iter()
+        .map(|view| match view.entry {
+            ResumedEntry::Observed(_) => Ok(None),
+            ResumedEntry::Recovered(entry) => entry
+                .observations
+                .get("diagnostics")
+                .filter(|value| !value.is_null())
+                .map(AttemptDiagnostics::from_value)
+                .transpose(),
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if let Some(diagnostics) = terminal_diagnostics(views.iter().zip(&recovered).filter_map(
+        |(view, recovered)| {
+            let diagnostics = match view.entry {
+                ResumedEntry::Observed(item) => item.diagnostics.as_ref(),
+                ResumedEntry::Recovered(_) => recovered.as_ref(),
+            }?;
+            Some((view.kind, view.key, diagnostics))
+        },
+    ))? {
+        fields.push(("terminal_diagnostics", diagnostics));
+    }
     serde_json::to_vec_pretty(&object(fields)).map_err(|error| error.to_string())
 }
 
@@ -1231,6 +1291,7 @@ mod tests {
             images: 2,
             screenshots: 0,
             usage: ConversionUsage::default(),
+            diagnostics: None,
             llm_cache_hit: false,
             fetch_cache_hit: false,
             fetch_strategy: Some("static".into()),

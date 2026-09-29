@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "mcp/usage.rs"]
+mod usage;
+
 struct Client {
     child: Child,
     input: Option<ChildStdin>,
@@ -32,9 +35,9 @@ impl Client {
         std::fs::create_dir(directory.path().join("home")).unwrap();
         std::fs::create_dir(directory.path().join("tmp")).unwrap();
         std::fs::write(&config, Self::defaults().to_string()).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_markitai"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_markitai"));
+        command
             .env_clear()
-            .env("HOME", directory.path())
             .env("MARKITAI_HOME", directory.path().join("home"))
             .env("TMPDIR", directory.path().join("tmp"))
             .env("TMP", directory.path().join("tmp"))
@@ -46,9 +49,13 @@ impl Client {
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        for name in ["HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "PATH"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        let mut child = command.spawn().unwrap();
         let input = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -457,14 +464,26 @@ fn batch_files_isolate_duplicate_names_and_keep_error_slots() {
 #[test]
 fn batch_expands_home_paths_but_retains_the_callers_source_label() {
     let mut client = Client::start(false);
-    client.file("home-source.md", "# Isolated home document\n");
-    let ack = client.success(
-        "batch_convert",
-        json!({"sources":["~/home-source.md"],"concurrency":1}),
-    );
+    let source = client.file("home-source.md", "# Isolated home document\n");
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    // A relative spelling from the real home reaches only our private fixture.
+    // No test input or state is written into the actual user home.
+    let Some(common) = home.ancestors().find(|parent| source.starts_with(parent)) else {
+        return; // Different Windows volumes cannot have a home-relative spelling.
+    };
+    let mut relative = PathBuf::from("~");
+    for _ in home.strip_prefix(common).unwrap().components() {
+        relative.push("..");
+    }
+    relative.push(source.strip_prefix(common).unwrap());
+    let label = relative.to_string_lossy().into_owned();
+    let ack = client.success("batch_convert", json!({"sources":[label],"concurrency":1}));
     let status = client.completed(ack["job_id"].as_str().unwrap());
     assert_eq!(status["failed"], 0, "{status}");
-    assert_eq!(status["results"][0]["source"], "~/home-source.md");
+    assert_eq!(status["results"][0]["source"], label);
     let path = status["results"][0]["markdown_file"].as_str().unwrap();
     assert!(
         std::fs::read_to_string(path)

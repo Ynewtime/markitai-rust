@@ -90,6 +90,50 @@ plain retry removes a stale enhanced variant. Old unreferenced extracted assets
 may remain in the job archive until item/job cleanup; they are not fabricated into
 the new result's artifact list.
 
+### Recorded attempt usage
+
+An item with recorded model work additionally exposes `diagnostics.last_attempt`:
+
+```json
+{
+  "operation": "retry",
+  "status": "error",
+  "error": "the existing conversion or publication error",
+  "usage": {
+    "cost_usd": 0.0,
+    "requests": 1,
+    "input_tokens": 7,
+    "output_tokens": 5,
+    "by_model": {
+      "example": {"requests": 1, "input_tokens": 7, "output_tokens": 5, "cost_usd": 0.0}
+    }
+  }
+}
+```
+
+`operation` is `convert`, `retry` or `enhance`; `status` is `done` or `error`.
+A successful attempt has a null error. Existing item errors remain strings or
+null. Diagnostics are omitted when no usage was recorded, including an unknown
+provider response; one recorded request with zero tokens still produces them.
+Missing diagnostics do not establish a free call. Provider pricing remains
+unavailable, so zero `cost_usd` is not evidence of zero cost.
+
+A newly queued attempt clears previous diagnostics. After it finishes, only its
+own observation is published; this is not a cumulative retry ledger. If a retry
+restores the previous successful output, its new diagnostics still describe the
+attempt that failed. The retained item's original output, status, cost and timing
+keep their established meaning. Usage recorded by a successful core conversion
+is also retained when the subsequent service asset checks or file publication
+fail. An unknown later failure never resurrects old usage.
+
+The same optional field is included in item SSE events, job snapshots and saved
+metadata. It survives normal restart, including observations imported from CLI
+history. Older metadata without it remains unchanged. Invalid stored diagnostics
+are ignored with a fixed warning while the existing output row remains available;
+reading that history does not rewrite its bytes. An abrupt process termination,
+panic without a returned observation, or failed metadata persistence can still
+leave accounting unavailable. This field does not provide a durable billing ledger.
+
 `DELETE /api/jobs/{job_id}/items/{item_id}` returns 204 for a terminal job. It removes
 that ledger row, its retained upload, Markdown pair and owned assets/screenshots,
 while keeping files claimed by another item. Image metadata rows for assets actually
@@ -196,5 +240,9 @@ inheritance/replacement, enhancement and failure preservation, sibling overlap,
 queued cancellation, shared-asset deletion, and retry metadata failure followed by
 restart. Module tests exercise committed/uncommitted file recovery. Separate synthetic-peer router tests exercise
 remote token and trust decisions without relying on a host network interface.
+[`tests/serve_terminal_usage.rs`](../crates/markitai-cli/tests/serve_terminal_usage.rs)
+contains private loopback cases for paid authentication errors, zero-token recorded
+responses, SSE/GET/restart agreement, a post-core publication obstruction retaining
+old bytes, subsequent unknown usage clearing, and invalid history diagnostics.
 These scoped checks do not establish complete REST/UI compatibility, production
 load limits, remote-provider behavior, or cross-platform acceptance.

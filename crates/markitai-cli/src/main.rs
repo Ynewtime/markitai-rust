@@ -1,4 +1,5 @@
 mod app;
+mod diagnostics;
 mod history;
 mod mcp;
 mod output_claims;

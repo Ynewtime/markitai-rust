@@ -54,7 +54,8 @@ unfinished entries keep their reserved target. URL records retain `source_file`
 and named entries retain the underlying URL. Missing URL provenance and explicit
 null stay distinct when serialized. Detailed legacy measurements are retained
 as optional in-memory observations; missing values are not fabricated as newly
-measured usage or time. New snapshots remain minimal.
+measured usage or time. Legacy encoding remains minimal; native checkpoints may
+add the explicitly observed attempt diagnostics described below.
 
 Merging preserves stored entries and adds discoveries. Legacy bare-URL adoption
 moves one old entry to the first eligible named entry in explicit discovery
@@ -93,6 +94,30 @@ if the process dies after base replacement but before journal removal. The Pytho
 reader can ignore added fields but does not understand the fence; it does not
 inherit the native crash guarantees. No protocol can promise exactly-once paid
 requests across a process kill between a provider response and durable completion.
+
+## Native attempt observations
+
+Native item entries and journal events may carry `diagnostics.last_attempt` with
+`operation`, `status`, string/null `error` and full `usage`. The shared validator
+requires an observed request, token count or model record, unsigned counters,
+finite nonnegative costs and a consistent done/error shape. A present malformed
+native observation fails semantic validation before an entry is changed; ordinary
+corrupt-state and journal-prefix handling still apply. Error messages do not echo
+the rejected object. Missing or null means no observation. Untagged legacy input
+continues to ignore this unknown extension and keeps its existing minimal wire
+shape.
+
+The scheduler writes null when admitting a new attempt. A terminal event replaces
+that value with this attempt's diagnostic or null; it never sums retries. A job
+prepared but not sent restores its complete prior status and observation. Native
+checkpoint encoding and compaction retain valid observations, and report recovery
+uses them independently of the old success-usage aggregates. CLI resume work uses
+operation `convert`, matching the public conversion entry point.
+
+A synced completion preserves this observation under the existing generation
+fence; it does not close the window between a provider response and that sync.
+Unstarted work, hard kills and unparseable provider responses cannot supply known
+usage merely because a task or output path exists.
 
 ## Limits and failures
 

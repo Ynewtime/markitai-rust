@@ -395,6 +395,7 @@ fn decode_entry(
     key: &ItemKey,
     scope: &Scope,
     allow_symlinks: bool,
+    native: bool,
 ) -> Result<Entry> {
     let data = object(value, "item must be an object")?;
     let mut entry = Entry {
@@ -433,6 +434,13 @@ fn decode_entry(
         if let Some(value) = data.get(name) {
             entry.observations.insert(name.into(), value.clone());
         }
+    }
+    if native && let Some(diagnostics) = attempt_diagnostics(data.get("diagnostics"))? {
+        entry.observations.insert(
+            "diagnostics".into(),
+            serde_json::to_value(diagnostics)
+                .map_err(|_| invalid("invalid native attempt diagnostics"))?,
+        );
     }
     validate_entry(key, &mut entry, scope, allow_symlinks)?;
     Ok(entry)
@@ -497,16 +505,42 @@ pub(crate) fn decode(
     };
     for (key, value) in raw.documents {
         let key = file_key(&key, scope, allow_symlinks)?;
-        let entry = decode_entry(&value, &ItemKey::File(key.clone()), scope, allow_symlinks)?;
+        let entry = decode_entry(
+            &value,
+            &ItemKey::File(key.clone()),
+            scope,
+            allow_symlinks,
+            snapshot.checkpoint.is_some(),
+        )?;
         if snapshot.documents.insert(key, entry).is_some() {
             return Err(invalid("document keys normalize to the same identity"));
         }
     }
     for (key, value) in raw.urls {
-        let entry = decode_entry(&value, &ItemKey::Url(key.clone()), scope, allow_symlinks)?;
+        let entry = decode_entry(
+            &value,
+            &ItemKey::Url(key.clone()),
+            scope,
+            allow_symlinks,
+            snapshot.checkpoint.is_some(),
+        )?;
         snapshot.urls.insert(key, entry);
     }
     Ok(snapshot)
+}
+
+// This is a native extension; legacy minimal encodings and replay keep their
+// reference behavior. Null explicitly clears an observation for a new attempt.
+fn attempt_diagnostics(
+    value: Option<&Value>,
+) -> Result<Option<crate::diagnostics::AttemptDiagnostics>> {
+    value
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            crate::diagnostics::AttemptDiagnostics::from_value(value)
+                .map_err(|_| invalid("invalid native attempt diagnostics"))
+        })
+        .transpose()
 }
 
 #[derive(Serialize)]
@@ -522,6 +556,8 @@ struct WireEntry<'a> {
     target: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<crate::diagnostics::AttemptDiagnostics>,
 }
 
 fn wire_entry<'a>(
@@ -529,6 +565,7 @@ fn wire_entry<'a>(
     entry: &'a Entry,
     scope: &Scope,
     allow_symlinks: bool,
+    native: bool,
 ) -> Result<WireEntry<'a>> {
     let parent = entry_parent(key, entry, scope, allow_symlinks)?;
     let output = entry
@@ -559,7 +596,13 @@ fn wire_entry<'a>(
     } else {
         None
     };
+    let diagnostics = if native {
+        attempt_diagnostics(entry.observations.get("diagnostics"))?
+    } else {
+        None
+    };
     Ok(WireEntry {
+        diagnostics,
         status: entry.status,
         source_file: is_url.then_some(entry.source_file.as_deref()),
         url,
@@ -664,7 +707,13 @@ pub(crate) fn encode(
         if documents
             .insert(
                 normalized,
-                wire_entry(&ItemKey::File(key.clone()), entry, scope, allow_symlinks)?,
+                wire_entry(
+                    &ItemKey::File(key.clone()),
+                    entry,
+                    scope,
+                    allow_symlinks,
+                    snapshot.checkpoint.is_some(),
+                )?,
             )
             .is_some()
         {
@@ -675,7 +724,13 @@ pub(crate) fn encode(
     for (key, entry) in &snapshot.urls {
         urls.insert(
             key,
-            wire_entry(&ItemKey::Url(key.clone()), entry, scope, allow_symlinks)?,
+            wire_entry(
+                &ItemKey::Url(key.clone()),
+                entry,
+                scope,
+                allow_symlinks,
+                snapshot.checkpoint.is_some(),
+            )?,
         );
     }
     #[derive(Serialize)]
@@ -823,6 +878,20 @@ fn updated_entry(
     }
     if data.contains_key("error") {
         entry.error = optional_text(data.get("error"), "error")?;
+    }
+    if snapshot.checkpoint.is_some() && data.contains_key("diagnostics") {
+        match attempt_diagnostics(data.get("diagnostics"))? {
+            Some(diagnostics) => {
+                entry.observations.insert(
+                    "diagnostics".into(),
+                    serde_json::to_value(diagnostics)
+                        .map_err(|_| invalid("invalid native attempt diagnostics"))?,
+                );
+            }
+            None => {
+                entry.observations.remove("diagnostics");
+            }
+        }
     }
     // Reference replay updates only status/output/error/target. Validate explicit
     // immutable provenance without adopting it from an event.
@@ -1125,6 +1194,145 @@ mod tests {
             applied_sequence: sequence,
             scope: scope.clone(),
         });
+    }
+
+    fn paid_diagnostics(status: &str, requests: u64) -> Value {
+        json!({"last_attempt":{"operation":"convert","status":status,
+            "error":if status=="error" { Some("authored error") } else { None },
+            "usage":{"requests":requests,"input_tokens":0,"output_tokens":0,"cost_usd":0.0,
+                "by_model":{"fixture":{"requests":requests,"input_tokens":0,"output_tokens":0,"cost_usd":0.0}}}}})
+    }
+
+    #[test]
+    fn native_diagnostics_round_trip_replace_and_clear_without_double_accounting() {
+        let (_root, scope) = fixture(Mode::Directory);
+        let mut snapshot = document_snapshot(&scope);
+        tag(&mut snapshot, &scope, 0);
+        let failed = paid_diagnostics("error", 3);
+        apply_event(
+            &mut snapshot,
+            &event(
+                "note.txt",
+                json!({"status":"failed","error":"authored error","diagnostics":failed}),
+                Some(1),
+            ),
+            &scope,
+            false,
+        )
+        .unwrap();
+        let encoded = encode(&snapshot, &scope, false, Limits::default()).unwrap();
+        let mut recovered = decode(&encoded, &scope, false, Limits::default()).unwrap();
+        assert_eq!(
+            recovered.documents["note.txt"].observations["diagnostics"],
+            failed
+        );
+        apply_event(
+            &mut recovered,
+            &event(
+                "note.txt",
+                json!({"status":"in_progress","diagnostics":null}),
+                Some(2),
+            ),
+            &scope,
+            false,
+        )
+        .unwrap();
+        assert!(
+            !recovered.documents["note.txt"]
+                .observations
+                .contains_key("diagnostics")
+        );
+        // A prepared job that never dispatches may restore its saved observation.
+        apply_event(
+            &mut recovered,
+            &event(
+                "note.txt",
+                json!({"status":"failed","diagnostics":failed}),
+                Some(3),
+            ),
+            &scope,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered.documents["note.txt"].observations["diagnostics"],
+            failed
+        );
+        let done = paid_diagnostics("done", 1);
+        apply_event(&mut recovered, &event("note.txt", json!({"status":"completed","error":null,"output":scope.output.join("note.txt.md"),"diagnostics":done}), Some(4)), &scope, false).unwrap();
+        let compacted = encode(&recovered, &scope, false, Limits::default()).unwrap();
+        let again = decode(&compacted, &scope, false, Limits::default()).unwrap();
+        assert_eq!(
+            again.documents["note.txt"].observations["diagnostics"],
+            done
+        );
+        assert_eq!(again.checkpoint.unwrap().applied_sequence, 4);
+    }
+
+    #[test]
+    fn malformed_native_diagnostics_fail_before_mutation_and_payload_is_not_echoed() {
+        let (_root, scope) = fixture(Mode::Directory);
+        let mut snapshot = document_snapshot(&scope);
+        tag(&mut snapshot, &scope, 0);
+        let before = snapshot.clone();
+        let malformed = json!({"last_attempt":{"operation":"secret-provider-token"}});
+        let error = apply_event(
+            &mut snapshot,
+            &event(
+                "note.txt",
+                json!({"status":"failed","diagnostics":malformed}),
+                Some(1),
+            ),
+            &scope,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(snapshot, before);
+        assert!(!error.to_string().contains("secret-provider"));
+        let mut value: Value =
+            serde_json::from_slice(&encode(&snapshot, &scope, false, Limits::default()).unwrap())
+                .unwrap();
+        value["documents"]["note.txt"]["diagnostics"] = malformed;
+        assert!(decode_value(value, &scope).is_err());
+        snapshot
+            .documents
+            .get_mut("note.txt")
+            .unwrap()
+            .observations
+            .insert(
+                "diagnostics".into(),
+                json!({"last_attempt":{"usage":{"requests":-1}}}),
+            );
+        assert!(encode(&snapshot, &scope, false, Limits::default()).is_err());
+    }
+
+    #[test]
+    fn legacy_unknown_diagnostics_keep_the_old_minimal_contract() {
+        let (_root, scope) = fixture(Mode::Directory);
+        let mut snapshot = decode_value(json!({"version":"1.0","documents":{"note.txt":{"status":"failed","error":"old error","diagnostics":"opaque old extension"}}}), &scope).unwrap();
+        assert!(
+            !snapshot.documents["note.txt"]
+                .observations
+                .contains_key("diagnostics")
+        );
+        apply_event(
+            &mut snapshot,
+            &event(
+                "note.txt",
+                json!({"status":"failed","diagnostics":{"unknown":"legacy"}}),
+                None,
+            ),
+            &scope,
+            false,
+        )
+        .unwrap();
+        let value: Value =
+            serde_json::from_slice(&encode(&snapshot, &scope, false, Limits::default()).unwrap())
+                .unwrap();
+        assert_eq!(
+            value["documents"]["note.txt"],
+            json!({"status":"failed","error":"old error"})
+        );
     }
 
     #[test]

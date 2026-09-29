@@ -307,6 +307,8 @@ struct Item<'a> {
     skip_reason: Option<&'a str>,
     retryable: bool,
     warnings: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<&'a crate::diagnostics::AttemptDiagnostics>,
 }
 
 impl<'a> Item<'a> {
@@ -359,6 +361,7 @@ impl<'a> Item<'a> {
             finished_at,
             cost_usd: item.usage.cost_usd,
             operation: "convert",
+            diagnostics: item.diagnostics.as_ref(),
             skipped,
             skip_reason: item.skip_reason.as_deref(),
             retryable: item.kind == ItemKind::Url,
@@ -556,6 +559,7 @@ mod tests {
             images: 0,
             screenshots: 0,
             usage: ConversionUsage::default(),
+            diagnostics: None,
             llm_cache_hit: false,
             fetch_cache_hit: false,
             fetch_strategy: None,

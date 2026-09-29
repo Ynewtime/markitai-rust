@@ -5,6 +5,7 @@ use super::{
     store, transaction,
     types::{ApiError, ApiResult, Item, JobOptions, now},
 };
+use crate::diagnostics::AttemptDiagnostics;
 use axum::{
     Json,
     extract::{Path, Request, State as ExtractState},
@@ -39,6 +40,12 @@ impl Operation {
         match self {
             Self::Retry => "retry",
             Self::Enhance => "enhance",
+        }
+    }
+    fn diagnostic_operation(self) -> crate::diagnostics::Operation {
+        match self {
+            Self::Retry => crate::diagnostics::Operation::Retry,
+            Self::Enhance => crate::diagnostics::Operation::Enhance,
         }
     }
 }
@@ -111,7 +118,7 @@ pub(super) async fn retry(
         }
         data.bases.insert(item_id.clone(),base.clone());
         let job_id=data.id.clone();
-        let item=&mut data.items[index];item.status="queued".into();item.error=None;item.output=None;item.duration_ms=None;item.finished_at=None;item.cost_usd=None;item.llm_enhanced=false;item.operation=body.operation.name().into();item.skipped=false;item.skip_reason=None;item.warnings.clear();
+        let item=&mut data.items[index];item.status="queued".into();item.error=None;item.output=None;item.duration_ms=None;item.finished_at=None;item.cost_usd=None;item.diagnostics=None;item.llm_enhanced=false;item.operation=body.operation.name().into();item.skipped=false;item.skip_reason=None;item.warnings.clear();
         let created=json!({"job_id":job_id,"items":[item.created()]});
         let payload=json!(item);
         data.status="running".into();data.finished_at=None;data.persistence_error=None;
@@ -183,6 +190,7 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
             &work.prior,
             "cancelled (server shutdown)".into(),
             0,
+            None,
         );
         return;
     }
@@ -196,6 +204,7 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let started = Instant::now();
+        let mut attempt_usage = markitai_core::ConversionUsage::default();
         let result = (|| -> ApiResult<()> {
             let stage = transaction::stage(&worker.folder).map_err(ApiError::internal)?;
             let out = stage.path().join("out");
@@ -208,7 +217,7 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
                     .into_owned()
             };
             let explicit = work.explicit.as_deref();
-            let converted = match markitai_core::convert_with_context(
+            let converted = match markitai_core::convert_with_context_detailed(
                 &source,
                 markitai_core::ConvertOptions {
                     output_dir: Some(out.clone()),
@@ -220,14 +229,25 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
                     llm_runtime: Some(&work.runtime),
                 },
             ) {
-                Ok(result) => result,
-                Err(markitai_core::Error::ImageOnly(_)) if work.operation == Operation::Retry => {
+                Ok(result) => {
+                    // Later checks and file publication can fail after the provider completed.
+                    attempt_usage = result.usage.clone();
+                    result
+                }
+                Err(failure)
+                    if matches!(&failure.error, markitai_core::Error::ImageOnly(_))
+                        && work.operation == Operation::Retry =>
+                {
                     let mut data = worker.data.lock().unwrap();
                     let item = &mut data.items[work.index];
                     item.status = "done".into();
                     item.skipped = true;
                     item.skip_reason = Some("image_only".into());
                     item.error = Some("skipped (image_only)".into());
+                    item.diagnostics = AttemptDiagnostics::completed(
+                        work.operation.diagnostic_operation(),
+                        failure.usage,
+                    );
                     item.duration_ms =
                         Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
                     item.finished_at = Some(now());
@@ -240,7 +260,10 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
                     let _ = worker.events.send(("job", data.progress()));
                     return Ok(());
                 }
-                Err(error) => return Err(ApiError::new(500, error.to_string())),
+                Err(failure) => {
+                    attempt_usage = failure.usage;
+                    return Err(ApiError::new(500, failure.error.to_string()));
+                }
             };
             if work.operation == Operation::Enhance
                 && (converted.llm_output_path.is_none() || converted.skip_reason.is_some())
@@ -337,6 +360,10 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
             item.duration_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
             item.finished_at = Some(now());
             item.cost_usd = Some(converted.usage.cost_usd);
+            item.diagnostics = AttemptDiagnostics::completed(
+                work.operation.diagnostic_operation(),
+                converted.usage,
+            );
             item.skipped = converted.skip_reason.is_some();
             item.skip_reason = converted.skip_reason;
             item.error = item.skip_reason.as_ref().map(|v| format!("skipped ({v})"));
@@ -351,12 +378,18 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
             Ok(())
         })();
         if let Err(error) = result {
+            let diagnostics = AttemptDiagnostics::failed(
+                work.operation.diagnostic_operation(),
+                error.detail.clone(),
+                attempt_usage,
+            );
             failed(
                 &worker,
                 work.index,
                 &work.prior,
                 error.detail,
                 started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                diagnostics,
             );
         }
     })
@@ -368,10 +401,18 @@ async fn run(state: Arc<State>, job: Arc<Job>, work: Work) {
             &fallback.1,
             "internal retry worker failure".into(),
             0,
+            None,
         );
     }
 }
-fn failed(job: &Job, index: usize, prior: &Item, error: String, duration: u64) {
+fn failed(
+    job: &Job,
+    index: usize,
+    prior: &Item,
+    error: String,
+    duration: u64,
+    diagnostics: Option<AttemptDiagnostics>,
+) {
     let mut data = job.data.lock().unwrap();
     let recoverable = data.persistence_error.is_none();
     let item = &mut data.items[index];
@@ -383,6 +424,8 @@ fn failed(job: &Job, index: usize, prior: &Item, error: String, duration: u64) {
         item.finished_at = Some(now());
         item.duration_ms = Some(duration);
     }
+    // Output rollback must not resurrect a previous attempt's observation.
+    item.diagnostics = diagnostics;
     job.retry_pending.lock().unwrap().remove(&prior.item_id);
     let _ = job.events.send(("item", json!(item)));
     let _ = job.events.send(("job", data.progress()));

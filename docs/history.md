@@ -55,6 +55,21 @@ RFC3339 timestamps have millisecond precision, with one finish timestamp shared
 by the job and its items. Warnings are deduplicated in encounter order. Only URL
 items are retryable because original input files are not archived.
 
+## Attempt diagnostics
+
+New CLI archives add optional item `diagnostics.last_attempt` only when core
+reports observed model work. It contains operation `convert`, status `done` or
+`error`, the existing string/null error and full request/token/cost/per-model
+usage. A response reporting one request and zero tokens remains observable;
+missing or unreadable usage produces no new field. Existing item `cost_usd`,
+output authority, skip rules and archive eligibility retain their prior meaning.
+
+A resumed CLI archive contains only this invocation's processed items and their
+latest observations. Earlier archives are independent snapshots and are not
+rewritten or summed into the retry. REST reads the same additive shape; older
+items without it remain unchanged. This observation is not a lifetime ledger,
+provider pricing guarantee or proof that hard-killed work was unbilled.
+
 ## Independent files and references
 
 Final documents are flattened into `out/`. Name reservations use full Unicode
@@ -179,7 +194,7 @@ plain retry writes the correct base filename, removes its stale enhanced sibling
 and persists the resolved native identity. Deleting an item removes its correct
 Markdown pair while preserving assets still claimed by siblings.
 
-A failed retry of a previous successful item preserves its public item fields
+A failed retry of a previous successful item preserves its output fields
 and existing result bytes through the service's staged transaction and recovery
 path. The job's latest options and completion timestamp can still be updated by
 normal finalization; explicit retry is not a promise that the whole metadata

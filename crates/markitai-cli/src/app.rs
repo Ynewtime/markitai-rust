@@ -810,7 +810,7 @@ fn convert_task(
     cfg: &Value,
     context: ConvertContext<'_>,
     publication: Option<&dyn markitai_core::output::Publication>,
-) -> Result<ConversionOutput, String> {
+) -> Result<ConversionOutput, markitai_core::ConversionFailure> {
     let mut cfg = cfg.clone();
     if let Some(name) = &task.reserved_stem {
         cfg["output"]["reserved_stem"] = json!(name);
@@ -820,7 +820,7 @@ fn convert_task(
     } else if let Some(name) = &task.filename {
         cfg["output"]["reserved_stem"] = json!(name.strip_suffix(".md").unwrap_or(name));
     }
-    markitai_core::convert_with_publication(
+    markitai_core::convert_with_publication_detailed(
         &task.source,
         ConvertOptions {
             output_dir: task.output.clone(),
@@ -830,14 +830,16 @@ fn convert_task(
         context,
         publication,
     )
-    .or_else(|error| match error {
-        markitai_core::Error::ImageOnly(_) => {
+    .or_else(|failure| {
+        if matches!(failure.error, markitai_core::Error::ImageOnly(_)) {
             let mut result = ConversionOutput::default();
             result.source = task.source.clone();
             result.skip_reason = Some("image_only".into());
+            result.usage = failure.usage;
             Ok(result)
+        } else {
+            Err(failure)
         }
-        other => Err(other.to_string()),
     })
 }
 fn timestamp() -> String {
@@ -850,7 +852,10 @@ fn convert_item(
     cfg: &Value,
     context: ConvertContext<'_>,
     publication: Option<&dyn markitai_core::output::Publication>,
-) -> (RunItem, Result<ConversionOutput, String>) {
+) -> (
+    RunItem,
+    Result<ConversionOutput, markitai_core::ConversionFailure>,
+) {
     let clock = Instant::now();
     let started_at = timestamp();
     let history_enabled = task.output.is_some() && config::enabled(cfg, "/history/record");
@@ -914,7 +919,7 @@ fn recorded(
     index: usize,
     clock: Instant,
     started_at: String,
-    result: &Result<ConversionOutput, String>,
+    result: &Result<ConversionOutput, markitai_core::ConversionFailure>,
 ) -> RunItem {
     let mut record = RunItem {
         index,
@@ -940,6 +945,7 @@ fn recorded(
         images: 0,
         screenshots: 0,
         usage: ConversionUsage::default(),
+        diagnostics: None,
         llm_cache_hit: false,
         fetch_cache_hit: false,
         fetch_strategy: None,
@@ -969,19 +975,39 @@ fn recorded(
                 output_tokens: output.usage.output_tokens,
                 by_model: output.usage.by_model.clone(),
             };
+            record.diagnostics = crate::diagnostics::AttemptDiagnostics::completed(
+                crate::diagnostics::Operation::Convert,
+                output.usage.clone(),
+            );
             record.llm_cache_hit = output.llm_cache_hit();
             record.fetch_cache_hit = output.fetch_cache_hit();
             if record.kind == ItemKind::Url {
                 record.fetch_strategy = output.fetch_strategy().map(str::to_owned);
             }
         }
-        Err(error) => record.error = Some(error.clone()),
+        Err(failure) => {
+            let message = failure.to_string();
+            record.error = Some(message.clone());
+            record.diagnostics = crate::diagnostics::AttemptDiagnostics::failed(
+                crate::diagnostics::Operation::Convert,
+                message,
+                failure.usage.clone(),
+            );
+        }
     }
     record
 }
 
 fn outcome(item: &RunItem) -> Value {
-    json!({
+    let usage = if item.status == ItemStatus::Failed {
+        item.diagnostics
+            .as_ref()
+            .map(|value| &value.last_attempt.usage)
+            .unwrap_or(&item.usage)
+    } else {
+        &item.usage
+    };
+    let mut result = json!({
         "kind": if item.kind == ItemKind::Url { "url" } else { "file" },
         "source": item.display,
         "status": match item.status {
@@ -995,15 +1021,19 @@ fn outcome(item: &RunItem) -> Value {
         "skip_reason": item.skip_reason,
         "images": item.images,
         "screenshots": item.screenshots,
-        "cost_usd": round(item.usage.cost_usd, 1_000_000.0),
+        "cost_usd": round(usage.cost_usd, 1_000_000.0),
         "duration_s": item.conversion_duration_s.map(|duration| round(duration, 1000.0)),
         "cache_hit": item.llm_cache_hit,
         "fetch_cache_hit": item.fetch_cache_hit,
         "llm_cache_hit": item.llm_cache_hit,
         "fetch_strategy": item.fetch_strategy,
         "source_file": item.source_file,
-        "llm_usage": item.usage.by_model,
-    })
+        "llm_usage": usage.by_model,
+    });
+    if let Some(diagnostics) = &item.diagnostics {
+        result["diagnostics"] = json!(diagnostics);
+    }
+    result
 }
 
 fn finish_report(

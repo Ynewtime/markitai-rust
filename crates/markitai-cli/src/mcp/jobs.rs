@@ -133,8 +133,20 @@ pub(super) fn start(
             }
             let Some((index, source, result)) = pending.next().await else { break; };
             let (value, failed) = match result {
-                Ok(result) => (json!({"source":source,"status":"ok","markdown_file":result["markdown_file"],"cost_usd":result["cost_usd"],"warnings":result["warnings"]}), false),
-                Err(error) => (json!({"source":source,"status":"error","error":error}), true),
+                Ok(mut result) => {
+                    let mut value = json!({"source":source,"status":"ok","markdown_file":result["markdown_file"],"cost_usd":result["cost_usd"],"warnings":result["warnings"]});
+                    if let Some(diagnostics) = result.as_object_mut().unwrap().remove("diagnostics") {
+                        value["diagnostics"] = diagnostics;
+                    }
+                    (value, false)
+                },
+                Err(error) => {
+                    let mut value = json!({"source":source,"status":"error","error":error.message});
+                    if let Some(diagnostics) = error.diagnostics {
+                        value["diagnostics"] = json!(diagnostics);
+                    }
+                    (value, true)
+                },
             };
             if let Some(job) = state.jobs.lock().unwrap().jobs.get_mut(&id) {
                 job.slots[index] = Some(value);

@@ -364,7 +364,15 @@ fn enhance_failure_restores_the_previous_pair_and_plain_retry_prunes_stale_varia
     .unwrap();
     assert_eq!(retry(&server, id, "i1", Some(enhance())).status, 202);
     let failed = server.done(id);
-    assert_eq!(failed["items"][0], enhanced["items"][0]);
+    assert!(
+        enhanced["items"][0]["diagnostics"]["last_attempt"]["usage"]["requests"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert!(failed["items"][0].get("diagnostics").is_none());
+    let mut retained = enhanced["items"][0].clone();
+    retained.as_object_mut().unwrap().remove("diagnostics");
+    assert_eq!(failed["items"][0], retained);
     assert_eq!(result(&server, id, "i1"), previous);
     assert_eq!(std::fs::read(out.join("document.txt.md")).unwrap(), base);
     assert_eq!(std::fs::read(out.join("document.txt.llm.md")).unwrap(), llm);

@@ -125,7 +125,7 @@ pub struct Asset {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConversionUsage {
     pub cost_usd: f64,
     pub requests: u64,
